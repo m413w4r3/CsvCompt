@@ -1,0 +1,65 @@
+Téléchargement du 09/10/2026;
+
+
+MADAME   TEST EXEMPLE OU MONSIEUR DEMO FICTIF
+Compte de Dépôt carte n° 0001;
+Solde au 30/04/2026 1 823,45 €
+
+Liste des opérations du compte entre le 01/01/2026 et le 30/04/2026;
+
+Date;Libellé;Débit euros;Crédit euros;
+28/04/2026;"Paiement par carte
+X1101 BIOCOOP FICTIF VILLE
+
+
+";38,10;;
+20/04/2026;"Virement en votre faveur
+X1102 SALAIRE DEMO
+
+
+";;3 000,00;
+14/03/2026;"Prélèvement
+X1103 SERVICE FICTIF
+Réf. 53
+
+
+";73,50;;
+06/02/2026;"Avoir
+X1104 REMBOURSEMENT DEMO
+
+
+";;12,00;
+02/01/2026;"Retrait au distributeur
+X1105 DISTRIBUTEUR DEMO
+
+
+";50,00;;
+
+
+Téléchargement du 09/10/2026;
+
+
+MADAME   TEST EXEMPLE OU MONSIEUR DEMO FICTIF
+Compte espèce PEA;
+Solde au 30/04/2026 587,60 €
+
+Liste des opérations du compte entre le 01/01/2026 et le 30/04/2026;
+
+Date;Libellé;Débit euros;Crédit euros;
+17/04/2026;"Virement en votre faveur
+X1201 VERSEMENT PEA DEMO
+
+
+";;150,00;
+05/03/2026;"Virement émis
+X1202 ACHAT TITRE FICTIF
+
+
+";82,00;;
+22/01/2026;"Avoir
+X1203 DISTRIBUTION DEMO
+
+
+";;4,30;
+
+

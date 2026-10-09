@@ -1,0 +1,730 @@
+{
+  "version": 1,
+  "fixtures": {
+    "ca_2026_simple.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 40,
+          "debit_cents": 602827,
+          "credit_cents": 334745,
+          "min_date": "2026-01-02",
+          "max_date": "2026-02-28",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "8a53953fe13f39822359c6b06a4fd4d4bc4b7f079f0cd187f60c891f2cbc1345",
+          "count": 2
+        }
+      ],
+      "anomalies": []
+    },
+    "ca_2026_utf8_crlf.csv": {
+      "encoding": "utf-8",
+      "line_ending": "CRLF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 40,
+          "debit_cents": 602827,
+          "credit_cents": 334745,
+          "min_date": "2026-01-02",
+          "max_date": "2026-02-28",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "8a53953fe13f39822359c6b06a4fd4d4bc4b7f079f0cd187f60c891f2cbc1345",
+          "count": 2
+        }
+      ],
+      "anomalies": []
+    },
+    "ca_2026_utf8_crlf_bom.csv": {
+      "encoding": "utf-8-bom",
+      "line_ending": "CRLF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 40,
+          "debit_cents": 602827,
+          "credit_cents": 334745,
+          "min_date": "2026-01-02",
+          "max_date": "2026-02-28",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "8a53953fe13f39822359c6b06a4fd4d4bc4b7f079f0cd187f60c891f2cbc1345",
+          "count": 2
+        }
+      ],
+      "anomalies": []
+    },
+    "ca_2026_utf8_crlf_nbsp.csv": {
+      "encoding": "utf-8",
+      "line_ending": "CRLF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 40,
+          "debit_cents": 602827,
+          "credit_cents": 334745,
+          "min_date": "2026-01-02",
+          "max_date": "2026-02-28",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "8a53953fe13f39822359c6b06a4fd4d4bc4b7f079f0cd187f60c891f2cbc1345",
+          "count": 2
+        }
+      ],
+      "anomalies": []
+    },
+    "ca_2026_multi_sections.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 5,
+          "debit_cents": 16160,
+          "credit_cents": 301200,
+          "min_date": "2026-01-02",
+          "max_date": "2026-04-28",
+          "header_balance_cents": 182345
+        },
+        {
+          "account": "Compte espèce PEA",
+          "operation_count": 3,
+          "debit_cents": 8200,
+          "credit_cents": 15430,
+          "min_date": "2026-01-22",
+          "max_date": "2026-04-17",
+          "header_balance_cents": 58760
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": []
+    },
+    "overlap_A.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 21,
+          "debit_cents": 90690,
+          "credit_cents": 0,
+          "min_date": "2026-01-03",
+          "max_date": "2026-03-31",
+          "header_balance_cents": 225430
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "1a8d81c938d9f3cd14b0826a2a2feba48712b0166863c1c5db9193628ff07190",
+          "count": 2
+        },
+        {
+          "fingerprint": "6c13dbfe122f40066a32c5cae6f557eaddd073b636433c639b57320a90d13244",
+          "count": 4
+        }
+      ],
+      "anomalies": []
+    },
+    "overlap_B.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 19,
+          "debit_cents": 75373,
+          "credit_cents": 7600,
+          "min_date": "2026-01-02",
+          "max_date": "2026-05-30",
+          "header_balance_cents": 418250
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "1a8d81c938d9f3cd14b0826a2a2feba48712b0166863c1c5db9193628ff07190",
+          "count": 3
+        },
+        {
+          "fingerprint": "6c13dbfe122f40066a32c5cae6f557eaddd073b636433c639b57320a90d13244",
+          "count": 2
+        }
+      ],
+      "anomalies": []
+    },
+    "overlap_C_reversed_order.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 34,
+          "debit_cents": 146966,
+          "credit_cents": 7600,
+          "min_date": "2026-01-02",
+          "max_date": "2026-05-30",
+          "header_balance_cents": 418250
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "1a8d81c938d9f3cd14b0826a2a2feba48712b0166863c1c5db9193628ff07190",
+          "count": 3
+        },
+        {
+          "fingerprint": "6c13dbfe122f40066a32c5cae6f557eaddd073b636433c639b57320a90d13244",
+          "count": 4
+        }
+      ],
+      "anomalies": []
+    },
+    "scenario_famille_2026.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 150,
+          "debit_cents": 11865596,
+          "credit_cents": 11355519,
+          "min_date": "2026-01-03",
+          "max_date": "2026-09-30",
+          "header_balance_cents": 237845
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [],
+      "golden": {
+        "period_start": "2026-01-03",
+        "period_end": "2026-01-14",
+        "operations": {
+          "S12": {
+            "date": "2026-01-14",
+            "signed_cents": -10000
+          },
+          "S11": {
+            "date": "2026-01-13",
+            "signed_cents": 2000
+          },
+          "S10": {
+            "date": "2026-01-12",
+            "signed_cents": -9826561
+          },
+          "S09": {
+            "date": "2026-01-11",
+            "signed_cents": 5000000
+          },
+          "S08": {
+            "date": "2026-01-10",
+            "signed_cents": -25000
+          },
+          "S07": {
+            "date": "2026-01-09",
+            "signed_cents": 5000
+          },
+          "S06": {
+            "date": "2026-01-08",
+            "signed_cents": -20000
+          },
+          "S05": {
+            "date": "2026-01-07",
+            "signed_cents": -30000
+          },
+          "S04": {
+            "date": "2026-01-06",
+            "signed_cents": -12000
+          },
+          "S03": {
+            "date": "2026-01-05",
+            "signed_cents": -50000
+          },
+          "S02": {
+            "date": "2026-01-04",
+            "signed_cents": 250000
+          },
+          "S01": {
+            "date": "2026-01-03",
+            "signed_cents": 300000
+          }
+        },
+        "totals": {
+          "regular_income_cents": 550000,
+          "net_consumption_cents": 90000,
+          "personal_allocation_cents": 25000,
+          "net_savings_transfer_cents": 15000,
+          "bank_net_flow_cents": -4416561
+        }
+      }
+    },
+    "adversarial/invalid_date.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "INVALID_DATE",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/both_amounts.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "BOTH_AMOUNTS",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/zero_amount.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "ZERO_AMOUNT",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/negative_amount.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "NEGATIVE_AMOUNT",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/non_numeric_amount.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "NON_NUMERIC_AMOUNT",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/bad_field_count_4.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "BAD_FIELD_COUNT",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/bad_field_count_6.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "BAD_FIELD_COUNT",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/unclosed_quote_truncated.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "UNCLOSED_QUOTE",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/missing_header.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 10,
+          "code": "MISSING_HEADER",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/duplicate_header.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "avertissement",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1234,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "DUPLICATE_HEADER",
+          "expected_behavior": "avertissement"
+        }
+      ]
+    },
+    "adversarial/empty.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 0,
+          "code": "EMPTY_FILE",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/preamble_only.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 0,
+          "debit_cents": 0,
+          "credit_cents": 0,
+          "min_date": null,
+          "max_date": null,
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 10,
+          "code": "MISSING_HEADER",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/script_label.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 765,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "SCRIPT_LABEL",
+          "expected_behavior": "accepté"
+        }
+      ]
+    },
+    "adversarial/prompt_injection_label.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 900,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "PROMPT_INJECTION",
+          "expected_behavior": "accepté"
+        }
+      ]
+    },
+    "adversarial/very_long_label_5100.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "avertissement",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1200,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "LONG_LABEL",
+          "expected_behavior": "avertissement"
+        }
+      ]
+    },
+    "adversarial/unicode_exotic_emoji_utf8.csv": {
+      "encoding": "utf-8",
+      "line_ending": "LF",
+      "expected_behavior": "accepté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1300,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "UNICODE_EXOTIC",
+          "expected_behavior": "accepté"
+        }
+      ]
+    },
+    "adversarial/invalid_cp1252_octet.csv": {
+      "encoding": "cp1252-invalid",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1234,
+          "credit_cents": 0,
+          "min_date": "2026-03-03",
+          "max_date": "2026-03-03",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 12,
+          "code": "INVALID_ENCODING",
+          "expected_behavior": "rejeté"
+        }
+      ]
+    },
+    "adversarial/date_out_of_period_2025.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "avertissement",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 0,
+          "credit_cents": 1100,
+          "min_date": "2025-12-31",
+          "max_date": "2025-12-31",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "OUT_OF_PERIOD",
+          "expected_behavior": "avertissement"
+        }
+      ]
+    },
+    "adversarial/interleaved_blank_lines.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "avertissement",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 2,
+          "debit_cents": 1400,
+          "credit_cents": 500,
+          "min_date": "2026-03-01",
+          "max_date": "2026-03-02",
+          "header_balance_cents": 105748
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "INTERLEAVED_BLANK_LINES",
+          "expected_behavior": "avertissement"
+        }
+      ]
+    }
+  }
+}
