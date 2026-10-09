@@ -40,3 +40,4 @@ frontend/playwright-report/
 # --- Divers ---
 .DS_Store
 *.log
+.hypothesis/
