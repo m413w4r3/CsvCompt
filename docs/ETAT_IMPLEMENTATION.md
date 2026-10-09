@@ -8,8 +8,9 @@
 |---|---|
 | Orchestrateur | Claude Sonnet 5.5 (`claude-sonnet-5-5`), effort high |
 | Sous-agents demandés | GPT-6 Luna (high / xhigh) |
-| Sous-agents réellement disponibles | **GPT-6 Luna indisponible** dans cet environnement (l'outil Agent n'expose que `sonnet`, `opus`, `haiku`, `fable`). |
-| Alternative retenue | `opus` (Claude Opus 5.5) pour les tickets `xhigh` / composants financiers ; `sonnet` pour les tickets `high` ; `fable` pour les revues critiques indépendantes des composants sensibles. |
+| Sous-agents réellement utilisés | **GPT-6 Luna disponible** via sous-sessions Nimbalyst (`spawn_session`, modèle `openai-codex:gpt-6-luna`), effort `high` ou `xhigh` selon le backlog. (L'outil `Agent` n'expose pas ce modèle : il n'est utilisé que pour des revues indépendantes ponctuelles, jamais pour implémenter.) |
+| Revues indépendantes | Sous-session GPT-6 Luna distincte de l'auteur ; pour les composants financiers sensibles, revue complémentaire par un modèle d'une autre famille (`claude-code:opus`). |
+| Règle | L'orchestrateur **n'implémente pas** : il rédige les missions, contrôle, intègre et committe. |
 | Spécifications | `.nimbalyst/plan_implementation_comptes_familiaux/` (non déplacées) |
 | Racine du projet | racine du dépôt (le plan prévoit `comptes-familiaux/` : ici le dépôt *est* cette racine) |
 
@@ -34,10 +35,10 @@
 
 | Ticket | Lot | Statut | Sous-agent (modèle) | Commit | Tests exécutés / résultat | Revue indépendante |
 |---|---|---|---|---|---|---|
-| T00 | 0 | actif | — | — | — | — |
-| T01 | 0 | en attente | — | — | — | — |
-| T02 | 0 | en attente | — | — | — | — |
-| T03 | 0 | en attente | — | — | — | — |
+| T00 | 0 | PASS | Sonnet (outil Agent, avant correction de config) | dbf46ca | `check_no_private_data.sh` OK ; `validate_plan.py` OK ; `git check-ignore` confirmé | contrôle orchestrateur (revue indépendante non requise : ARCH/doc) |
+| T01 | 0 | livré, suivi ADR-009 en cours | GPT-6 Luna xhigh (session 66da88ba) | — | `verify_metrics_examples.py` PASS (re-exécuté par l'orchestrateur) ; garde OK | revue G0 à lancer |
+| T02 | 0 | actif | GPT-6 Luna xhigh (session 3e637e8f) | — | — | — |
+| T03 | 0 | actif | GPT-6 Luna xhigh (session 1d3b360f) | — | — | — |
 | T04 | 0 | en attente | — | — | — | — |
 
 (T05..T45 : `en attente`, voir `.nimbalyst/plan_implementation_comptes_familiaux/backlog.yaml`.)
