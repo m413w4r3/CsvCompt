@@ -11,7 +11,7 @@ uv run python -m app
 
 Le serveur lit `APP_HOST` et `APP_PORT` depuis l'environnement ou `.env` (facultatif, local et ignoré par Git). Par défaut, il écoute `127.0.0.1:9513`. L'hôte non loopback est refusé, sauf activation explicite de `ALLOW_NON_LOOPBACK=true`. La clé LLM (`LLM_API_KEY`) est une configuration backend de type secret et ne doit jamais être journalisée ni renvoyée par une API.
 
-`GET /api/v1/health` est utilisable hors ligne. Il ne crée pas la base : le statut reste `not_initialized` jusqu'à sa création par les étapes de persistance à venir.
+`GET /api/v1/health` est utilisable hors ligne et ne crée pas la base. Son contrat stable comprend `status`, `api_version` (`"1"`), `storage_status` et `llm_enabled`. Le stockage vaut `ok` si la base est migrée à la révision courante, `degraded` si elle est absente, non initialisée ou en retard de migration, et `unavailable` si elle est illisible ou corrompue. Des champs additionnels `version`, `time_utc`, `database` et `offline_ready` donnent des détails sans remplacer ces quatre champs.
 
 ## Vérifications
 

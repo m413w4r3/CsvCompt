@@ -89,6 +89,7 @@ button:focus-visible, a:focus-visible, [tabindex='-1']:focus-visible { outline: 
 .health { border-color: rgb(255 255 255 / 12%); background: rgb(255 255 255 / 5%); color: #d3dfd6; }
 .health-dot { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: #a2b1a6; }
 .health--ok .health-dot { background: #82c69b; box-shadow: 0 0 0 3px rgb(130 198 155 / 13%); }
+.health--warning .health-dot { background: #e8b95f; box-shadow: 0 0 0 3px rgb(232 185 95 / 13%); }
 .health--offline .health-dot, .health--error .health-dot { background: #e18a7d; }
 
 .workspace { min-height: 100vh; margin-left: 254px; }

@@ -23,7 +23,7 @@ make verify-contracts
 make privacy
 ```
 
-Les tests backend excluent toujours `opt_in_real_data`. Les tests d'intégration sélectionnent le marqueur `integration`. Le smoke démarre un backend loopback avec une base SQLite vide sous `/tmp`, construit le frontend et fait tourner Playwright Chromium. Il détruit la base temporaire et arrête le serveur à la fin. En CI, une installation de navigateur impossible est une erreur ; en local hors CI, l'échec d'installation hors ligne affiche `SKIPPED`.
+Les tests backend excluent toujours `opt_in_real_data`. Les tests d'intégration sélectionnent le marqueur `integration`. Le smoke migre une base SQLite temporaire sous `/tmp` avant de démarrer le backend prêt, puis démarre un second backend avec une base vide. Playwright vérifie les libellés « Serveur local connecté » et « Base locale à initialiser ou à migrer » à partir des réponses réelles de ces deux backends. Le frontend est construit avant le test. Les deux bases temporaires et les processus serveur sont nettoyés à la fin. En CI, une installation de navigateur impossible est une erreur ; en local hors CI, l'échec d'installation hors ligne affiche `SKIPPED`.
 
 ## Sans GNU make
 

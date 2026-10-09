@@ -18,6 +18,7 @@ import { Settings } from '../../src/pages/Settings/index'
 import { NotFound } from '../../src/pages/NotFound/index'
 
 const healthOk = () => new Response(JSON.stringify({ status: 'ok', api_version: '1', storage_status: 'ok', llm_enabled: false }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+const healthResponse = (status: string, storage_status: string) => new Response(JSON.stringify({ status, api_version: '1', storage_status, llm_enabled: false, version: '1' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
 
 function renderShell(path = '/') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -67,6 +68,18 @@ describe('UI-00 · shell et navigation', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'DATABASE_BUSY', message: 'Base indisponible', details: null } }), { status: 503 })))
     renderShell()
     await waitFor(() => expect(screen.getByText('Serveur local en erreur')).toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Vue d’ensemble' })).toBeInTheDocument()
+  })
+
+  it.each([
+    ['degraded', 'degraded', 'Base locale à initialiser ou à migrer', 'La base locale nécessite une initialisation ou une migration avant utilisation complète.', 'warning'],
+    ['unavailable', 'unavailable', 'Base locale indisponible', 'La base locale ne peut pas être consultée. Le reste de l’interface demeure disponible.', 'error'],
+  ])('explique l’état de la base (%s)', async (status, storage, label, explanation, stateClass) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(healthResponse(status, storage)))
+    renderShell()
+    const health = await screen.findByText(label)
+    expect(health).toHaveAttribute('title', explanation)
+    expect(health).toHaveClass(`health--${stateClass}`)
     expect(screen.getByRole('heading', { name: 'Vue d’ensemble' })).toBeInTheDocument()
   })
 

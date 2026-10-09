@@ -38,6 +38,7 @@ Les filtres partagés suivent `docs/API.md` : période inclusive, comptes, caté
 - Une valeur inconnue ou une absence d’opération reste vide. Pas de chiffre de démonstration, de catégorie déduite, ni de graphique simulé. Les mois partiels ne sont jamais extrapolés.
 - La clé LLM et les secrets restent côté backend. Le frontend n’envoie aucune requête à un service tiers et charge les polices système localement.
 - Les vues utilisent des titres hiérarchiques, des états ARIA, un lien d’évitement, un focus visible et une navigation clavier. Les animations réduisent leur durée avec `prefers-reduced-motion`.
+- Le statut health distingue la connexion, une base à initialiser ou migrer, une base indisponible, une erreur HTTP et le serveur hors ligne. Ces états n’empêchent pas l’utilisation du shell.
 
 ## Direction visuelle
 

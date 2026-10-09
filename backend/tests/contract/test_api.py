@@ -28,17 +28,35 @@ def test_API_01_health_exact_contract_is_offline(
             response = client.get("/api/v1/health")
         monkeypatch.undo()
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "version": "0.1.0",
-        "time_utc": "2026-01-02T00:00:00Z",
-        "database": {"status": "not_initialized"},
-        "llm": {"enabled": False},
-        "offline_ready": True,
-    }
+    body = response.json()
+    assert {"status", "api_version", "storage_status", "llm_enabled"} <= body.keys()
+    assert body["status"] == "ok"
+    assert body["api_version"] == "1"
+    assert body["storage_status"] == "degraded"
+    assert body["llm_enabled"] is False
+    assert body["version"] == "0.1.0"
+    assert body["time_utc"] == "2026-01-02T00:00:00Z"
+    assert body["database"] == {"status": "not_initialized", "revision": None}
+    assert body["llm"] == {"enabled": False}
+    assert body["offline_ready"] is True
+    assert not (tmp_path / "absent.sqlite").exists()
     assert "private-test-key" not in response.text
     assert "private-test-key" not in repr(settings)
     assert "private-test-key" not in caplog.text
+
+
+@pytest.mark.contract
+def test_API_01_corrupt_database_is_unavailable_without_affecting_health(tmp_path) -> None:
+    database = tmp_path / "corrupt.sqlite"
+    database.write_bytes(b"not a sqlite database")
+    app = create_app(Settings(database_url=f"sqlite:///{database}", _env_file=None))
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["storage_status"] == "unavailable"
+    assert response.json()["database"]["status"] == "unavailable"
 
 
 @pytest.mark.contract

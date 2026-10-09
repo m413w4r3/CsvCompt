@@ -4,40 +4,55 @@ repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/comptes-familiaux-e2e.XXXXXX")"
-backend_pid=""
+ready_backend_pid=""
+empty_backend_pid=""
 cleanup() {
-  if [[ -n "$backend_pid" ]]; then
-    kill "$backend_pid" 2>/dev/null || true
-    wait "$backend_pid" 2>/dev/null || true
-  fi
+  for pid in "$ready_backend_pid" "$empty_backend_pid"; do
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT INT TERM
 
-backend_port="$(uv run python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
-db_file="$tmp_dir/smoke.sqlite"
-: > "$db_file"
-APP_HOST=127.0.0.1 APP_PORT="$backend_port" DATABASE_URL="sqlite:///$db_file" DATA_DIR="$tmp_dir" \
-  uv run uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port "$backend_port" >"$tmp_dir/backend.log" 2>&1 &
-backend_pid=$!
+# Migre d'abord une base dédiée au smoke. La base vide du second scénario reste séparée.
+ready_db="$tmp_dir/migrated/smoke.sqlite"
+mkdir -p "$(dirname "$ready_db")" "$tmp_dir/empty"
+DATABASE_URL="sqlite:///$ready_db" DATA_DIR="$tmp_dir/migrated" \
+  uv run python -m app.db.migrate upgrade
 
-BACKEND_URL="http://127.0.0.1:$backend_port/api/v1/health" uv run python - <<'PY'
+empty_db="$tmp_dir/empty/smoke.sqlite"
+: > "$empty_db"
+ready_port="$(uv run python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+empty_port="$(uv run python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+APP_HOST=127.0.0.1 APP_PORT="$ready_port" DATABASE_URL="sqlite:///$ready_db" DATA_DIR="$tmp_dir/migrated" \
+  uv run uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port "$ready_port" >"$tmp_dir/backend.log" 2>&1 &
+ready_backend_pid=$!
+APP_HOST=127.0.0.1 APP_PORT="$empty_port" DATABASE_URL="sqlite:///$empty_db" DATA_DIR="$tmp_dir/empty" \
+  uv run uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port "$empty_port" >"$tmp_dir/empty-backend.log" 2>&1 &
+empty_backend_pid=$!
+
+BACKEND_URL="http://127.0.0.1:$ready_port/api/v1/health" \
+UNMIGRATED_BACKEND_URL="http://127.0.0.1:$empty_port/api/v1/health" uv run python - <<'PY'
 import os
 import time
 import urllib.error
 import urllib.request
 
-url = os.environ["BACKEND_URL"]
-deadline = time.monotonic() + 30
-while time.monotonic() < deadline:
-    try:
-        with urllib.request.urlopen(url, timeout=1) as response:
-            if response.status == 200:
-                break
-    except (OSError, urllib.error.URLError):
-        time.sleep(0.25)
-else:
-    raise SystemExit("ERREUR : backend smoke indisponible après 30 s.")
+for key in ("BACKEND_URL", "UNMIGRATED_BACKEND_URL"):
+    url = os.environ[key]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:
+                if response.status == 200:
+                    break
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.25)
+    else:
+        raise SystemExit(f"ERREUR : backend smoke indisponible après 30 s ({key}).")
 PY
 
 cd "$repo/frontend"
@@ -62,4 +77,5 @@ if [[ "$browser_available" -eq 0 ]]; then
     exit 0
   fi
 fi
-BACKEND_URL="http://127.0.0.1:$backend_port/api/v1/health" npm run test:e2e:smoke
+BACKEND_URL="http://127.0.0.1:$ready_port/api/v1/health" \
+UNMIGRATED_BACKEND_URL="http://127.0.0.1:$empty_port/api/v1/health" npm run test:e2e:smoke
