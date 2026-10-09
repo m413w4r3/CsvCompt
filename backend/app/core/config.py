@@ -1,0 +1,67 @@
+"""Configuration locale du backend, chargée depuis l'environnement ou `.env`."""
+
+from functools import lru_cache
+from ipaddress import ip_address
+from pathlib import Path
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.security import DEFAULT_BIND_HOST, DEFAULT_BIND_PORT
+
+
+def is_loopback_host(host: str) -> bool:
+    """Renvoie si host désigne une adresse loopback connue."""
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+class Settings(BaseSettings):
+    """Paramètres applicatifs sans divulgation des secrets dans leur repr."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+        validate_default=True,
+    )
+
+    app_host: str = DEFAULT_BIND_HOST
+    app_port: int = Field(default=DEFAULT_BIND_PORT, ge=1, le=65535)
+    allow_non_loopback: bool = False
+    database_url: str = "sqlite:///./data/db/comptes.sqlite"
+    llm_enabled: bool = False
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: SecretStr | None = None
+    data_dir: Path = Path("data")
+    version: str = Field(default="0.1.0", validation_alias="APP_VERSION")
+
+    @field_validator("app_host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        host = value.strip()
+        if not host:
+            raise ValueError("APP_HOST doit être une adresse loopback non vide")
+        return host
+
+    @model_validator(mode="after")
+    def enforce_loopback(self) -> "Settings":
+        if not self.allow_non_loopback and not is_loopback_host(self.app_host):
+            raise ValueError(
+                "APP_HOST doit être loopback (127.0.0.1, ::1 ou localhost); "
+                "définir ALLOW_NON_LOOPBACK=true uniquement pour autoriser un bind externe"
+            )
+        return self
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Retourne les paramètres mis en cache; vider le cache en test après surcharge."""
+    return Settings()
