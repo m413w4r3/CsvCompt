@@ -163,6 +163,7 @@ def normalize_transaction(example_id: str, transaction: dict[str, Any], category
     allocations = transaction.get("allocations", [])
     require(isinstance(allocations, list), f"{where}: allocations doit être une liste")
     signed_total = 0
+    allocation_ids: set[str] = set()
     for index, allocation in enumerate(allocations):
         label = f"{where}.allocations[{index}]"
         require(isinstance(allocation, dict), f"{label}: allocation invalide")
@@ -172,6 +173,11 @@ def normalize_transaction(example_id: str, transaction: dict[str, Any], category
         require(allocation_flow in FLOW_KINDS - {"unknown"}, f"{label}: flow_kind invalide {allocation_flow!r}")
         require(category_id in category_flow_map, f"{label}: catégorie absente du YAML source: {category_id}")
         require(allocation_flow in category_flow_map[category_id], f"{label}: catégorie {category_id} interdite pour {allocation_flow}")
+        if "id" in allocation:
+            allocation_id = allocation["id"]
+            require(isinstance(allocation_id, str) and allocation_id, f"{label}.id invalide")
+            require(allocation_id not in allocation_ids, f"{label}.id dupliqué")
+            allocation_ids.add(allocation_id)
         decision = allocation.get("decision")
         require(decision in {"confirmed", "review", "unknown"}, f"{label}: decision invalide")
         origin = allocation.get("origin")
@@ -212,10 +218,49 @@ def derived_flow_kinds(transaction: dict[str, Any]) -> list[str]:
     return sorted(flows)
 
 
-def check_refund_links(example: dict[str, Any], all_transactions: dict[str, dict[str, Any]]) -> None:
+def allocations_for_flow(transaction: dict[str, Any], flow_kind: str) -> list[dict[str, Any]]:
+    return [
+        allocation for allocation in transaction.get("allocations", [])
+        if allocation.get("decision") == "confirmed" and allocation.get("flow_kind") == flow_kind
+    ]
+
+
+def refund_category_attribution(link: dict[str, Any], purchase: dict[str, Any]) -> dict[str, int]:
+    amount = link["amount_cents"]
+    expense_allocations = allocations_for_flow(purchase, "expense")
+    target_id = link.get("target_allocation_id")
+    if target_id is not None:
+        target = [allocation for allocation in expense_allocations if allocation.get("id") == target_id]
+        require(len(target) == 1, f"refund_of.target_allocation_id absent ou ambigu: {target_id}")
+        return {target[0]["category_id"]: amount}
+
+    category_weights: dict[str, int] = {}
+    for allocation in expense_allocations:
+        category = allocation["category_id"]
+        category_weights[category] = category_weights.get(category, 0) + abs(allocation["amount_cents"])
+    require(bool(category_weights), "refund_of: achat sans allocation expense confirmée")
+    ordered = sorted(category_weights, key=lambda category: (-category_weights[category], category))
+    denominator = sum(category_weights.values())
+    remaining = amount
+    attributed: dict[str, int] = {}
+    for position, category in enumerate(ordered):
+        if position == len(ordered) - 1:
+            part = remaining
+        else:
+            part = round_ratio_half_away(amount * category_weights[category], denominator, 1)
+            remaining -= part
+        if part:
+            attributed[category] = attributed.get(category, 0) + part
+    require(sum(attributed.values()) == amount, "refund_of: arrondi non conservatif")
+    return attributed
+
+
+def check_refund_links(example: dict[str, Any], all_transactions: dict[str, dict[str, Any]], links: list[dict[str, Any]] | None = None) -> None:
     confirmed_by_source: dict[str, int] = {}
     confirmed_by_purchase: dict[str, int] = {}
-    for index, link in enumerate(example.get("transaction_links", [])):
+    confirmed_by_source_allocation: dict[tuple[str, str], int] = {}
+    confirmed_by_target_allocation: dict[tuple[str, str], int] = {}
+    for index, link in enumerate(links if links is not None else example.get("transaction_links", [])):
         where = f"{example['id']}.transaction_links[{index}]"
         require(link.get("kind") == "refund_of", f"{where}: type de lien doit être refund_of")
         require(link.get("status") in {"proposed", "confirmed"}, f"{where}: statut de lien invalide")
@@ -226,15 +271,33 @@ def check_refund_links(example: dict[str, Any], all_transactions: dict[str, dict
         require(refund_id in all_transactions and purchase_id in all_transactions, f"{where}: transaction liée absente")
         refund = all_transactions[refund_id]
         purchase = all_transactions[purchase_id]
-        require("refund" in derived_flow_kinds(refund) and refund["amount_cents"] > 0, f"{where}: source non-remboursement")
-        require("expense" in derived_flow_kinds(purchase) and purchase["amount_cents"] < 0, f"{where}: cible non dépense")
+        source_allocations = allocations_for_flow(refund, "refund")
+        target_allocations = allocations_for_flow(purchase, "expense")
+        require(source_allocations and refund["amount_cents"] > 0, f"{where}: source sans allocation refund confirmée")
+        require(target_allocations and purchase["amount_cents"] < 0, f"{where}: cible sans allocation expense confirmée")
         if link["status"] == "confirmed":
+            source_allocation_id = link.get("source_allocation_id")
+            if source_allocation_id is not None:
+                source = [allocation for allocation in source_allocations if allocation.get("id") == source_allocation_id]
+                require(len(source) == 1, f"{where}: source_allocation_id absent ou ambigu")
+                confirmed_by_source_allocation[(refund_id, source_allocation_id)] = confirmed_by_source_allocation.get((refund_id, source_allocation_id), 0) + amount
+                require(confirmed_by_source_allocation[(refund_id, source_allocation_id)] <= source[0]["amount_cents"], f"{where}: dépasse l’allocation refund source")
+            target_allocation_id = link.get("target_allocation_id")
+            if target_allocation_id is not None:
+                target = [allocation for allocation in target_allocations if allocation.get("id") == target_allocation_id]
+                require(len(target) == 1, f"{where}: target_allocation_id absent ou ambigu")
+                key = (purchase_id, target_allocation_id)
+                confirmed_by_target_allocation[key] = confirmed_by_target_allocation.get(key, 0) + amount
+                require(confirmed_by_target_allocation[key] <= abs(target[0]["amount_cents"]), f"{where}: dépasse l’allocation expense cible")
+            require(sum(refund_category_attribution(link, purchase).values()) == amount, f"{where}: imputation catégorielle incorrecte")
             confirmed_by_source[refund_id] = confirmed_by_source.get(refund_id, 0) + amount
             confirmed_by_purchase[purchase_id] = confirmed_by_purchase.get(purchase_id, 0) + amount
     for refund_id, linked_cents in confirmed_by_source.items():
-        require(linked_cents <= all_transactions[refund_id]["amount_cents"], f"{example['id']}.{refund_id}: liens supérieurs au crédit reçu")
+        refund_capacity = sum(allocation["amount_cents"] for allocation in allocations_for_flow(all_transactions[refund_id], "refund"))
+        require(linked_cents <= refund_capacity, f"{example['id']}.{refund_id}: liens supérieurs aux allocations refund")
     for purchase_id, linked_cents in confirmed_by_purchase.items():
-        require(linked_cents <= abs(all_transactions[purchase_id]["amount_cents"]), f"{example['id']}.{purchase_id}: liens supérieurs à l'achat")
+        expense_capacity = sum(abs(allocation["amount_cents"]) for allocation in allocations_for_flow(all_transactions[purchase_id], "expense"))
+        require(linked_cents <= expense_capacity, f"{example['id']}.{purchase_id}: liens supérieurs aux allocations expense")
 
 
 def round_ratio_half_away(numerator: int, denominator: int, scale: int = 10000) -> int:
@@ -257,59 +320,142 @@ def transactions_in_scope(transactions: list[dict[str, Any]], accounts: list[str
     ]
 
 
-def date_ranges_cover_month(month_start: date, month_end: date, windows: list[dict[str, Any]]) -> bool:
-    ranges = sorted(
-        (date.fromisoformat(window["covered_from"]), date.fromisoformat(window["covered_through"]))
-        for window in windows
-    )
-    cursor = month_start
-    for range_start, range_end in ranges:
-        if range_start > cursor:
-            return False
-        if range_end >= cursor:
-            cursor = range_end + timedelta(days=1)
-        if cursor > month_end:
-            return True
-    return cursor > month_end
+def section_dates(section: dict[str, Any], transactions: list[dict[str, Any]]) -> tuple[date, date, date | None, date | None]:
+    covered_from = date.fromisoformat(section["covered_from"])
+    covered_through = date.fromisoformat(section["covered_through"])
+    require(covered_from <= covered_through, "section de couverture à bornes inversées")
+    generated_on: date | None = None
+    if section.get("generated_on"):
+        generated_on = date.fromisoformat(section["generated_on"])
+        complete_through = min(covered_through, generated_on - timedelta(days=1))
+        return covered_from, covered_through, complete_through, generated_on
+    if section.get("received_on"):
+        section_id = section.get("section_id")
+        operation_days = [
+            date.fromisoformat(transaction["booked_on"])
+            for transaction in transactions
+            if transaction["account_id"] == section["account_id"]
+            and (section_id is None or transaction.get("section_id") == section_id)
+            and covered_from <= date.fromisoformat(transaction["booked_on"]) <= covered_through
+        ]
+        if operation_days:
+            generated_on = max(operation_days)
+            complete_through = min(covered_through, generated_on - timedelta(days=1))
+            return covered_from, covered_through, complete_through, generated_on
+    return covered_from, covered_through, None, None
 
 
-def derive_month_completeness(
-    period: dict[str, Any], windows: list[dict[str, Any]], account_metadata: dict[str, dict[str, Any]], accounts: list[str]
+def completed_intervals_for_account(
+    account_id: str, sections: list[dict[str, Any]], transactions: list[dict[str, Any]]
+) -> tuple[list[tuple[date, date]], bool, list[tuple[date, date, date | None]]]:
+    intervals: list[tuple[date, date]] = []
+    known_section = False
+    section_bounds: list[tuple[date, date, date | None]] = []
+    for section in sections:
+        if section.get("account_id") != account_id or section.get("status", "committed") != "committed":
+            continue
+        known_section = True
+        covered_from, covered_through, complete_through, provisional_from = section_dates(section, transactions)
+        section_bounds.append((covered_from, covered_through, provisional_from))
+        if complete_through is not None and covered_from <= complete_through:
+            intervals.append((covered_from, complete_through))
+    return intervals, known_section, section_bounds
+
+
+def day_in_intervals(day: date, intervals: list[tuple[date, date]]) -> bool:
+    return any(start <= day <= end for start, end in intervals)
+
+
+def calculate_balance_check(
+    account_id: str, period: dict[str, Any], sections: list[dict[str, Any]],
+    transactions: list[dict[str, Any]], observations: list[dict[str, Any]],
 ) -> str:
     start = date.fromisoformat(period["start"])
     end = date.fromisoformat(period["end"])
-    if any(account_metadata.get(account, {}).get("balance_status") in {"mismatch", "unknown"} for account in accounts):
-        return "unknown"
+    opening_day = start - timedelta(days=1)
+    section_by_id = {section.get("section_id"): section for section in sections if section.get("section_id")}
+    eligible: dict[date, set[int]] = {}
+    for observation in observations:
+        if observation.get("account_id") != account_id:
+            continue
+        source_section = section_by_id.get(observation.get("section_id"))
+        if source_section is None or source_section.get("status", "committed") != "committed":
+            continue
+        _, _, complete_through, _ = section_dates(source_section, transactions)
+        balance_day = date.fromisoformat(observation["balance_date"])
+        if complete_through is not None and balance_day <= complete_through:
+            eligible.setdefault(balance_day, set()).add(require_int(observation.get("balance_cents"), "balance_observations.balance_cents"))
+    if opening_day not in eligible or end not in eligible:
+        return "not_comparable"
+    if len(eligible[opening_day]) != 1 or len(eligible[end]) != 1:
+        return "not_comparable"
+    opening_balance = next(iter(eligible[opening_day]))
+    closing_balance = next(iter(eligible[end]))
+    observed_delta = closing_balance - opening_balance
+    bank_delta = sum(
+        transaction["amount_cents"] for transaction in transactions
+        if transaction["account_id"] == account_id
+        and opening_day < date.fromisoformat(transaction["booked_on"]) <= end
+    )
+    return "match" if observed_delta == bank_delta else "mismatch"
+
+
+def balance_check_statuses(
+    period: dict[str, Any], sections: list[dict[str, Any]], transactions: list[dict[str, Any]],
+    observations: list[dict[str, Any]], accounts: list[str],
+) -> dict[str, str]:
+    return {
+        account_id: calculate_balance_check(account_id, period, sections, transactions, observations)
+        for account_id in accounts
+    }
+
+
+def derive_month_completeness(
+    period: dict[str, Any], sections: list[dict[str, Any]], transactions: list[dict[str, Any]],
+    observations: list[dict[str, Any]], accounts: list[str],
+) -> str:
+    start = date.fromisoformat(period["start"])
+    end = date.fromisoformat(period["end"])
     if period.get("kind") != "calendar_month":
         return "partial"
     month_start = date(start.year, start.month, 1)
     month_end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
     if start != month_start or end != month_end:
         return "partial"
-    windows_by_account: dict[str, list[dict[str, Any]]] = {}
-    for window in windows:
-        windows_by_account.setdefault(window["account_id"], []).append(window)
-    completeness: list[str] = []
-    for account_id in accounts:
-        metadata = account_metadata.get(account_id, {})
-        generated_raw = metadata.get("generated_on") or period.get("generated_on") or period.get("as_of")
-        if not generated_raw:
-            generated_raw = (end + timedelta(days=1)).isoformat()
-        account_windows = windows_by_account.get(account_id, [])
-        if not generated_raw or not account_windows:
-            completeness.append("unknown")
-            continue
-        generated_on = date.fromisoformat(generated_raw)
-        complete_through = min(end, generated_on - timedelta(days=1))
-        if month_end > complete_through or not date_ranges_cover_month(month_start, month_end, account_windows):
-            completeness.append("partial")
-        else:
-            completeness.append("complete")
-    if "unknown" in completeness:
+    checks = balance_check_statuses(period, sections, transactions, observations, accounts)
+    if "mismatch" in checks.values():
         return "unknown"
-    if "partial" in completeness:
-        return "partial"
+    for account_id in accounts:
+        intervals, known_section, _ = completed_intervals_for_account(account_id, sections, transactions)
+        if not known_section:
+            return "unknown"
+        day = month_start
+        while day <= month_end:
+            if not day_in_intervals(day, intervals):
+                # Une preuve absente par faute de génération reste inconnue ; un jour connu mais provisoire est partiel.
+                relevant_sections = [section for section in sections if section.get("account_id") == account_id and section.get("status", "committed") == "committed"]
+                if any(section_dates(section, transactions)[2] is None for section in relevant_sections):
+                    return "unknown"
+                return "partial"
+            day += timedelta(days=1)
     return "complete"
+
+
+def provisional_operation_count(
+    transactions: list[dict[str, Any]], sections: list[dict[str, Any]], period: dict[str, Any], accounts: list[str]
+) -> int:
+    selected = transactions_in_scope(transactions, accounts, period)
+    count = 0
+    for transaction in selected:
+        day = date.fromisoformat(transaction["booked_on"])
+        intervals, _, bounds = completed_intervals_for_account(transaction["account_id"], sections, transactions)
+        is_provisional = any(
+            covered_from <= day <= covered_through and provisional_from is not None and day >= provisional_from
+            for covered_from, covered_through, provisional_from in bounds
+        )
+        if is_provisional and not day_in_intervals(day, intervals):
+            count += 1
+    return count
 
 
 def month_is_previous(current: dict[str, Any], previous: dict[str, Any]) -> bool:
@@ -351,6 +497,7 @@ def selected_confirmed_links(
 def compute_metrics(
     transactions: list[dict[str, Any]], accounts: list[str], period: dict[str, Any],
     coverage_status: str, links: list[dict[str, Any]], account_metadata: dict[str, dict[str, Any]],
+    coverage_sections: list[dict[str, Any]], balance_observations: list[dict[str, Any]],
     other_commitment_transaction_ids: list[str] | None = None, personal_mode: str = "envelope",
     category_id: str | None = None, pair_transaction_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -463,35 +610,24 @@ def compute_metrics(
         -allocation["amount_cents"] for _, allocation in all_flows
         if allocation["flow_kind"] == "intermediary_pending" and allocation["amount_cents"] < 0
     )
-    category_net: int | None = None
-    if category_id is not None:
-        category_expense = sum(
-            -allocation["amount_cents"] for transaction, allocation in eligible_expenses
-            if allocation["category_id"] == category_id
-        )
-        category_refunds = sum(
-            link["amount_cents"] for link in attributable_links
-            if any(
-                allocation["category_id"] == category_id
-                for allocation in transactions_by_id[link["to_transaction"]].get("allocations", [])
-                if allocation.get("decision") == "confirmed" and allocation.get("flow_kind") == "expense"
-            )
-        )
-        category_net = category_expense - category_refunds
+    category_net_by_id: dict[str, int] = {}
+    for _, allocation in eligible_expenses:
+        category = allocation["category_id"]
+        category_net_by_id[category] = category_net_by_id.get(category, 0) - allocation["amount_cents"]
+    for link in attributable_links:
+        purchase = transactions_by_id[link["to_transaction"]]
+        for category, refund_cents in refund_category_attribution(link, purchase).items():
+            category_net_by_id[category] = category_net_by_id.get(category, 0) - refund_cents
+    require(sum(category_net_by_id.values()) == consumption_net, "la ventilation par catégorie ne somme pas à la consommation nette")
+    category_net: int | None = category_net_by_id.get(category_id, 0) if category_id is not None else None
     pair_bank_flow: int | None = None
     if pair_transaction_ids is not None:
         require(set(pair_transaction_ids) <= set(transactions_by_id), "transaction de paire absente")
         pair_bank_flow = sum(transactions_by_id[item]["amount_cents"] for item in pair_transaction_ids)
 
-    period_end = date.fromisoformat(period["end"])
-    generated_dates = {
-        account_id: metadata.get("generated_on") or period.get("generated_on") or period.get("as_of") or (period_end + timedelta(days=1)).isoformat()
-        for account_id, metadata in account_metadata.items()
-    }
-    provisional_count = sum(
-        1 for transaction in selected
-        if generated_dates.get(transaction["account_id"])
-        and date.fromisoformat(transaction["booked_on"]) >= date.fromisoformat(generated_dates[transaction["account_id"]])
+    provisional_count = provisional_operation_count(selected, coverage_sections, period, accounts)
+    balance_status_by_account = balance_check_statuses(
+        period, coverage_sections, transactions, balance_observations, accounts
     )
     if coverage_status == "unknown":
         bank_net = regular_income = consumption_net = personal_allowances = savings_net = None
@@ -528,6 +664,8 @@ def compute_metrics(
         "pair_bank_flow_cents": pair_bank_flow,
         "provisional_operation_count": provisional_count,
         "month_completeness": coverage_status,
+        "balance_check_status_by_account": balance_status_by_account,
+        "category_net_by_id_cents": category_net_by_id,
         "residual_by_transaction": residual_by_id,
         "derived_flow_kinds_by_transaction": {
             transaction["id"]: derived_flow_kinds(transaction) for transaction in selected
@@ -544,20 +682,31 @@ def compute_monthly_delta(
     if not comparison:
         return None
     accounts = example["accounts"]
-    current_status = derive_month_completeness(example["period"], example.get("coverage_windows", []), accounts, query["accounts"])
-    previous_status = derive_month_completeness(comparison["period"], comparison.get("coverage_windows", []), accounts, query["accounts"])
+    current_sections = example.get("coverage_sections", [])
+    current_transactions = example.get("transactions", [])
+    current_status = derive_month_completeness(
+        example["period"], current_sections, current_transactions,
+        example.get("balance_observations", []), query["accounts"],
+    )
+    previous_sections = comparison.get("coverage_sections", [])
+    previous_transactions = comparison.get("transactions", [])
+    previous_status = derive_month_completeness(
+        comparison["period"], previous_sections, previous_transactions,
+        comparison.get("balance_observations", []), query["accounts"],
+    )
     if current_status != "complete" or previous_status != "complete" or not month_is_previous(example["period"], comparison["period"]):
         return None
     metric_id = query.get("delta_metric_definition_id")
     field = next((field for field, identifier in METRIC_FIELD_TO_ID.items() if identifier == metric_id), None)
     if field is None:
         return None
-    prior_transactions = comparison.get("transactions", [])
+    prior_transactions = previous_transactions
     for transaction in prior_transactions:
         normalize_transaction(example["id"] + ".comparison", transaction, category_flow_map)
     prior = compute_metrics(
         prior_transactions, query["accounts"], comparison["period"], previous_status,
-        example.get("transaction_links", []), accounts, [], query.get("personal_mode", "envelope"),
+        example.get("transaction_links", []), accounts, previous_sections,
+        comparison.get("balance_observations", []), [], query.get("personal_mode", "envelope"),
     )
     if current_metrics.get(field) is None or prior.get(field) is None:
         return None
@@ -627,7 +776,23 @@ def verify_priority(example: dict[str, Any]) -> int:
     return checked
 
 
-def verify_examples(path: Path) -> tuple[int, int, int]:
+def verify_occurrence_oracle(example: dict[str, Any], transactions: list[dict[str, Any]]) -> None:
+    oracle = example.get("occurrence_oracle")
+    if oracle is None:
+        return
+    target_day = date.fromisoformat(oracle["booked_on"])
+    observed_ids = sorted(
+        transaction["id"] for transaction in transactions
+        if date.fromisoformat(transaction["booked_on"]) == target_day
+    )
+    declared_ids = sorted(oracle.get("observed_transaction_ids", []))
+    require(observed_ids == declared_ids, f"{example['id']}: occurrences observées attendues {declared_ids}, calculées {observed_ids}")
+    truth_count = require_int(oracle.get("synthetic_truth_count"), f"{example['id']}.occurrence_oracle.synthetic_truth_count")
+    require(truth_count >= len(observed_ids), f"{example['id']}: vérité synthétique inférieure aux occurrences observées")
+    require(bool(oracle.get("explanation")), f"{example['id']}: explication du trou d’occurrences requise")
+
+
+def verify_examples(path: Path) -> tuple[int, int, int, int]:
     document = load_yaml(path)
     reject_floats(document)
     require(document.get("schema_version") == 1, "schema_version doit valoir 1")
@@ -663,7 +828,7 @@ def verify_examples(path: Path) -> tuple[int, int, int]:
     require(isinstance(examples, list) and len(examples) >= 12, "au moins 12 exemples sont requis")
 
     seen_metric_fields: set[str] = set()
-    examples_checked = splits_checked = policy_cases_checked = 0
+    examples_checked = splits_checked = policy_cases_checked = refund_cases_checked = 0
     example_ids: set[str] = set()
     for example in examples:
         example_id = example.get("id")
@@ -677,17 +842,7 @@ def verify_examples(path: Path) -> tuple[int, int, int]:
         require(isinstance(accounts, dict), f"{example_id}: comptes invalides")
         for account_id, metadata in accounts.items():
             require(metadata.get("role") in {"current", "savings", "personal", "pea", "other"}, f"{example_id}.{account_id}: role invalide")
-            require(metadata.get("balance_status", "match") in {"match", "mismatch", "unknown"}, f"{example_id}.{account_id}: balance_status invalide")
-        derived_status = derive_month_completeness(
-            example["period"], example.get("coverage_windows", []), accounts, list(accounts)
-        )
-        require(derived_status == example.get("coverage_status"), f"{example_id}: statut calendrier déclaré {example.get('coverage_status')}, calculé {derived_status}")
-        comparison = example.get("comparison")
-        if comparison:
-            derived_comparison = derive_month_completeness(
-                comparison["period"], comparison.get("coverage_windows", []), accounts, list(accounts)
-            )
-            require(derived_comparison == comparison.get("coverage_status"), f"{example_id}: couverture comparaison déclarée {comparison.get('coverage_status')}, calculée {derived_comparison}")
+            require("balance_status" not in metadata, f"{example_id}.{account_id}: statut de solde figé interdit (ADR-024)")
         transactions = example["transactions"]
         require(isinstance(transactions, list), f"{example_id}: transactions invalides")
         all_transactions: dict[str, dict[str, Any]] = {}
@@ -698,21 +853,78 @@ def verify_examples(path: Path) -> tuple[int, int, int]:
             all_transactions[transaction["id"]] = transaction
             if "expected_derived_flow_kinds" in transaction:
                 require(transaction["expected_derived_flow_kinds"] == derived_flow_kinds(transaction), f"{example_id}.{transaction['id']}: flow_kind dérivés différents")
+        verify_occurrence_oracle(example, transactions)
+        sections = example.get("coverage_sections", [])
+        require(isinstance(sections, list), f"{example_id}: coverage_sections doit être une liste")
+        section_by_id: dict[str, dict[str, Any]] = {}
+        for section in sections:
+            require(section.get("account_id") in accounts, f"{example_id}: compte de section absent")
+            require(section.get("status") == "committed", f"{example_id}: seule une section committed prouve la couverture")
+            section_id = section.get("section_id")
+            require(isinstance(section_id, str) and section_id and section_id not in section_by_id, f"{example_id}: section_id absent ou dupliqué")
+            require(bool(section.get("generated_on") or section.get("received_on")), f"{example_id}.{section_id}: generated_on ou received_on requis")
+            section_dates(section, transactions)
+            section_by_id[section_id] = section
+        for transaction in transactions:
+            section_id = transaction.get("section_id")
+            if section_id is not None:
+                section = section_by_id.get(section_id)
+                require(section is not None, f"{example_id}.{transaction['id']}: section_id absent")
+                require(section["account_id"] == transaction["account_id"], f"{example_id}.{transaction['id']}: section d’un autre compte")
+                require(section["covered_from"] <= transaction["booked_on"] <= section["covered_through"], f"{example_id}.{transaction['id']}: date hors section")
+        observations = example.get("balance_observations", [])
+        require(isinstance(observations, list), f"{example_id}: balance_observations doit être une liste")
+        for observation in observations:
+            require(observation.get("account_id") in accounts, f"{example_id}: compte d’observation de solde absent")
+            require(observation.get("section_id") in section_by_id, f"{example_id}: section d’observation de solde absente")
+            require(section_by_id[observation["section_id"]]["account_id"] == observation["account_id"], f"{example_id}: observation de solde liée à la section d’un autre compte")
+            date.fromisoformat(observation["balance_date"])
+            require_int(observation.get("balance_cents"), f"{example_id}.balance_observations.balance_cents")
+        derived_status = derive_month_completeness(
+            example["period"], sections, transactions, observations, list(accounts)
+        )
+        require(derived_status == example.get("coverage_status"), f"{example_id}: statut calendrier déclaré {example.get('coverage_status')}, calculé {derived_status}")
+        comparison = example.get("comparison")
+        if comparison:
+            comparison_transactions = comparison.get("transactions", [])
+            for transaction in comparison_transactions:
+                normalize_transaction(example_id + ".comparison", transaction, category_flow_map)
+            comparison_sections = comparison.get("coverage_sections", [])
+            comparison_observations = comparison.get("balance_observations", [])
+            derived_comparison = derive_month_completeness(
+                comparison["period"], comparison_sections, comparison_transactions,
+                comparison_observations, list(accounts)
+            )
+            require(derived_comparison == comparison.get("coverage_status"), f"{example_id}: couverture comparaison déclarée {comparison.get('coverage_status')}, calculée {derived_comparison}")
         check_refund_links(example, all_transactions)
+        invalid_links = example.get("invalid_link_cases", [])
+        for index, case in enumerate(invalid_links):
+            require(case.get("expected_rejected") is True, f"{example_id}.invalid_link_cases[{index}]: oracle de rejet requis")
+            try:
+                check_refund_links(example, all_transactions, [case["link"]])
+            except VerificationError:
+                refund_cases_checked += 1
+            else:
+                raise VerificationError(f"{example_id}.invalid_link_cases[{index}]: un lien dépassant les plafonds a été accepté")
 
         for query in example.get("queries", []):
             require(set(query.get("accounts", [])) <= set(accounts), f"{example_id}.{query.get('id')}: compte de filtre absent")
             personal_mode = query.get("personal_mode", "envelope")
-            query_status = derive_month_completeness(example["period"], example.get("coverage_windows", []), accounts, query["accounts"])
+            query_status = derive_month_completeness(
+                example["period"], sections, transactions, observations, query["accounts"]
+            )
             calculated = compute_metrics(
                 transactions, query["accounts"], example["period"], query_status,
-                example.get("transaction_links", []), accounts,
+                example.get("transaction_links", []), accounts, sections, observations,
                 query.get("other_commitment_transaction_ids", []), personal_mode,
                 query.get("category_id"), query.get("pair_transaction_ids"),
             )
             calculated["monthly_delta_cents"] = compute_monthly_delta(example, query, calculated, category_flow_map)
             expected = query.get("expected", {})
             for field, expected_value in expected.items():
+                if field == "expected_balance_check_status_by_account":
+                    require(calculated["balance_check_status_by_account"] == expected_value, f"{example_id}.{query.get('id')}: contrôle de solde différent")
+                    continue
                 require(field in calculated or field == "monthly_delta_cents", f"{example_id}.{query.get('id')}: oracle inconnu {field}")
                 actual = calculated.get(field)
                 if field.endswith("_cents") and expected_value is not None:
@@ -723,11 +935,19 @@ def verify_examples(path: Path) -> tuple[int, int, int]:
                 seen_metric_fields.add(field)
             if "expected_derived_flow_kinds_by_transaction" in query:
                 require(calculated["derived_flow_kinds_by_transaction"] == query["expected_derived_flow_kinds_by_transaction"], f"{example_id}.{query.get('id')}: flux dérivés différents")
+            if "expected_category_net_by_id_cents" in query:
+                expected_categories = {
+                    key: require_int(value, f"{example_id}.{query.get('id')}.expected_category_net_by_id_cents.{key}")
+                    for key, value in query["expected_category_net_by_id_cents"].items()
+                }
+                require(calculated["category_net_by_id_cents"] == expected_categories, f"{example_id}.{query.get('id')}: ventilation par catégorie attendue {expected_categories}, calculée {calculated['category_net_by_id_cents']}")
+            if "expected_balance_check_status_by_account" in query:
+                require(calculated["balance_check_status_by_account"] == query["expected_balance_check_status_by_account"], f"{example_id}.{query.get('id')}: contrôle de solde différent")
             examples_checked += 1
 
     missing = REQUIRED_METRIC_FIELDS - seen_metric_fields
     require(not missing, f"métriques canoniques sans oracle exécuté: {', '.join(sorted(missing))}")
-    return examples_checked, splits_checked, policy_cases_checked
+    return examples_checked, splits_checked, policy_cases_checked, refund_cases_checked
 
 
 def main() -> int:
@@ -735,11 +955,11 @@ def main() -> int:
     parser.add_argument("--examples", type=Path, default=DEFAULT_EXAMPLES, help="fichier YAML à vérifier (utile pour un test altéré)")
     args = parser.parse_args()
     try:
-        checked, splits, policies = verify_examples(args.examples.resolve())
+        checked, splits, policies, refund_cases = verify_examples(args.examples.resolve())
     except VerificationError as error:
         print(f"ÉCHEC: {error}", file=sys.stderr)
         return 1
-    print(f"PASS: {checked} oracles métriques, {splits} splits et {policies} cas de priorité vérifiés en centimes entiers.")
+    print(f"PASS: {checked} oracles métriques, {splits} splits, {policies} cas de priorité et {refund_cases} liens rejetés aux plafonds vérifiés en centimes entiers.")
     return 0
 
 
