@@ -1,6 +1,6 @@
 # Contrats REST `/api/v1`
 
-**Version :** 1 · **Ticket :** T02 · **Gate visé :** G0 · **Références :** PLAN §D/§F, API-01, `DOMAIN_MODEL.md`, `METRICS.md`, `PROTOCOLE_LLM_TOLERANT.md`.
+**Version :** 1 · **Ticket :** T02 · **Gate visé :** G0 · **Références :** PLAN §D/§F, API-01, ADR-015/022/023/024, `DOMAIN_MODEL.md`, `METRICS.md`, `PROTOCOLE_LLM_TOLERANT.md`.
 
 Les contrats HTTP de l'application sont des JSON structurés et validés. L'interdiction de JSON strict concerne uniquement la sortie du LLM. Les noms des champs sont en `snake_case`; les dates sont ISO `YYYY-MM-DD`; les instants sont UTC terminés par `Z`. Toute quantité `*_cents`, `*_count`, `*_bps`, `version`, taille et latence est un entier JSON. Aucun montant en euros, ratio ou pourcentage n'est envoyé sous forme flottante. Une donnée inconnue vaut `null`, jamais un zéro inventé.
 
@@ -47,11 +47,11 @@ Forme commune :
 {"code":"VERSION_CONFLICT","message":"Cette ressource a changé.","details":{"current_version":3}}
 ```
 
-Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (400), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
+Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (400), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
 
 ### Enveloppe analytique
 
-Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées. Les jours `provisional` restent dans les sommes brutes, mais ne valident jamais une couverture complète ; un contrôle de solde en `mismatch` rend `month_completeness=unknown`.
+Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées. `coverage` calcule les jours complets comme l'union des intervalles de section `[coverage_from, complete_through]`, avec `complete_day_count`, `missing_days` ou les plages de jours manquants et `status:"complete"|"partial"|"unknown"`. Les jours `provisional` restent dans les sommes brutes, mais ne valident jamais une couverture complète ; un contrôle de solde `mismatch` rend `month_completeness=unknown`. Une réponse métier d'import n'emploie jamais `partial`.
 
 ```json
 {
@@ -82,32 +82,36 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 
 | Méthode et chemin | Requête / réponse |
 |---|---|
-| `POST /api/v1/imports/preview` | `multipart/form-data file`; crée un aperçu temporaire sans transaction métier, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` calculé sur les octets reçus, `generated_on`, `generation_date_source`, `complete_through`, compteurs, sommes en cents, `sections[]`, `warnings[]`, `rejections[]`, `expires_at_utc`. Les numéros ne sont jamais renvoyés. |
+| `POST /api/v1/imports/preview` | `multipart/form-data file`; crée un aperçu temporaire sans ligne métier SQLite, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` calculé sur les octets reçus, `generated_on`, `generation_date_source`, `sections[]` avec `complete_through`, compteurs, sommes en cents, `warnings[]`, `rejections[]`, `expires_at_utc`. Les octets restent dans un tampon temporaire privé ; les numéros ne sont jamais renvoyés. |
 | `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/account-mapping` | résolution humaine versionnée `{expected_version, account_id}` ou `{expected_version, new_account:{alias,account_role}}`; utilisée dans le preview avant commit. |
 | `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/coverage` | résolution humaine versionnée `{expected_version, coverage_from, coverage_through}`; recalcul de `complete_through` et de la validation du preview. |
-| `PATCH /api/v1/imports/{preview_id}/rows/{logical_row_idx}/multiplicity` | `{expected_version, action:"link_existing"|"create_occurrence", transaction_id?}` ; résout une `OUT_OF_PERIOD` ou une ambiguïté de multiplicité, enregistre l'acteur et l'audit. `link_existing` exige un ID dans la même identité ; `create_occurrence` attribue le prochain rang. |
-| `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `{expected_version}` après résolution de toutes les sections/lignes. Commit atomique du fichier entier. Réponse uniquement `committed` ou `no_op`, avec compteurs, plages de couverture et contrôles de solde ; aucune réponse `partial`. |
+| `PATCH /api/v1/imports/{preview_id}/rows/{logical_row_idx}/multiplicity` | `{expected_version, action:"link_existing"|"create_occurrence", transaction_id?}` ; décision humaine pour une `OUT_OF_PERIOD` ou une ambiguïté de multiplicité, enregistrée avec acteur/audit dans le preview. `link_existing` exige une identité égale (`identity_key_sha256` égal) ; `create_occurrence` attribue le rang supplémentaire suivant. |
+| `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `{expected_version}` après résolution de toutes les sections/lignes. Commit atomique du fichier entier. Réponse uniquement `committed` ou `no_op`, avec compteurs et plages de couverture ; aucun état `partial`. Une occurrence `no_op` est un nouveau registre final, conserve hash/taille/référence au commit d'origine, supprime le preview temporaire et répond `archive_retained:false` (`archive_relpath` reste `NULL`). |
 | `GET /api/v1/imports` | filtres `status`, `period_start`, `period_end`, curseur ; liste `ImportSummary[]` paginée. |
-| `GET /api/v1/imports/{import_file_id}` | détail statut, hash, alias de sections, bornes, soldes, compteurs, candidats ambigus et diagnostic redigé. Jamais d'archive ou de numéro. |
+| `GET /api/v1/imports/{import_file_id}` | détail statut, hash, alias de sections, bornes, soldes source, références aux `balance_checks`, compteurs, candidats ambigus et diagnostic rédigé. Jamais d'archive ou de numéro. |
 | `GET /api/v1/imports/{import_file_id}/rejections` | curseur ; `logical_row_idx`, `code`, `field`, `message` non privé. Aucun dump du libellé. |
+| `GET /api/v1/accounts/{account_id}/balance-checks` | `period_start`, `period_end`, curseur ; résultats `match`, `mismatch`, `not_comparable`, date et références aux sections, cents de recalcul/delta, `input_snapshot_sha256`, `version`. Les valeurs sont calculées à partir de toutes les sections commitées par date de solde, non dans l'ordre d'import ; seules les dates `balance_as_of <= complete_through` sont comparables. |
 
 Types principaux :
 
 ```text
 ImportSectionPreview = {section_index: integer, account_resolution: "known"|"unknown"|"ambiguous",
   account_id: UUID|null, account_alias: string|null, coverage_from: date|null,
-  coverage_through: date|null, balance_as_of: date|null, header_balance_cents: integer|null,
+  coverage_through: date|null, complete_through: date|null, balance_as_of: date|null, header_balance_cents: integer|null,
   operation_count: integer, debit_total_cents: integer, credit_total_cents: integer}
 ImportSummary = {import_file_id: UUID, file_sha256: string, status: "previewed"|"committed"|"rejected"|"no_op",
   created_at_utc: datetime, generated_on: date, generation_date_source: "header_download"|"received_on_fallback",
   sections: integer, operation_count: integer,
   created_transaction_count: integer, source_row_count: integer}
 ImportResolution = {resolution_id: UUID, section_index: integer|null, logical_row_idx: integer|null,
-  code: "ACCOUNT_MAPPING_REQUIRED"|"SECTION_RANGE_REQUIRED"|"OUT_OF_PERIOD"|"MULTIPLICITY_AMBIGUOUS",
+  code: "ACCOUNT_MAPPING_REQUIRED"|"SECTION_RANGE_REQUIRED"|"DUPLICATE_ACCOUNT_SECTION"|"OUT_OF_PERIOD"|"MULTIPLICITY_AMBIGUOUS",
   status: "pending"|"resolved", resolution_action: string|null, resolved_by: string|null}
+BalanceCheck = {balance_check_id: UUID, account_id: UUID, status: "match"|"mismatch"|"not_comparable",
+  start_balance_as_of: date|null, end_balance_as_of: date|null, recalculated_balance_cents: integer|null,
+  delta_cents: integer|null, input_snapshot_sha256: string, version: integer}
 ```
 
-Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir dans le preview une décision auditée `link_existing` ou `create_occurrence`; les deux chemins restent dans un commit tout-ou-rien du fichier. Un fichier associant deux sections au même compte est structurellement rejeté. `ZERO_AMOUNT` est une erreur bloquante de format CA. Les statuts d'import ne comprennent jamais `partial`.
+Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir dans le preview une décision auditée `link_existing` ou `create_occurrence`; les deux chemins restent dans un commit tout-ou-rien du fichier. Un fichier associant deux sections au même compte est structurellement rejeté, avec `DUPLICATE_ACCOUNT_SECTION` et zéro transaction/provenance. `ZERO_AMOUNT` est une erreur bloquante de format CA. Les statuts d'import ne comprennent jamais `partial`.
 
 Exemples synthétiques :
 
@@ -119,10 +123,12 @@ Content-Type: multipart/form-data; boundary=...
 ```
 
 ```json
-{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"status":"previewed","encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generated_on":"2026-03-31","generation_date_source":"header_download","complete_through":"2026-03-30","operation_count":2,"sections":[{"section_index":1,"account_resolution":"unknown","account_id":null,"account_alias":null,"coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","provisional_days":["2026-03-31"],"balance_as_of":"2026-03-31","header_balance_cents":120000,"operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000}],"warnings":[],"rejections":[],"expires_at_utc":"2026-10-10T10:15:00Z"}
+{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"status":"previewed","encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generated_on":"2026-03-31","generation_date_source":"header_download","operation_count":2,"sections":[{"section_index":1,"account_resolution":"unknown","account_id":null,"account_alias":null,"coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","provisional_days":["2026-03-31"],"balance_as_of":"2026-03-30","header_balance_cents":120000,"operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000}],"warnings":[],"rejections":[],"expires_at_utc":"2026-10-10T10:15:00Z"}
 ```
 
 Commit synthétique :
+
+Si le SHA-256 est déjà commité, le preview se termine en tentative finale `no_op`, sans octets archivés : `POST /api/v1/imports/<preview_id>/commit` → `200 {"import_file_id":"<UUID_TENTATIVE>","status":"no_op","duplicate_of_import_file_id":"<UUID_COMMIT>","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_transaction_count":0,"new_source_row_count":0,"archive_retained":false}`.
 
 ```http
 POST /api/v1/imports/550e8400-e29b-41d4-a716-446655440010/commit
@@ -135,10 +141,12 @@ Content-Type: application/json
 ```
 
 ```json
-{"import_file_id":"550e8400-e29b-41d4-a716-446655440011","status":"committed","no_op":false,"created_transaction_count":2,"new_source_row_count":2,"linked_source_row_count":0,"generation_date_source":"header_download","complete_through":"2026-03-30","sections":[{"section_index":1,"account_id":"550e8400-e29b-41d4-a716-446655440012","coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","balance_check_status":"unknown"}]}
+{"import_file_id":"550e8400-e29b-41d4-a716-446655440011","status":"committed","no_op":false,"created_transaction_count":2,"new_source_row_count":2,"linked_source_row_count":0,"generation_date_source":"header_download","sections":[{"section_index":1,"account_id":"550e8400-e29b-41d4-a716-446655440012","coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","balance_as_of":"2026-03-30","header_balance_cents":120000}]}
 ```
 
 Liste et rejets : `GET /api/v1/imports?status=committed` → `{"items":[{"import_file_id":"<UUID>","status":"committed","created_at_utc":"2026-10-09T10:00:00Z","sections":1,"operation_count":2,"created_transaction_count":2,"source_row_count":2}],"page":{"limit":50,"next_cursor":null}}`. `GET /api/v1/imports/<UUID>/rejections` → `{"items":[{"logical_row_idx":4,"code":"INVALID_AMOUNT","field":"debit_euros","message":"Montant non interprétable."}],"page":{"limit":50,"next_cursor":null}}`.
+
+Contrôle de solde : `GET /api/v1/accounts/<UUID>/balance-checks?period_start=2026-03-01&period_end=2026-04-30` → `{"items":[{"balance_check_id":"<UUID>","account_id":"<UUID>","status":"match","start_balance_as_of":"2026-03-15","end_balance_as_of":"2026-04-15","recalculated_balance_cents":9000,"delta_cents":0,"input_snapshot_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version":1}],"page":{"limit":50,"next_cursor":null}}`. Un solde daté après son `complete_through` répond `not_comparable` ; `import_account_sections` ne porte aucun statut de contrôle figé.
 
 ### Comptes
 
@@ -229,7 +237,7 @@ Tous les chemins suivants acceptent les filtres communs et renvoient l'enveloppe
 
 Exemple Overview : `GET /api/v1/analytics/overview?period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope&flow_kind=unknown` → réponse standard avec `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:-1200` et `metrics:[{"metric_definition_id":"bank_net_flow.v1","raw_cents":-1200,"unit":"EUR-cent"},{"metric_definition_id":"regular_income.v1","raw_cents":5000,"unit":"EUR-cent"}]`. Le filtre `unknown` cible le résidu non nul ; aucun ID de métrique financière n'est inventé pour le regroupement de cartes.
 
-Exemple Drilldown sur consommation : `GET /api/v1/analytics/drilldown?metric_definition_id=consumption_net.v1&period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope` → `{"period":{"start":"2026-03-01","end":"2026-03-31","kind":"custom","completeness":"complete","as_of":"2026-10-10"},"accounts":["<UUID>"],"coverage":{"status":"complete","operation_count":2,"fully_classified_count":2},"filters":{"mode":"family_life","personal_mode":"envelope","category_ids":["groceries_organic"],"flow_kinds":["expense","refund"]},"metric_definition_id":"consumption_net.v1","raw_cents":1200,"unit":"EUR-cent","items":[{"transaction_id":"<UUID_ACHAT>","booked_on":"2026-03-12","amount_cents":-1234,"metric_contribution_cents":1234,"transaction_links":[]},{"transaction_id":"<UUID_AVOIR>","booked_on":"2026-04-02","amount_cents":34,"metric_contribution_cents":-34,"transaction_links":[{"transaction_link_id":"<UUID_LIEN>","link_kind":"refund_of","target_transaction_id":"<UUID_ACHAT>","amount_cents":34,"status":"confirmed","attribution_date":"2026-04-02"}]}],"page":{"limit":50,"next_cursor":null}}`. Le crédit réduit la catégorie de l'achat à la date de l'avoir, même entre deux mois. Le lien ne contribue que si les deux comptes source et cible sont dans `account_ids`; sinon l'avoir reste « non attribué » avec avertissement. Le brut bancaire est inchangé et le drilldown montre les deux transactions et le lien (ADR-021, INV-09).
+Exemple Drilldown sur consommation : `GET /api/v1/analytics/drilldown?metric_definition_id=consumption_net.v1&period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope` → `{"period":{"start":"2026-03-01","end":"2026-03-31","kind":"custom","completeness":"complete","as_of":"2026-10-10"},"accounts":["<UUID>"],"coverage":{"status":"complete","operation_count":2,"fully_classified_count":2},"filters":{"mode":"family_life","personal_mode":"envelope","category_ids":["groceries_organic"],"flow_kinds":["expense","refund"]},"metric_definition_id":"consumption_net.v1","raw_cents":1200,"unit":"EUR-cent","items":[{"transaction_id":"<UUID_ACHAT>","booked_on":"2026-03-12","amount_cents":-1234,"metric_contribution_cents":1234,"transaction_links":[]},{"transaction_id":"<UUID_AVOIR>","booked_on":"2026-04-02","amount_cents":34,"metric_contribution_cents":-34,"transaction_links":[{"transaction_link_id":"<UUID_LIEN>","link_kind":"refund_of","target_transaction_id":"<UUID_ACHAT>","target_allocation_id":"<UUID_ALLOCATION_ACHAT>","amount_cents":34,"status":"confirmed","attribution_date":"2026-04-02"}]}],"page":{"limit":50,"next_cursor":null}}`. Le crédit réduit la catégorie de l'achat à la date de l'avoir, même entre deux mois. Le lien ne contribue que si les deux comptes source et cible sont dans `account_ids`; sinon l'avoir reste « non attribué » avec avertissement. Le brut bancaire est inchangé et le drilldown montre les deux transactions et le lien (ADR-021/024, INV-09).
 
 Autres réponses analytiques synthétiques (elles reprennent toutes la même enveloppe `period/accounts/coverage/filters/metric_definition_id/raw_cents/unit`) :
 
