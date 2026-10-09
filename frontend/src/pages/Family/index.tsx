@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Family() { return <PageContent copy={{ eyebrow: 'VIE FAMILIALE', title: 'Famille', description: 'Une lecture du coût de vie familial, avec le mode de comptes personnels indiqué.', emptyTitle: 'La vue familiale est en préparation', emptyDescription: 'Cette vue présentera les dépenses du quotidien et les allocations personnelles sans les compter deux fois.' }} /> }

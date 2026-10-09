@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Income() { return <PageContent copy={{ eyebrow: 'TRÉSORERIE', title: 'Revenus', description: 'Les entrées du compte, distinguées selon leur nature et leur régularité.', emptyTitle: 'Vos revenus apparaîtront ici', emptyDescription: 'Les revenus confirmés seront séparés des remboursements, transferts reçus et autres crédits bancaires.' }} /> }

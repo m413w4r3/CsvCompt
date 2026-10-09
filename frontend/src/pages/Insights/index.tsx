@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Insights() { return <PageContent copy={{ eyebrow: 'REPÈRES', title: 'Analyses', description: 'Des constats liés à des métriques vérifiables, à leur couverture et à leurs opérations sources.', emptyTitle: 'Aucune analyse disponible', emptyDescription: 'Les analyses apparaîtront lorsque les périodes et données nécessaires seront couvertes. Aucune estimation ne sera présentée comme un fait.' }} /> }

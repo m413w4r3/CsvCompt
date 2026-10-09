@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Expenses() { return <PageContent copy={{ eyebrow: 'VIE FAMILIALE', title: 'Dépenses', description: 'La consommation nette, avec les remboursements reliés aux achats et la période de couverture visible.', emptyTitle: 'Pas encore de dépenses à afficher', emptyDescription: 'Les dépenses confirmées apparaîtront ici, séparées des transferts d’épargne, des allocations personnelles et des mouvements en attente.' }} /> }

@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Merchants() { return <PageContent copy={{ eyebrow: 'OPÉRATIONS', title: 'Marchands', description: 'Retrouvez les contreparties reconnues sans assimiler automatiquement un libellé à une catégorie.', emptyTitle: 'Aucun marchand reconnu pour le moment', emptyDescription: 'Les marchands seront regroupés à partir des opérations importées et pourront être vérifiés avant toute décision.' }} /> }

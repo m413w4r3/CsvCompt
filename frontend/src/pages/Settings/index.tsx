@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Settings() { return <PageContent copy={{ eyebrow: 'APPLICATION', title: 'Réglages', description: 'Préférences locales et informations sur les services activés.', emptyTitle: 'Réglages en préparation', emptyDescription: 'Les préférences de compte et de confidentialité apparaîtront ici. Aucun service distant n’est utilisé par défaut.' }} /> }

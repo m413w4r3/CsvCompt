@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Review() { return <PageContent copy={{ eyebrow: 'DÉCISIONS', title: 'Revue', description: 'Vérifiez les opérations à classer et gardez la main sur chaque décision.', emptyTitle: 'La file de revue est vide', emptyDescription: 'Après import, les opérations non ventilées et les suggestions à vérifier seront présentées ici sans être appliquées automatiquement.' }} /> }

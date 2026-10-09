@@ -1,0 +1,2 @@
+import { PageContent } from '../PageContent'
+export function Transactions() { return <PageContent copy={{ eyebrow: 'JOURNAL', title: 'Opérations', description: 'Le registre des mouvements bancaires importés, avec leur état de ventilation et leur source.', emptyTitle: 'Aucune opération importée', emptyDescription: 'L’import de relevé sera disponible ici. Les lignes d’origine resteront traçables et aucun doublon ne sera ajouté lors d’un nouvel import.' }} /> }
