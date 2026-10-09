@@ -7,29 +7,31 @@ examples:
     description: Golden S01-S12 de la matrice ; foyer fictif, compte courant unique.
     accounts:
       family_current: {role: current}
-    period: {start: '2026-01-01', end: '2026-01-31', kind: calendar_month}
+    period: {start: '2026-01-01', end: '2026-01-31', kind: calendar_month, generated_on: '2026-02-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-01-01', covered_through: '2026-01-31'}
     transactions:
-      - {id: S01, account_id: family_current, booked_on: '2026-01-02', amount_cents: 300000, flow_kind: income_recurring, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
-      - {id: S02, account_id: family_current, booked_on: '2026-01-03', amount_cents: 250000, flow_kind: income_recurring, allocations: [{amount_cents: 250000, flow_kind: income_recurring, category_id: income_salary_b, origin: manual, decision: confirmed}]}
-      - {id: S03, account_id: family_current, booked_on: '2026-01-04', amount_cents: -50000, flow_kind: expense, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
-      - {id: S04, account_id: family_current, booked_on: '2026-01-05', amount_cents: -12000, flow_kind: expense, allocations: [{amount_cents: -12000, flow_kind: expense, category_id: restaurants_dining, origin: manual, decision: confirmed}]}
-      - {id: S05, account_id: family_current, booked_on: '2026-01-06', amount_cents: -30000, flow_kind: expense, allocations: [{amount_cents: -30000, flow_kind: expense, category_id: children_daycare, origin: manual, decision: confirmed}]}
-      - {id: S06, account_id: family_current, booked_on: '2026-01-07', amount_cents: -20000, flow_kind: transfer_savings, savings_linked: true, allocations: [{amount_cents: -20000, flow_kind: transfer_savings, category_id: flow_savings_out, origin: manual, decision: confirmed}]}
-      - {id: S07, account_id: family_current, booked_on: '2026-01-08', amount_cents: 5000, flow_kind: transfer_savings, savings_linked: true, allocations: [{amount_cents: 5000, flow_kind: transfer_savings, category_id: flow_savings_in, origin: manual, decision: confirmed}]}
-      - {id: S08, account_id: family_current, booked_on: '2026-01-09', amount_cents: -25000, flow_kind: allocation_personal, allocations: [{amount_cents: -25000, flow_kind: allocation_personal, category_id: flow_personal_a, origin: manual, decision: confirmed}]}
-      - {id: S09, account_id: family_current, booked_on: '2026-01-10', amount_cents: 5000000, flow_kind: loan_disbursement, allocations: [{amount_cents: 5000000, flow_kind: loan_disbursement, category_id: flow_loan_disbursement, origin: manual, decision: confirmed}]}
-      - {id: S10, account_id: family_current, booked_on: '2026-01-11', amount_cents: -9826561, flow_kind: loan_repayment, allocations: [{amount_cents: -9826561, flow_kind: loan_repayment, category_id: flow_loan_payment_unknown_split, origin: manual, decision: confirmed}]}
-      - {id: S11, account_id: family_current, booked_on: '2026-01-12', amount_cents: 2000, flow_kind: refund, allocations: [{amount_cents: 2000, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
-      - {id: S12, account_id: family_current, booked_on: '2026-01-13', amount_cents: -10000, flow_kind: cash_withdrawal_pending, allocations: [{amount_cents: -10000, flow_kind: cash_withdrawal_pending, category_id: flow_cash_unallocated, origin: manual, decision: confirmed}]}
+      - {id: S01, account_id: family_current, booked_on: '2026-01-02', amount_cents: 300000, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
+      - {id: S02, account_id: family_current, booked_on: '2026-01-03', amount_cents: 250000, allocations: [{amount_cents: 250000, flow_kind: income_recurring, category_id: income_salary_b, origin: manual, decision: confirmed}]}
+      - {id: S03, account_id: family_current, booked_on: '2026-01-04', amount_cents: -50000, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+      - {id: S04, account_id: family_current, booked_on: '2026-01-05', amount_cents: -12000, allocations: [{amount_cents: -12000, flow_kind: expense, category_id: restaurants_dining, origin: manual, decision: confirmed}]}
+      - {id: S05, account_id: family_current, booked_on: '2026-01-06', amount_cents: -30000, allocations: [{amount_cents: -30000, flow_kind: expense, category_id: children_daycare, origin: manual, decision: confirmed}]}
+      - {id: S06, account_id: family_current, booked_on: '2026-01-07', amount_cents: -20000, allocations: [{amount_cents: -20000, flow_kind: transfer_savings, category_id: flow_savings_out, origin: manual, decision: confirmed}]}
+      - {id: S07, account_id: family_current, booked_on: '2026-01-08', amount_cents: 5000, allocations: [{amount_cents: 5000, flow_kind: transfer_savings, category_id: flow_savings_in, origin: manual, decision: confirmed}]}
+      - {id: S08, account_id: family_current, booked_on: '2026-01-09', amount_cents: -25000, allocations: [{amount_cents: -25000, flow_kind: allocation_personal, category_id: flow_personal_a, origin: manual, decision: confirmed}]}
+      - {id: S09, account_id: family_current, booked_on: '2026-01-10', amount_cents: 5000000, allocations: [{amount_cents: 5000000, flow_kind: loan_disbursement, category_id: flow_loan_disbursement, origin: manual, decision: confirmed}]}
+      - {id: S10, account_id: family_current, booked_on: '2026-01-11', amount_cents: -9826561, allocations: [{amount_cents: -9826561, flow_kind: loan_repayment, category_id: flow_loan_payment_unknown_split, origin: manual, decision: confirmed}]}
+      - {id: S11, account_id: family_current, booked_on: '2026-01-12', amount_cents: 2000, allocations: [{amount_cents: 2000, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
+      - {id: S12, account_id: family_current, booked_on: '2026-01-13', amount_cents: -10000, allocations: [{amount_cents: -10000, flow_kind: cash_withdrawal_pending, category_id: flow_cash_unallocated, origin: manual, decision: confirmed}]}
     transaction_links:
-      - {kind: purchase_refund, from_transaction: S11, to_transaction: S03, amount_cents: 2000}
+      - {kind: refund_of, status: confirmed, from_transaction: S11, to_transaction: S03, amount_cents: 2000}
     queries:
       - id: S01_S12_all
         accounts: [family_current]
         other_commitment_transaction_ids: []
+        category_id: groceries
+        pair_transaction_ids: [S03, S11]
         expected:
           bank_net_flow_cents: -4416561
           regular_income_cents: 550000
@@ -47,6 +49,8 @@ examples:
           loan_repayment_outflow_cents: 9826561
           cash_withdrawal_pending_outflow_cents: 10000
           matched_refunds_cents: 2000
+          category_net_cents: 48000
+          pair_bank_flow_cents: -48000
 
   - id: MONEY_01_split_70_30
     description: Split exact MONEY-01, sans perte de centime.
@@ -71,19 +75,21 @@ examples:
   - id: MONEY_03_refund_partial_and_unmatched
     description: Remboursement partiel apparié ; le crédit sans lien reste non attribué.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-02-01', end: '2026-02-28', kind: calendar_month}
+    period: {start: '2026-02-01', end: '2026-02-28', kind: calendar_month, generated_on: '2026-03-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-02-01', covered_through: '2026-02-28'}
     transactions:
-      - {id: purchase, account_id: family_current, booked_on: '2026-02-03', amount_cents: -10000, flow_kind: expense, allocations: [{amount_cents: -10000, flow_kind: expense, category_id: groceries_supermarket, origin: manual, decision: confirmed}]}
-      - {id: refund_matched, account_id: family_current, booked_on: '2026-02-07', amount_cents: 2000, flow_kind: refund, allocations: [{amount_cents: 2000, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
-      - {id: refund_unmatched, account_id: family_current, booked_on: '2026-02-08', amount_cents: 500, flow_kind: refund, allocations: [{amount_cents: 500, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
+      - {id: purchase, account_id: family_current, booked_on: '2026-02-03', amount_cents: -10000, allocations: [{amount_cents: -10000, flow_kind: expense, category_id: groceries_supermarket, origin: manual, decision: confirmed}]}
+      - {id: refund_matched, account_id: family_current, booked_on: '2026-02-07', amount_cents: 2000, allocations: [{amount_cents: 2000, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
+      - {id: refund_unmatched, account_id: family_current, booked_on: '2026-02-08', amount_cents: 500, allocations: [{amount_cents: 500, flow_kind: refund, category_id: income_refund, origin: manual, decision: confirmed}]}
     transaction_links:
-      - {kind: purchase_refund, from_transaction: refund_matched, to_transaction: purchase, amount_cents: 2000}
+      - {kind: refund_of, status: confirmed, from_transaction: refund_matched, to_transaction: purchase, amount_cents: 2000}
     queries:
       - id: refund_net
         accounts: [family_current]
+        category_id: groceries_supermarket
+        pair_transaction_ids: [purchase, refund_matched]
         expected:
           bank_net_flow_cents: -7500
           regular_income_cents: 0
@@ -99,50 +105,54 @@ examples:
           monthly_delta_cents: null
           month_completeness: complete
           matched_refunds_cents: 2000
+          category_net_cents: 8000
+          pair_bank_flow_cents: -8000
           unmatched_refunds_cents: 500
 
   - id: KPI_04_partial_month
     description: Mois courant partiel ; les cumuls connus restent visibles, taux et delta mensuels sont indisponibles.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-10-01', end: '2026-10-31', kind: calendar_month, as_of: '2026-10-09'}
+    period: {start: '2026-10-01', end: '2026-10-31', kind: calendar_month, as_of: '2026-10-09', generated_on: '2026-10-09'}
     coverage_status: partial
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-10-01', covered_through: '2026-10-09'}
     transactions:
-      - {id: october_income, account_id: family_current, booked_on: '2026-10-02', amount_cents: 300000, flow_kind: income_recurring, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
-      - {id: october_groceries, account_id: family_current, booked_on: '2026-10-04', amount_cents: -50000, flow_kind: expense, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+      - {id: october_income, account_id: family_current, booked_on: '2026-10-02', amount_cents: 300000, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
+      - {id: october_groceries, account_id: family_current, booked_on: '2026-10-04', amount_cents: -50000, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+      - {id: provisional_day_expense, account_id: family_current, booked_on: '2026-10-09', amount_cents: -2500, allocations: [{amount_cents: -2500, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
     queries:
       - id: october_to_date
         accounts: [family_current]
         expected:
-          bank_net_flow_cents: 250000
+          bank_net_flow_cents: 247500
           regular_income_cents: 300000
-          consumption_net_cents: 50000
+          consumption_net_cents: 52500
           personal_allowances_cents: 0
           savings_net_transferred_cents: 0
           operational_saving_capacity_cents: null
           operational_saving_rate_bps: null
           unclassified_amount_share_bps: 0
           operation_coverage_bps: 10000
-          operation_count: 2
-          fully_classified_count: 2
+          operation_count: 3
+          fully_classified_count: 3
           monthly_delta_cents: null
           month_completeness: partial
+          provisional_operation_count: 1
 
   - id: KPI_01_multi_account_scope
     description: Même virement vu sur deux comptes ; le filtre de compte est strict et la mesure épargne ne compte que la jambe courante.
     accounts:
       family_current: {role: current}
       family_savings: {role: savings}
-    period: {start: '2026-03-01', end: '2026-03-31', kind: calendar_month}
+    period: {start: '2026-03-01', end: '2026-03-31', kind: calendar_month, generated_on: '2026-04-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-03-01', covered_through: '2026-03-31'}
       - {account_id: family_savings, covered_from: '2026-03-01', covered_through: '2026-03-31'}
     transactions:
-      - {id: salary_current, account_id: family_current, booked_on: '2026-03-02', amount_cents: 300000, flow_kind: income_recurring, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_regular_other, origin: manual, decision: confirmed}]}
-      - {id: transfer_out, account_id: family_current, booked_on: '2026-03-05', amount_cents: -20000, flow_kind: transfer_savings, savings_linked: true, allocations: [{amount_cents: -20000, flow_kind: transfer_savings, category_id: flow_savings_out, origin: manual, decision: confirmed}]}
-      - {id: transfer_in, account_id: family_savings, booked_on: '2026-03-05', amount_cents: 20000, flow_kind: transfer_savings, savings_linked: true, allocations: [{amount_cents: 20000, flow_kind: transfer_savings, category_id: flow_savings_in, origin: manual, decision: confirmed}]}
+      - {id: salary_current, account_id: family_current, booked_on: '2026-03-02', amount_cents: 300000, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_regular_other, origin: manual, decision: confirmed}]}
+      - {id: transfer_out, account_id: family_current, booked_on: '2026-03-05', amount_cents: -20000, allocations: [{amount_cents: -20000, flow_kind: transfer_savings, category_id: flow_savings_out, origin: manual, decision: confirmed}]}
+      - {id: transfer_in, account_id: family_savings, booked_on: '2026-03-05', amount_cents: 20000, allocations: [{amount_cents: 20000, flow_kind: transfer_savings, category_id: flow_savings_in, origin: manual, decision: confirmed}]}
     queries:
       - id: current_only
         accounts: [family_current]
@@ -169,12 +179,12 @@ examples:
   - id: MONEY_04_loan_is_not_salary
     description: Un déblocage de prêt est du cash bancaire, jamais du revenu régulier.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-04-01', end: '2026-04-30', kind: calendar_month}
+    period: {start: '2026-04-01', end: '2026-04-30', kind: calendar_month, generated_on: '2026-05-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-04-01', covered_through: '2026-04-30'}
     transactions:
-      - {id: loan_in, account_id: family_current, booked_on: '2026-04-02', amount_cents: 5000000, flow_kind: loan_disbursement, allocations: [{amount_cents: 5000000, flow_kind: loan_disbursement, category_id: flow_loan_disbursement, origin: manual, decision: confirmed}]}
+      - {id: loan_in, account_id: family_current, booked_on: '2026-04-02', amount_cents: 5000000, allocations: [{amount_cents: 5000000, flow_kind: loan_disbursement, category_id: flow_loan_disbursement, origin: manual, decision: confirmed}]}
     queries:
       - id: loan_only
         accounts: [family_current]
@@ -194,12 +204,12 @@ examples:
   - id: MONEY_05_capital_repayment_not_consumption
     description: Remboursement de capital de 98 265,61 EUR visible en trésorerie, jamais en consommation.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-05-01', end: '2026-05-31', kind: calendar_month}
+    period: {start: '2026-05-01', end: '2026-05-31', kind: calendar_month, generated_on: '2026-06-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-05-01', covered_through: '2026-05-31'}
     transactions:
-      - {id: capital_repayment, account_id: family_current, booked_on: '2026-05-10', amount_cents: -9826561, flow_kind: loan_repayment, allocations: [{amount_cents: -9826561, flow_kind: loan_repayment, category_id: flow_loan_principal, origin: manual, decision: confirmed}]}
+      - {id: capital_repayment, account_id: family_current, booked_on: '2026-05-10', amount_cents: -9826561, allocations: [{amount_cents: -9826561, flow_kind: loan_repayment, category_id: flow_loan_principal, origin: manual, decision: confirmed}]}
     queries:
       - id: capital_repayment_view
         accounts: [family_current]
@@ -220,12 +230,12 @@ examples:
   - id: KPI_06_unclassified_30_percent
     description: Une transaction de dépense dont 30 % restent sans allocation confirmée.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-06-01', end: '2026-06-30', kind: calendar_month}
+    period: {start: '2026-06-01', end: '2026-06-30', kind: calendar_month, generated_on: '2026-07-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-06-01', covered_through: '2026-06-30'}
     transactions:
-      - {id: split_pending, account_id: family_current, booked_on: '2026-06-09', amount_cents: -10000, flow_kind: expense, allocations: [{amount_cents: -7000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+      - {id: split_pending, account_id: family_current, booked_on: '2026-06-09', amount_cents: -10000, allocations: [{amount_cents: -7000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
     queries:
       - id: thirty_percent_open
         accounts: [family_current]
@@ -249,13 +259,13 @@ examples:
   - id: unclassified_opposite_signs_no_cancellation
     description: Débit et crédit non ventilés de signes opposés ; le ratio additionne leurs magnitudes sans compensation.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-06-01', end: '2026-06-30', kind: calendar_month}
+    period: {start: '2026-06-01', end: '2026-06-30', kind: calendar_month, generated_on: '2026-07-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-06-01', covered_through: '2026-06-30'}
     transactions:
-      - {id: unknown_debit, account_id: family_current, booked_on: '2026-06-10', amount_cents: -3000, flow_kind: unknown, allocations: []}
-      - {id: unknown_credit, account_id: family_current, booked_on: '2026-06-11', amount_cents: 2000, flow_kind: unknown, allocations: []}
+      - {id: unknown_debit, account_id: family_current, booked_on: '2026-06-10', amount_cents: -3000, allocations: []}
+      - {id: unknown_credit, account_id: family_current, booked_on: '2026-06-11', amount_cents: 2000, allocations: []}
     queries:
       - id: opposite_sign_residuals
         accounts: [family_current]
@@ -279,13 +289,13 @@ examples:
   - id: selected_loan_commitment
     description: Une échéance non ventilée reste visible ; choisie explicitement, elle réduit la capacité entière.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-09-01', end: '2026-09-30', kind: calendar_month}
+    period: {start: '2026-09-01', end: '2026-09-30', kind: calendar_month, generated_on: '2026-10-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-09-01', covered_through: '2026-09-30'}
     transactions:
-      - {id: september_salary, account_id: family_current, booked_on: '2026-09-02', amount_cents: 300000, flow_kind: income_recurring, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
-      - {id: loan_due, account_id: family_current, booked_on: '2026-09-15', amount_cents: -100000, flow_kind: loan_repayment, allocations: [{amount_cents: -100000, flow_kind: loan_repayment, category_id: flow_loan_payment_unknown_split, origin: manual, decision: confirmed}]}
+      - {id: september_salary, account_id: family_current, booked_on: '2026-09-02', amount_cents: 300000, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
+      - {id: loan_due, account_id: family_current, booked_on: '2026-09-15', amount_cents: -100000, allocations: [{amount_cents: -100000, flow_kind: loan_repayment, category_id: flow_loan_payment_unknown_split, origin: manual, decision: confirmed}]}
     queries:
       - id: loan_selected_as_commitment
         accounts: [family_current]
@@ -308,12 +318,12 @@ examples:
   - id: unclassified_whole_transaction
     description: Débit sans flux ni allocation ; totalité en attente, jamais masquée.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-07-01', end: '2026-07-31', kind: calendar_month}
+    period: {start: '2026-07-01', end: '2026-07-31', kind: calendar_month, generated_on: '2026-08-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-07-01', covered_through: '2026-07-31'}
     transactions:
-      - {id: unknown_debit, account_id: family_current, booked_on: '2026-07-11', amount_cents: -4500, flow_kind: unknown, allocations: []}
+      - {id: unknown_debit, account_id: family_current, booked_on: '2026-07-11', amount_cents: -4500, allocations: []}
     queries:
       - id: all_unknown
         accounts: [family_current]
@@ -334,21 +344,21 @@ examples:
   - id: monthly_delta_full_months
     description: Delta février vers mars, mêmes comptes et filtres, les deux mois complets.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-03-01', end: '2026-03-31', kind: calendar_month}
+    period: {start: '2026-03-01', end: '2026-03-31', kind: calendar_month, generated_on: '2026-04-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-03-01', covered_through: '2026-03-31'}
     transactions:
-      - {id: march_income, account_id: family_current, booked_on: '2026-03-02', amount_cents: 300000, flow_kind: income_recurring, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
-      - {id: march_expense, account_id: family_current, booked_on: '2026-03-04', amount_cents: -50000, flow_kind: expense, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+      - {id: march_income, account_id: family_current, booked_on: '2026-03-02', amount_cents: 300000, allocations: [{amount_cents: 300000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
+      - {id: march_expense, account_id: family_current, booked_on: '2026-03-04', amount_cents: -50000, allocations: [{amount_cents: -50000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
     comparison:
       period: {start: '2026-02-01', end: '2026-02-28', kind: calendar_month}
       coverage_status: complete
       coverage_windows:
         - {account_id: family_current, covered_from: '2026-02-01', covered_through: '2026-02-28'}
       transactions:
-        - {id: feb_income, account_id: family_current, booked_on: '2026-02-02', amount_cents: 250000, flow_kind: income_recurring, allocations: [{amount_cents: 250000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
-        - {id: feb_expense, account_id: family_current, booked_on: '2026-02-04', amount_cents: -40000, flow_kind: expense, allocations: [{amount_cents: -40000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
+        - {id: feb_income, account_id: family_current, booked_on: '2026-02-02', amount_cents: 250000, allocations: [{amount_cents: 250000, flow_kind: income_recurring, category_id: income_salary_a, origin: manual, decision: confirmed}]}
+        - {id: feb_expense, account_id: family_current, booked_on: '2026-02-04', amount_cents: -40000, allocations: [{amount_cents: -40000, flow_kind: expense, category_id: groceries, origin: manual, decision: confirmed}]}
     queries:
       - id: bank_delta
         accounts: [family_current]
@@ -367,12 +377,12 @@ examples:
   - id: intermediary_pending_visible
     description: Débit intermédiaire sans détail conservé comme attente, sans dépense inventée.
     accounts: {family_current: {role: current}}
-    period: {start: '2026-08-01', end: '2026-08-31', kind: calendar_month}
+    period: {start: '2026-08-01', end: '2026-08-31', kind: calendar_month, generated_on: '2026-09-01'}
     coverage_status: complete
     coverage_windows:
       - {account_id: family_current, covered_from: '2026-08-01', covered_through: '2026-08-31'}
     transactions:
-      - {id: intermediary_debit, account_id: family_current, booked_on: '2026-08-12', amount_cents: -7500, flow_kind: intermediary_pending, allocations: [{amount_cents: -7500, flow_kind: intermediary_pending, category_id: flow_intermediary_unresolved, origin: manual, decision: confirmed}]}
+      - {id: intermediary_debit, account_id: family_current, booked_on: '2026-08-12', amount_cents: -7500, allocations: [{amount_cents: -7500, flow_kind: intermediary_pending, category_id: flow_intermediary_unresolved, origin: manual, decision: confirmed}]}
     queries:
       - id: intermediary_waiting
         accounts: [family_current]
@@ -397,3 +407,607 @@ examples:
     priority_cases:
       - {id: existing_manual, present: [human_confirmed, approved_rule, exact_history, heuristic, llm_suggestion], expected_winner: human_confirmed}
       - {id: blank_operation, present: [approved_rule, exact_history, heuristic, llm_suggestion], expected_winner: approved_rule}
+
+  - id: split_rejected_zero_or_opposite_sign
+    description: Un split dont une part devient nulle ou de signe opposé est rejeté atomiquement.
+    splits:
+    - amount_cents: -1
+      flow_kind: expense
+      percentages_bps:
+      - 7000
+      - 3000
+      category_ids:
+      - groceries
+      - restaurants
+      expected_valid: false
+      expected_allocations_cents: []
+    - amount_cents: -2
+      flow_kind: expense
+      percentages_bps:
+      - 2500
+      - 2500
+      - 2500
+      - 2500
+      category_ids:
+      - groceries
+      - restaurants
+      - children
+      - housing
+      expected_valid: false
+      expected_allocations_cents: []
+  - id: split_category_order_and_duplicate_tiebreak
+    description: Le rendu est canonique par catégorie ; les doublons sont fusionnés avant l’arrondi.
+    splits:
+    - amount_cents: -101
+      flow_kind: expense
+      percentages_bps:
+      - 5000
+      - 5000
+      category_ids:
+      - restaurants
+      - groceries
+      expected_valid: true
+      expected_allocations_cents:
+      - -51
+      - -50
+      expected_category_ids:
+      - groceries
+      - restaurants
+      expected_by_category_cents:
+        groceries: -51
+        restaurants: -50
+    - amount_cents: -10000
+      flow_kind: expense
+      percentages_bps:
+      - 3000
+      - 4000
+      - 3000
+      category_ids:
+      - groceries
+      - groceries
+      - restaurants
+      expected_valid: true
+      expected_allocations_cents:
+      - -7000
+      - -3000
+      expected_category_ids:
+      - groceries
+      - restaurants
+      expected_by_category_cents:
+        groceries: -7000
+        restaurants: -3000
+  - id: ADR_020_multi_flow_transaction
+    description: Un débit est ventilé entre consommation et épargne ; les flux dérivent des allocations.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-08-01'
+        balance_status: match
+    period:
+      start: '2026-07-01'
+      end: '2026-07-31'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-07-01'
+      covered_through: '2026-07-31'
+    transactions:
+    - id: mixed_debit
+      account_id: family_current
+      booked_on: '2026-07-10'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -3000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+      - amount_cents: -7000
+        flow_kind: transfer_savings
+        category_id: flow_savings_out
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: mixed_flow_oracle
+      accounts:
+      - family_current
+      expected_derived_flow_kinds_by_transaction:
+        mixed_debit:
+        - expense
+        - transfer_savings
+      expected:
+        bank_net_flow_cents: -10000
+        regular_income_cents: 0
+        consumption_net_cents: 3000
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 7000
+        operational_saving_capacity_cents: -3000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 1
+        fully_classified_count: 1
+        monthly_delta_cents: null
+        month_completeness: complete
+  - id: ADR_020_nonrelevant_allocation_residual
+    description: 'Allocation partielle d’épargne : le résidu reste unknown et bloque la capacité.'
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-08-01'
+        balance_status: match
+    period:
+      start: '2026-07-01'
+      end: '2026-07-31'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-07-01'
+      covered_through: '2026-07-31'
+    transactions:
+    - id: partial_savings
+      account_id: family_current
+      booked_on: '2026-07-11'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -2000
+        flow_kind: transfer_savings
+        category_id: flow_savings_out
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: residual_on_savings
+      accounts:
+      - family_current
+      expected_derived_flow_kinds_by_transaction:
+        partial_savings:
+        - transfer_savings
+        - unknown
+      expected:
+        bank_net_flow_cents: -10000
+        regular_income_cents: 0
+        consumption_net_cents: 0
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 2000
+        operational_saving_capacity_cents: null
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 10000
+        unclassified_signed_residual_cents: -8000
+        unclassified_absolute_residual_cents: 8000
+        operation_coverage_bps: 0
+        operation_count: 1
+        fully_classified_count: 0
+        monthly_delta_cents: null
+        month_completeness: complete
+  - id: ADR_020_savings_expense_no_double_count
+    description: Un débit ventilé en dépense et épargne n’est pas compté deux fois dans la consommation.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-08-01'
+        balance_status: match
+    period:
+      start: '2026-07-01'
+      end: '2026-07-31'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-07-01'
+      covered_through: '2026-07-31'
+    transactions:
+    - id: split_expense_savings
+      account_id: family_current
+      booked_on: '2026-07-12'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -6000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+      - amount_cents: -4000
+        flow_kind: transfer_savings
+        category_id: flow_savings_out
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: single_bank_debit_two_uses
+      accounts:
+      - family_current
+      expected:
+        bank_net_flow_cents: -10000
+        regular_income_cents: 0
+        consumption_net_cents: 6000
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 4000
+        operational_saving_capacity_cents: -6000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 1
+        fully_classified_count: 1
+        monthly_delta_cents: null
+        month_completeness: complete
+  - id: ADR_021_proposed_and_confirmed_refunds
+    description: Seul le lien refund_of confirmé réduit la dépense ; le lien proposé reste non attribué.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-09-01'
+        balance_status: match
+    period:
+      start: '2026-08-01'
+      end: '2026-08-31'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-08-01'
+      covered_through: '2026-08-31'
+    transactions:
+    - id: purchase
+      account_id: family_current
+      booked_on: '2026-08-04'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -10000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+    - id: refund_proposed
+      account_id: family_current
+      booked_on: '2026-08-10'
+      amount_cents: 1500
+      allocations:
+      - amount_cents: 1500
+        flow_kind: refund
+        category_id: income_refund
+        origin: manual
+        decision: confirmed
+    - id: refund_confirmed
+      account_id: family_current
+      booked_on: '2026-08-12'
+      amount_cents: 2000
+      allocations:
+      - amount_cents: 2000
+        flow_kind: refund
+        category_id: income_refund
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: confirmed_only
+      accounts:
+      - family_current
+      category_id: groceries
+      expected:
+        bank_net_flow_cents: -6500
+        regular_income_cents: 0
+        consumption_net_cents: 8000
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 0
+        operational_saving_capacity_cents: -8000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 3
+        fully_classified_count: 3
+        monthly_delta_cents: null
+        month_completeness: complete
+        matched_refunds_cents: 2000
+        unmatched_refunds_cents: 1500
+        category_net_cents: 8000
+    transaction_links:
+    - kind: refund_of
+      status: proposed
+      from_transaction: refund_proposed
+      to_transaction: purchase
+      amount_cents: 1500
+    - kind: refund_of
+      status: confirmed
+      from_transaction: refund_confirmed
+      to_transaction: purchase
+      amount_cents: 2000
+  - id: ADR_021_prior_month_refund
+    description: L’avoir du mois courant réduit le mois courant, jamais le mois d’achat antérieur.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-03-01'
+        balance_status: match
+    period:
+      start: '2026-02-01'
+      end: '2026-02-28'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-02-01'
+      covered_through: '2026-02-28'
+    transactions:
+    - id: old_purchase
+      account_id: family_current
+      booked_on: '2026-01-25'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -10000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+    - id: february_refund
+      account_id: family_current
+      booked_on: '2026-02-05'
+      amount_cents: 2000
+      allocations:
+      - amount_cents: 2000
+        flow_kind: refund
+        category_id: income_refund
+        origin: manual
+        decision: confirmed
+    transaction_links:
+    - kind: refund_of
+      status: confirmed
+      from_transaction: february_refund
+      to_transaction: old_purchase
+      amount_cents: 2000
+    queries:
+    - id: credit_date_not_retroactive
+      accounts:
+      - family_current
+      category_id: groceries
+      expected:
+        bank_net_flow_cents: 2000
+        regular_income_cents: 0
+        consumption_net_cents: -2000
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 0
+        operational_saving_capacity_cents: 2000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 1
+        fully_classified_count: 1
+        monthly_delta_cents: null
+        month_completeness: complete
+        matched_refunds_cents: 2000
+        unmatched_refunds_cents: 0
+        category_net_cents: -2000
+        negative_consumption_signaled: true
+        negative_category_net_signaled: true
+  - id: ADR_021_refund_outside_account_scope
+    description: Avoir sur un compte hors périmètre de l’achat ; le lien reste non attribué dans cette lecture.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-03-01'
+        balance_status: match
+      family_personal:
+        role: personal
+        generated_on: '2026-03-01'
+        balance_status: match
+    period:
+      start: '2026-02-01'
+      end: '2026-02-28'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_personal
+      covered_from: '2026-02-01'
+      covered_through: '2026-02-28'
+    - account_id: family_current
+      covered_from: '2026-02-01'
+      covered_through: '2026-02-28'
+    transactions:
+    - id: purchase_current
+      account_id: family_current
+      booked_on: '2026-01-25'
+      amount_cents: -10000
+      allocations:
+      - amount_cents: -10000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+    - id: refund_personal
+      account_id: family_personal
+      booked_on: '2026-02-05'
+      amount_cents: 2000
+      allocations:
+      - amount_cents: 2000
+        flow_kind: refund
+        category_id: income_refund
+        origin: manual
+        decision: confirmed
+    transaction_links:
+    - kind: refund_of
+      status: confirmed
+      from_transaction: refund_personal
+      to_transaction: purchase_current
+      amount_cents: 2000
+    queries:
+    - id: refund_account_only
+      accounts:
+      - family_personal
+      category_id: groceries
+      expected:
+        bank_net_flow_cents: 2000
+        regular_income_cents: 0
+        consumption_net_cents: 0
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 0
+        operational_saving_capacity_cents: 0
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 1
+        fully_classified_count: 1
+        monthly_delta_cents: null
+        month_completeness: complete
+        matched_refunds_cents: 0
+        unmatched_refunds_cents: 2000
+        unattributed_out_of_scope_refunds_cents: 2000
+        category_net_cents: 0
+  - id: ADR_022_personal_account_modes
+    description: envelope compte l’allocation ; observed compte les dépenses personnelles, jamais les deux.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-03-01'
+        balance_status: match
+      family_personal:
+        role: personal
+        generated_on: '2026-03-01'
+        balance_status: match
+    period:
+      start: '2026-02-01'
+      end: '2026-02-28'
+      kind: calendar_month
+    coverage_status: complete
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-02-01'
+      covered_through: '2026-02-28'
+    - account_id: family_personal
+      covered_from: '2026-02-01'
+      covered_through: '2026-02-28'
+    transactions:
+    - id: personal_allowance
+      account_id: family_current
+      booked_on: '2026-02-02'
+      amount_cents: -25000
+      allocations:
+      - amount_cents: -25000
+        flow_kind: allocation_personal
+        category_id: flow_personal_a
+        origin: manual
+        decision: confirmed
+    - id: personal_incoming
+      account_id: family_personal
+      booked_on: '2026-02-02'
+      amount_cents: 25000
+      allocations:
+      - amount_cents: 25000
+        flow_kind: transfer_owned
+        category_id: flow_owned_transfer
+        origin: manual
+        decision: confirmed
+    - id: personal_expense
+      account_id: family_personal
+      booked_on: '2026-02-10'
+      amount_cents: -18000
+      allocations:
+      - amount_cents: -18000
+        flow_kind: expense
+        category_id: groceries
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: envelope_mode
+      accounts:
+      - family_current
+      - family_personal
+      category_id: groceries
+      personal_mode: envelope
+      expected:
+        bank_net_flow_cents: -18000
+        regular_income_cents: 0
+        consumption_net_cents: 0
+        personal_allowances_cents: 25000
+        savings_net_transferred_cents: 0
+        operational_saving_capacity_cents: -25000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 3
+        fully_classified_count: 3
+        monthly_delta_cents: null
+        month_completeness: complete
+        personal_unspent_cents: null
+        category_net_cents: 0
+    - id: observed_mode
+      accounts:
+      - family_current
+      - family_personal
+      category_id: groceries
+      personal_mode: observed
+      expected:
+        bank_net_flow_cents: -18000
+        regular_income_cents: 0
+        consumption_net_cents: 18000
+        personal_allowances_cents: 0
+        savings_net_transferred_cents: 0
+        operational_saving_capacity_cents: -18000
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: 0
+        unclassified_signed_residual_cents: 0
+        unclassified_absolute_residual_cents: 0
+        operation_coverage_bps: 10000
+        operation_count: 3
+        fully_classified_count: 3
+        monthly_delta_cents: null
+        month_completeness: complete
+        personal_unspent_cents: 7000
+        category_net_cents: 18000
+  - id: ADR_018_balance_mismatch_unknown
+    description: Un mismatch de solde rend le mois inconnu malgré une fenêtre de lignes complète.
+    accounts:
+      family_current:
+        role: current
+        generated_on: '2026-04-01'
+        balance_status: mismatch
+    period:
+      start: '2026-03-01'
+      end: '2026-03-31'
+      kind: calendar_month
+    coverage_status: unknown
+    coverage_windows:
+    - account_id: family_current
+      covered_from: '2026-03-01'
+      covered_through: '2026-03-31'
+    transactions:
+    - id: march_salary
+      account_id: family_current
+      booked_on: '2026-03-02'
+      amount_cents: 300000
+      allocations:
+      - amount_cents: 300000
+        flow_kind: income_recurring
+        category_id: income_salary_a
+        origin: manual
+        decision: confirmed
+    queries:
+    - id: balance_mismatch
+      accounts:
+      - family_current
+      expected:
+        bank_net_flow_cents: null
+        regular_income_cents: null
+        consumption_net_cents: null
+        personal_allowances_cents: null
+        savings_net_transferred_cents: null
+        operational_saving_capacity_cents: null
+        operational_saving_rate_bps: null
+        unclassified_amount_share_bps: null
+        unclassified_signed_residual_cents: null
+        unclassified_absolute_residual_cents: null
+        operation_coverage_bps: null
+        operation_count: 1
+        fully_classified_count: 1
+        monthly_delta_cents: null
+        month_completeness: unknown

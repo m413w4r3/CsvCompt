@@ -9,7 +9,7 @@ Ce document fixe les termes et les conventions utilisés par les allocations et 
 | Terme | Définition contractuelle |
 |---|---|
 | **Transaction** | Mouvement réellement inscrit au relevé : compte, date comptable, montant signé en centimes, libellé bancaire brut et provenance d’import. La donnée brute est immuable (INV-01). |
-| **Allocation** | Part signée d’une transaction affectée à un `flow_kind` et à une catégorie admissible, avec les dimensions de classification et sa provenance. La somme des allocations confirmées d’une transaction entièrement classée est exactement le montant bancaire signé (INV-06). |
+| **Allocation** | Part signée d’une transaction affectée à un `flow_kind` et à une catégorie admissible, avec les dimensions de classification et sa provenance. Une transaction peut porter plusieurs flux confirmés. La somme signée des allocations confirmées ne dépasse pas le montant bancaire ; elle lui est égale quand la transaction est entièrement ventilée (INV-06, ADR-020). |
 | **Suggestion** | Proposition non appliquée, conservée avec sa méthode, son motif et son état de revue. Elle n’entre jamais dans les sommes confirmées. |
 | **Règle** | Correspondance explicite, limitée par une portée et des exceptions, approuvée par une personne. Une règle modifiée ne réécrit pas les décisions déjà prises. |
 | **Décision** | Confirmation, correction ou rejet explicite et audité d’une proposition ou allocation. Une décision humaine confirmée est protégée (INV-08). |
@@ -22,14 +22,18 @@ Ce document fixe les termes et les conventions utilisés par les allocations et 
 
 Toute requête porte une période et une liste explicite d’identifiants de comptes. Aucun agrégat ne mélange silencieusement compte courant, épargne, PEA ou comptes personnels (INV-05).
 
-* **Trésorerie** : somme des montants bancaires des transactions des comptes sélectionnés. Chaque transaction sélectionnée est comptée une fois, quel que soit son `flow_kind`; les prêts, remboursements, transferts, espèces en attente et régularisations restent visibles. Si deux jambes d’un transfert interne sont sélectionnées, elles figurent toutes deux dans la trésorerie et s’annulent seulement dans la somme signée si leurs montants concordent.
-* **Vie familiale** : dépenses de consommation nettes des remboursements appariés, plus éventuellement les allocations personnelles pour mesurer l’enveloppe sortie du compte commun. Les allocations personnelles ne sont pas une consommation finale observée. Si les opérations du compte personnel sont aussi importées, on choisit soit l’enveloppe, soit les dépenses observées sur ce compte pour la même période ; on ne compte jamais les deux. Revenus, épargne, dettes, capital, espèces et intermédiaires restent des séries distinctes ou des montants en attente, pas de la consommation.
+* **Trésorerie** : somme des montants bancaires des transactions des comptes sélectionnés. Une transaction sélectionnée est comptée une seule fois, même si elle a plusieurs allocations/flux confirmés ou un résidu ; les prêts, remboursements, transferts, espèces en attente et régularisations restent visibles. Si deux jambes d’un transfert interne sont sélectionnées, elles figurent toutes deux dans la trésorerie et s’annulent seulement dans la somme signée si leurs montants concordent.
+* **Vie familiale** : consommation nette d’achats et de remboursements `refund_of` confirmés, avec le filtre `personal_mode` (`envelope` par défaut ou `observed`). En mode `envelope`, les dépenses des comptes personnels sont exclues et les allocations personnelles du compte commun sont comptées. En mode `observed`, les dépenses des comptes personnels sont incluses et les allocations personnelles exclues ; le reliquat non dépensé est signalé. Ces deux modes ne sont jamais additionnés dans un même total (ADR-022). Revenus, épargne, dettes, capital, espèces et intermédiaires restent des séries distinctes ou des montants en attente, pas de la consommation.
 
-Le choix de comptes s’applique à chaque série. Le calcul `savings_net_transferred` requiert le compte courant source sélectionné et un compte d’épargne identifié ; les jambes appariées ne sont comptées qu’une fois dans cette mesure. Le flux bancaire brut conserve toutes les jambes sélectionnées.
+Le choix de comptes s’applique à chaque série (INV-05). Les transactions ne stockent pas de `flow_kind` : le flux est dérivé de leurs allocations confirmées. Chaque allocation confirmée expose son flux ; un résidu non nul apparaît toujours comme `unknown`. La sélection `flow_kind=X` retient les transactions qui ont une allocation confirmée de `X` ; `flow_kind=unknown` retient les transactions au résidu non nul (ADR-020). `savings_net_transferred` somme les allocations confirmées `transfer_savings` du compte courant sélectionné et ne compte donc pas deux fois une paire bancaire ; le flux bancaire brut conserve toutes les jambes sélectionnées.
+
+### Complétude et jour de génération
+
+La génération est datée par le préambule du relevé ou, s’il manque, par la date de réception. Pour chaque compte, `complete_through = min(fin de la période, generated_on − 1 jour)`. Une journée à partir de `generated_on` est `provisional` : ses transactions restent dans les cumuls observés, mais cette journée ne prouve jamais la complétude. Un mois n’est `complete` que si la période couvre le mois calendaire entier, si les fenêtres de relevé/import couvrent sans trou le premier au dernier jour, et si le dernier jour est ≤ `complete_through` pour chaque compte sélectionné. Un contrôle de solde d’en-tête en `mismatch` donne `month_completeness=unknown`, même si les dates des lignes semblent couvrir le mois (ADR-018, INV-10).
 
 ## Les 14 types de flux (`flow_kind`)
 
-Le signe décrit le mouvement bancaire et les allocations effectives, non l’effet analytique dérivé d’un lien de remboursement. Un montant nul peut rester `unknown` ou `reconciliation`, mais ne constitue pas un flux positif/négatif confirmé.
+Le signe décrit le mouvement bancaire et les allocations effectives, non l’effet analytique dérivé d’un lien de remboursement. Le format CA rejette un montant bancaire nul (ADR-019.i). `unknown` est aussi le flux dérivé d’une transaction sans allocation confirmée, ou de son résidu signé non nul ; il ne constitue pas une catégorie à allouer (ADR-020).
 
 | `flow_kind` | Définition et signe bancaire attendu | Trésorerie | Vie familiale |
 |---|---|---|---|
@@ -43,7 +47,7 @@ Le signe décrit le mouvement bancaire et les allocations effectives, non l’ef
 | `loan_repayment` | Échéance/remboursement de prêt ; négatif. Si l’échéance n’est pas documentée, ne pas inventer la part capital/intérêts. | Inclus, négatif, même non ventilé. | Pas une consommation courante ; affiché comme engagement/dette et exclu du coût total du crédit tant que non scindé. |
 | `capital_event` | Dépense d’investissement/travaux exceptionnels v1 ; négatif. Une ressource de vente n’est pas forcée dans ce flux. | Inclus, négatif. | Hors consommation courante ; série exceptionnelle séparée. |
 | `cash_withdrawal_pending` | Retrait dont la destination n’est pas documentée ; négatif. | Inclus, négatif. | En attente ; aucune présomption « ménage », aucune consommation imputée. |
-| `refund` | Crédit de remboursement d’achat ; positif. | Inclus, positif. | Réduit la consommation seulement à hauteur d’un lien validé à l’achat ; sinon reste non attribué. |
+| `refund` | Crédit de remboursement d’achat ; positif, alloué à `income_refund`. | Inclus, positif. | Réduit la consommation de la catégorie d’origine seulement à hauteur d’un lien `refund_of` confirmé, à la date du crédit ; sinon reste non attribué (ADR-021). |
 | `intermediary_pending` | Débit envers un intermédiaire dont le détail d’achat manque ; négatif. | Inclus, négatif. | En attente, sans catégorie de consommation supposée. |
 | `reconciliation` | Correction/régularisation bancaire ; signe selon le relevé. | Inclus dans le brut bancaire. | Exclu des revenus et de la consommation ; visible séparément. |
 | `unknown` | Flux non déterminé ; signe quelconque du relevé. | Inclus dans le brut bancaire. | Hors calcul de consommation jusqu’à revue ; montant non classé signalé. |
@@ -75,25 +79,25 @@ Un paiement de prêt non ventilé reste entièrement `loan_repayment` / `flow_lo
 
 ## Remboursement et lien d’achat
 
-La transaction de remboursement garde un montant bancaire positif et l’allocation positive `refund` / `income_refund`. Un `transaction_link` validé relie ce crédit à la transaction et aux allocations d’achat d’origine, avec un montant de lien positif en centimes. Un lien partiel réduit la dépense d’autant ; le total apparié ne peut dépasser ni le crédit reçu ni le solde remboursable de l’achat. L’effet analytique est une réduction de consommation dans la catégorie d’origine ; il ne réécrit ni l’achat ni le montant bancaire du remboursement. La partie non appariée reste en `income_refund`, non attribuée : elle n’augmente pas `regular_income` et ne réduit pas `consumption_net` (INV-01, INV-06, INV-07).
+La transaction de remboursement garde un montant bancaire positif et l’allocation positive `refund` / `income_refund`. Un `transaction_link` de type exact `refund_of` relie ce crédit à l’achat et aux allocations d’achat d’origine, avec un montant positif en centimes. Seuls les liens `confirmed` comptent ; `proposed` reste une suggestion. Le montant confirmé ne dépasse ni le crédit reçu ni le solde remboursable de l’achat. L’effet analytique réduit la consommation de la catégorie d’origine à la date du crédit ; il ne réécrit ni l’achat ni le mois antérieur. Les deux transactions doivent appartenir au périmètre de comptes sélectionné ; sinon le lien est ignoré dans cette vue et l’avoir est non attribué avec avertissement. Une consommation mensuelle ou catégorielle négative est valide et signalée comme remboursement d’un achat antérieur (ADR-021, INV-01, INV-06, INV-07).
 
 ## États, provenance et décisions
 
-Les dimensions stables de la taxonomie sont orthogonales : `origin ∈ {manual, rule, history, llm, unclassified}` et `decision ∈ {confirmed, review, unknown}`. Un libellé d’état UI est dérivé de ces valeurs et de l’existence d’allocations/suggestions ; il ne remplace pas ces dimensions.
+Les dimensions stables de la taxonomie sont orthogonales : `origin ∈ {manual, rule, history, llm, unclassified}` et `decision ∈ {confirmed, review, unknown}`. Un libellé d’état UI est dérivé de ces valeurs et de l’existence d’allocations/suggestions ; il ne remplace pas ces dimensions. `heuristic` n’est pas une valeur d’`origin` : une suggestion heuristique porte `origin=unclassified`, `decision=review` et un champ de méthode `heuristic`.
 
 | État lisible | Représentation contractuelle |
 |---|---|
-| `unclassified` | Aucune allocation confirmée pour tout ou partie du montant ; `origin=unclassified`, `decision=unknown` sans proposition, ou `decision=review` avec une revue ouverte. |
+| `unclassified` | Aucun montant confirmé pour tout ou partie du mouvement ; résidu `amount_cents − somme des allocations confirmées`, avec `origin=unclassified`, `decision=unknown` s’il n’y a aucune proposition, ou `decision=review` si une revue est ouverte. |
 | `suggested` | Une proposition non appliquée existe ; `decision=review`. Le montant proposé n’est pas une allocation effective et n’entre pas dans les KPI confirmés. |
+| `history` / `history_suggested` | Ventilation historique proposée : `origin=history`, `decision=review`. Une correspondance exacte seule ne s’applique pas automatiquement. |
 | `llm_suggested` | Suggestion issue du modèle : `origin=llm`, `decision=review`. Elle ne devient jamais règle ni allocation automatiquement. |
-| `heuristic_suggested` | Suggestion à méthode `heuristic`, `decision=review`; faute de valeur `heuristic` dans `origin`, l’allocation effective reste `origin=unclassified` jusqu’à décision. |
-| `history_suggested` | Proposition provenant d’une ventilation confirmée antérieure : `origin=history`, `decision=review`. Une correspondance exacte seule ne s’applique pas automatiquement. |
+| `heuristic_suggested` | Suggestion à méthode `heuristic`, `origin=unclassified`, `decision=review`. |
 | `manual_confirmed` | Affectation choisie/corrigée par la personne : `origin=manual`, `decision=confirmed`. |
 | `rule_confirmed` | Affectation produite par une règle déterministe approuvée, seulement sur une transaction non déjà décidée : `origin=rule`, `decision=confirmed`. |
 | `history_confirmed` | Une proposition de mémoire exacte explicitement acceptée : `origin=history`, `decision=confirmed`, avec l’événement d’acceptation audité. |
 | `llm_confirmed` | Proposition LLM acceptée explicitement, sans changement : `origin=llm`, `decision=confirmed`, avec le valideur humain en audit. Si la personne modifie la catégorie, l’origine devient `manual`. |
 
-Le **montant non ventilé** d’une transaction est `transaction.amount_cents − somme(allocations confirmées signées)`. Il est signé ; une transaction est entièrement ventilée si et seulement si ce résidu vaut zéro. Une suggestion, même chiffrée et équilibrée, ne diminue jamais ce résidu avant confirmation (INV-06, INV-10). Une transaction à plusieurs allocations confirmées doit aussi respecter la compatibilité de chacune et l’égalité exacte des sommes.
+Le **montant non ventilé** ou **résidu** d’une transaction est `transaction.amount_cents − somme(allocations confirmées signées)`. Il est signé ; une transaction est entièrement ventilée si et seulement si ce résidu vaut zéro. Le flux du résidu est toujours `unknown`, même si les allocations confirmées sont toutes d’un autre flux. Si aucune allocation n’est confirmée, le mouvement entier est donc `unknown`. Le numérateur de la part non ventilée additionne les valeurs absolues des résidus par transaction ; un débit et un crédit opposés ne se compensent jamais. La capacité opérationnelle vaut `null` si un résidu non nul subsiste dans la période/comptes sélectionnés (ADR-020). Une suggestion, même chiffrée et équilibrée, ne diminue jamais ce résidu avant confirmation (INV-06, INV-10). Une transaction à plusieurs allocations confirmées doit respecter le signe, la compatibilité de chacune et `Σ allocations + résidu = montant bancaire`.
 
 ### Priorité des sources
 
@@ -103,9 +107,9 @@ Ordre de résolution pour un montant qui n’a pas encore de décision confirmé
 
 ## Contraintes de signe et fractionnement
 
-Chaque allocation confirmée conserve le signe de la transaction : débit → allocations négatives ; crédit → allocations positives. Un `refund` est le seul cas où un lien autorise un effet de compensation sur une dépense antérieure ; il ne change pas le signe de la transaction ni de son allocation bancaire `income_refund`.
+Le format CA rejette les transactions de montant nul (ADR-019.i). Chaque allocation confirmée est non nulle et conserve le signe de la transaction : débit → allocations négatives ; crédit → allocations positives. Les catégories directionnelles imposent aussi leur signe : `flow_savings_out` et `flow_loan_principal` sont négatives, `flow_savings_in`, `flow_loan_disbursement` et les `income_*` positives. Un `refund` est le seul cas où un lien autorise un effet analytique de compensation sur une dépense antérieure ; il ne change pas le signe positif de la transaction ni de son allocation bancaire `income_refund` (INV-02, ADR-019.i).
 
-Un split en pourcentage exige des entiers de base 100 (centièmes de pourcent, total exactement `10000` basis points, aucun poids nul/négatif). On trie les parts par pourcentage décroissant, puis par `category_id` croissant pour lever les égalités. Chaque part sauf la dernière est calculée sur le montant total, arrondi au centime le plus proche avec les demis loin de zéro ; la dernière reçoit le reste signé exact. Pour 2 parts, la plus grande est donc arrondie et la plus petite reçoit le reste. Si un pourcentage manque ou si la somme diffère de 10000, aucun split applicable n’est créé (LLM-13, MONEY-02). Toute allocation finale est ensuite confirmée et sa somme est revalidée.
+Un split en pourcentage exige des entiers de base 100 (centièmes de pourcent, total exactement `10000` basis points, aucun poids nul/négatif) et un montant source non nul. Les entrées répétées pour une même catégorie sont fusionnées en additionnant leurs poids, avant le calcul. Les catégories fusionnées sont triées par poids décroissant puis `category_id` croissant ; l’ordre de saisie n’influe donc ni les centimes ni leur rendu par catégorie. Chaque part sauf la dernière est calculée sur le montant source, arrondie au centime le plus proche avec les demis loin de zéro ; la dernière catégorie reçoit le reste signé exact. Le split entier est rejeté atomiquement si une part calculée vaut zéro ou a un signe contraire à la transaction. Pour 2 parts, la plus grande reçoit l’arrondi et la dernière le reste. Si un pourcentage manque ou si la somme diffère de 10000, aucun split applicable n’est créé (LLM-13, MONEY-02, m-02). Toute allocation finale est ensuite confirmée et sa somme est revalidée.
 
 Exemples exacts (les nombres sont des centimes) :
 
@@ -116,6 +120,8 @@ Exemples exacts (les nombres sont des centimes) :
 | `-10001` | `5000 / 3000 / 2000` bps | `-5001 / -3000 / -2000` |
 
 `7000 / 2999` bps totalise `9999` et est rejeté ; aucun centime ne peut être comblé par arrondi (MONEY-02). Les débits et crédits fractionnés gardent le signe de la transaction.
+
+Cas de rejet après arrondi : `-1` centime à `7000 / 3000` produit une part nulle ; le split entier est rejeté. `-2` centimes en quatre parts `2500 / 2500 / 2500 / 2500` produit provisoirement `-1 / -1 / -1 / +1` avec la règle du reste ; la dernière part a le mauvais signe et le split entier est rejeté (m-02).
 
 ## Invariants couverts
 
