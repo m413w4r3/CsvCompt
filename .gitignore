@@ -1,0 +1,42 @@
+# --- Données bancaires privées : JAMAIS dans Git ---
+csv_references/
+data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.zip
+tmp.zip
+backend/tests/fixtures/private/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Environnement local Nimbalyst / outils ---
+nimbalyst-local/
+.codegraph/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# --- Node / frontend ---
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+
+# --- Divers ---
+.DS_Store
+*.log

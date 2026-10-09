@@ -1,0 +1,131 @@
+# Catégories proposées pour la v1. Identifiants stables ; libellés modifiables.
+# Données de conception sans identifiants bancaires ni informations personnelles.
+version: 1
+expense_categories:
+  - id: groceries
+    label: Alimentation et courses
+    children:
+      - {id: groceries_supermarket, label: Supermarché}
+      - {id: groceries_organic, label: Bio}
+      - {id: groceries_frozen, label: Surgelés et épicerie}
+      - {id: groceries_bakery, label: Boulangerie}
+  - id: restaurants
+    label: Restaurants et livraison
+    children:
+      - {id: restaurants_dining, label: Restaurants et cafés}
+      - {id: restaurants_delivery, label: Livraison}
+      - {id: restaurants_fastfood, label: Restauration rapide}
+  - id: housing
+    label: Logement et charges
+    children:
+      - {id: housing_energy, label: Électricité et énergie}
+      - {id: housing_water, label: Eau}
+      - {id: housing_copro, label: Copropriété et charges}
+      - {id: housing_tax, label: Taxe foncière}
+      - {id: housing_insurance, label: Assurance habitation}
+      - {id: housing_maintenance, label: Entretien courant}
+  - id: home
+    label: Maison et équipement
+    children:
+      - {id: home_furniture, label: Mobilier}
+      - {id: home_appliances, label: Électroménager}
+      - {id: home_diy, label: Bricolage}
+      - {id: home_supplies, label: Équipement et consommables maison}
+  - id: children
+    label: Enfants et garde
+    children:
+      - {id: children_nanny, label: Nounou / assistante maternelle}
+      - {id: children_daycare, label: Crèche / périscolaire}
+      - {id: children_baby, label: Couches et produits bébé}
+      - {id: children_school, label: École et fournitures}
+      - {id: children_activities, label: Activités enfants}
+  - id: clothing
+    label: Habillement
+    children:
+      - {id: clothing_children, label: Vêtements enfants}
+      - {id: clothing_adults, label: Vêtements adultes}
+      - {id: clothing_footwear, label: Chaussures et accessoires}
+      - {id: clothing_unspecified, label: Destination à confirmer}
+  - id: health
+    label: Santé
+    children:
+      - {id: health_visits, label: Consultations}
+      - {id: health_pharmacy, label: Pharmacie}
+      - {id: health_optical, label: Optique}
+      - {id: health_other, label: Autres soins et analyses}
+  - id: transport
+    label: Transports
+    children:
+      - {id: transport_fuel, label: Carburant}
+      - {id: transport_tolls, label: Péages / parking}
+      - {id: transport_public, label: Trains et transports publics}
+      - {id: transport_vehicle, label: Véhicule et entretien}
+      - {id: transport_taxis, label: Taxis et VTC}
+  - id: household_services
+    label: Ménage et services
+    children:
+      - {id: household_cleaning, label: Ménage / CESU}
+      - {id: household_help, label: Aide à domicile}
+      - {id: household_oneoff, label: Prestations ponctuelles}
+  - id: subscriptions
+    label: Abonnements et numérique
+    children:
+      - {id: subscriptions_telecom, label: Internet et téléphone}
+      - {id: subscriptions_streaming, label: Streaming et médias}
+      - {id: subscriptions_apps, label: Applications et cloud}
+      - {id: subscriptions_other, label: Abonnements divers}
+  - id: leisure
+    label: Loisirs et vacances
+    children:
+      - {id: leisure_sports, label: Sports et loisirs}
+      - {id: leisure_culture, label: Culture et spectacles}
+      - {id: leisure_travel, label: Voyage / hébergement}
+      - {id: leisure_family, label: Sorties en famille}
+  - id: pets
+    label: Animaux
+    children:
+      - {id: pets_vet, label: Vétérinaire}
+      - {id: pets_food, label: Alimentation animale}
+      - {id: pets_care, label: Soins et accessoires}
+  - id: admin
+    label: Frais, assurances et taxes diverses
+    children:
+      - {id: admin_bank, label: Frais bancaires}
+      - {id: admin_insurance, label: Autres assurances}
+      - {id: admin_tax, label: Impôts hors logement}
+      - {id: admin_other, label: Autres frais administratifs}
+  - id: gifts
+    label: Cadeaux et solidarité
+    children:
+      - {id: gifts_present, label: Cadeaux}
+      - {id: gifts_donation, label: Dons et entraide}
+
+income_categories:
+  - {id: income_salary_a, label: Salaire A}
+  - {id: income_salary_b, label: Salaire B}
+  - {id: income_benefits, label: Aides et prestations}
+  - {id: income_regular_other, label: Autres revenus réguliers}
+  - {id: income_refund, label: Remboursement de dépense}
+  - {id: income_extraordinary, label: Ressources exceptionnelles}
+
+non_consumption_flows:
+  - {id: flow_savings_out, label: Vers épargne}
+  - {id: flow_savings_in, label: Depuis épargne}
+  - {id: flow_owned_transfer, label: Virement entre comptes propres}
+  - {id: flow_personal_a, label: Enveloppe personnelle A}
+  - {id: flow_personal_b, label: Enveloppe personnelle B}
+  - {id: flow_loan_disbursement, label: Déblocage de prêt}
+  - {id: flow_loan_principal, label: Remboursement de capital}
+  - {id: flow_loan_payment_unknown_split, label: Échéance de prêt non ventilée}
+  - {id: flow_capital_improvement, label: Travaux exceptionnels / investissement}
+  - {id: flow_cash_unallocated, label: Espèces à affecter}
+  - {id: flow_intermediary_unresolved, label: Paiement intermédiaire à détailler}
+  - {id: flow_reconciliation, label: Correction ou régularisation bancaire}
+
+classification_dimensions:
+  beneficiary: [household, adult_a, adult_b, child_a, child_b, unknown]
+  cadence: [recurring, occasional, exceptional, unknown]
+  flexibility: [fixed, variable_essential, variable_optional, unknown]
+  acquisition: [new, second_hand, not_applicable, unknown]
+  decision: [confirmed, review, unknown]
+  origin: [manual, rule, history, llm, unclassified]

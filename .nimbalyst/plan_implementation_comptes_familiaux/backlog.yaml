@@ -1,0 +1,1129 @@
+# Backlog machine-readable, compléter statut + propriétaire sur le vrai dépôt.
+schema_version: 1
+source_of_truth: PLAN_ORCHESTRATION.md
+llm_spec: docs/PROTOCOLE_LLM_TOLERANT.md
+test_matrix: docs/MATRICE_TESTS.md
+data_start_date: '2026-01-01'
+initial_real_csv_name: CA20261009_221008.csv
+real_csv_is_private: true
+llm_must_not_require_json_schema: true
+mandatory_properties:
+- sums_in_integer_cents
+- overlap_idempotence_and_occurrence_multiplicity
+- manual_overrides_ai
+- no_private_data_in_git
+- llm_optional
+- consistent_metrics_backend
+- gate_tests_before_merge
+gates:
+  G0:
+    meaning: contrats figés
+    blocking: true
+  G1:
+    meaning: squelette installable
+    blocking: true
+  G2:
+    meaning: parseur et aperçu
+    blocking: true
+  G3:
+    meaning: imports idempotents
+    blocking: true
+  G4:
+    meaning: moteur de ventilation
+    blocking: true
+  G5:
+    meaning: interface de revue
+    blocking: true
+  G6:
+    meaning: métriques réconciliées
+    blocking: true
+  G7:
+    meaning: MVP dashboard
+    blocking: true
+  G8:
+    meaning: IA de ventilation résiliente
+    blocking: true
+  G9:
+    meaning: budgets et famille
+    blocking: true
+  G10:
+    meaning: insights justifiés
+    blocking: true
+  G11:
+    meaning: version locale sauvegardable
+    blocking: true
+task_count: 46
+tasks:
+- id: T00
+  lot: 0
+  gate: G0
+  priority: P0
+  title: Cadre agents, conventions et traçabilité
+  suggested_role: ARCH
+  reasoning_level: high
+  depends_on: []
+  allowed_paths:
+  - AGENTS.md
+  - README.md
+  - docs/DECISIONS.md
+  - docs/ETAT_IMPLEMENTATION.md
+  test_refs:
+  - DOC-01
+  acceptance: Commandes, règles de revue et répertoire privé ignoré documentés.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 0
+- id: T01
+  lot: 0
+  gate: G0
+  priority: P0
+  title: Contrat financier, invariants et exemples
+  suggested_role: ARCH
+  reasoning_level: xhigh
+  depends_on:
+  - T00
+  allowed_paths:
+  - docs/DOMAIN_MODEL.md
+  - docs/METRICS.md
+  test_refs:
+  - MONEY-01
+  - MONEY-04
+  - MONEY-06
+  - KPI-01
+  acceptance: Types de flux, formules et cas limites signés par orchestrateur et QA.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 0
+- id: T02
+  lot: 0
+  gate: G0
+  priority: P0
+  title: Schéma relationnel et contrats API v1
+  suggested_role: ARCH
+  reasoning_level: xhigh
+  depends_on:
+  - T01
+  allowed_paths:
+  - docs/ARCHITECTURE.md
+  - docs/API.md
+  test_refs:
+  - API-01
+  acceptance: Entités, FK, immutabilité, historisation, erreurs et pagination spécifiées.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 0
+- id: T03
+  lot: 0
+  gate: G0
+  priority: P0
+  title: Fixtures CA synthétiques et corruptions
+  suggested_role: QA
+  reasoning_level: xhigh
+  depends_on:
+  - T01
+  allowed_paths:
+  - backend/tests/fixtures/
+  test_refs:
+  - CSV-01
+  - CSV-02
+  - IMP-03
+  acceptance: Fixtures déterministes sans donnée réelle pour CSV simple, complexe, overlap.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 0
+- id: T04
+  lot: 0
+  gate: G0
+  priority: P0
+  title: Protocole des tests privés 2026 opt-in
+  suggested_role: QA
+  reasoning_level: high
+  depends_on:
+  - T03
+  allowed_paths:
+  - docs/TEST_DATA_PRIVATE.md
+  test_refs:
+  - CSV-06
+  acceptance: Test du vrai CSV 2026 uniquement via chemin local; aucune PII dans Git.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 0
+- id: T05
+  lot: 1
+  gate: G1
+  priority: P0
+  title: Bootstrap FastAPI et configuration locale
+  suggested_role: OPS
+  reasoning_level: high
+  depends_on:
+  - T02
+  allowed_paths:
+  - backend/app/main.py
+  - backend/app/core/
+  - pyproject.toml
+  test_refs:
+  - API-01
+  acceptance: health disponible sans réseau; erreurs serveur cohérentes; config non secrète exemple.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 1
+- id: T06
+  lot: 1
+  gate: G1
+  priority: P0
+  title: SQLite, modèles et migrations Alembic
+  suggested_role: ARCH
+  reasoning_level: xhigh
+  depends_on:
+  - T02
+  - T05
+  allowed_paths:
+  - backend/app/db/
+  test_refs:
+  - IMP-06
+  - OPS-02
+  acceptance: Migrations répétables, FK et indexes testés sur base fraîche.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 1
+- id: T07
+  lot: 1
+  gate: G1
+  priority: P0
+  title: Shell React TS, routeur, client API
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T02
+  allowed_paths:
+  - frontend/
+  test_refs:
+  - UI-00
+  acceptance: Shell accessible et health affiché; aucune catégorie calculée en frontend.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 1
+- id: T08
+  lot: 1
+  gate: G1
+  priority: P0
+  title: Pipeline linters, tests et CI privée-safe
+  suggested_role: QA
+  reasoning_level: high
+  depends_on:
+  - T05
+  - T07
+  allowed_paths:
+  - pyproject.toml
+  - frontend/package.json
+  - scripts/
+  - .github/workflows/
+  test_refs:
+  - CI-01
+  acceptance: Une commande unique de check; CI n’utilise que fixtures synthétiques.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 1
+- id: T09
+  lot: 2
+  gate: G2
+  priority: P0
+  title: Parser format Crédit Agricole
+  suggested_role: DATA
+  reasoning_level: xhigh
+  depends_on:
+  - T03
+  - T06
+  allowed_paths:
+  - backend/app/importers/credit_agricole.py
+  test_refs:
+  - CSV-01
+  - CSV-02
+  - CSV-03
+  - CSV-04
+  acceptance: Parses sections, multiline, CP1252, débits/crédits en centimes sans pertes.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 2
+- id: T10
+  lot: 2
+  gate: G2
+  priority: P0
+  title: Normalisation prudente brut/identité/recherche
+  suggested_role: DATA
+  reasoning_level: xhigh
+  depends_on:
+  - T09
+  allowed_paths:
+  - backend/app/importers/normalize.py
+  test_refs:
+  - IMP-08
+  acceptance: Libellé brut inchangé; identité non fusionnante; recherche distincte.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 2
+- id: T11
+  lot: 2
+  gate: G2
+  priority: P0
+  title: API preview import sans mutation
+  suggested_role: DATA
+  reasoning_level: high
+  depends_on:
+  - T09
+  - T10
+  allowed_paths:
+  - backend/app/api/v1/imports.py
+  - backend/app/services/imports.py
+  test_refs:
+  - CSV-05
+  - CSV-06
+  acceptance: Aperçu nombre/comptes/sommes/anomalies, sans INSERT métier.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 2
+- id: T12
+  lot: 3
+  gate: G3
+  priority: P0
+  title: Commit atomique, conservation sources
+  suggested_role: DATA
+  reasoning_level: xhigh
+  depends_on:
+  - T06
+  - T11
+  allowed_paths:
+  - backend/app/services/imports.py
+  - backend/app/db/
+  test_refs:
+  - IMP-01
+  - IMP-06
+  acceptance: SHA source et liens row→transaction, rollback total en panne.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 3
+- id: T13
+  lot: 3
+  gate: G3
+  priority: P0
+  title: Réconciliation multiplicité et concurrence
+  suggested_role: DATA
+  reasoning_level: xhigh
+  depends_on:
+  - T10
+  - T12
+  allowed_paths:
+  - backend/app/importers/overlap.py
+  - backend/app/services/imports.py
+  test_refs:
+  - IMP-02
+  - IMP-03
+  - IMP-04
+  - IMP-05
+  - IMP-07
+  - IMP-09
+  acceptance: Overlaps et collisions conservent occurrences sans doublon créé.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 3
+- id: T14
+  lot: 3
+  gate: G3
+  priority: P0
+  title: Qualité périodes et contrôle soldes
+  suggested_role: ANALYTICS
+  reasoning_level: xhigh
+  depends_on:
+  - T12
+  - T13
+  allowed_paths:
+  - backend/app/analytics/quality.py
+  - backend/app/api/v1/imports.py
+  test_refs:
+  - KPI-04
+  - KPI-05
+  acceptance: 2026 seul = aucun faux trou en 2025; mois partiel reconnu.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 3
+- id: T15
+  lot: 3
+  gate: G3
+  priority: P0
+  title: Interface imports et opérations brutes
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T11
+  - T13
+  - T07
+  allowed_paths:
+  - frontend/src/pages/Transactions/
+  - frontend/src/pages/Settings/
+  test_refs:
+  - UI-05
+  acceptance: Preview/commit, liste paginée, erreurs et références d’origine visibles.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 3
+- id: T16
+  lot: 4
+  gate: G4
+  priority: P0
+  title: Taxonomie DB et attributs transversaux
+  suggested_role: DOMAIN
+  reasoning_level: high
+  depends_on:
+  - T01
+  - T06
+  allowed_paths:
+  - backend/app/domain/
+  - backend/app/services/categories.py
+  test_refs:
+  - RULE-00
+  acceptance: IDs de taxonomie stables; doublons/parents invalides rejetés.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 4
+- id: T17
+  lot: 4
+  gate: G4
+  priority: P0
+  title: Allocations exactes et remboursements
+  suggested_role: DOMAIN
+  reasoning_level: xhigh
+  depends_on:
+  - T16
+  - T13
+  allowed_paths:
+  - backend/app/services/allocations.py
+  test_refs:
+  - MONEY-01
+  - MONEY-02
+  - MONEY-03
+  - MONEY-07
+  - MONEY-08
+  acceptance: Splits signés exacts, types admissibles et versions optimistes.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 4
+- id: T18
+  lot: 4
+  gate: G4
+  priority: P0
+  title: Marchands alias et mémoire sans sur-fusion
+  suggested_role: DOMAIN
+  reasoning_level: xhigh
+  depends_on:
+  - T13
+  - T16
+  allowed_paths:
+  - backend/app/classification/matcher.py
+  - backend/app/services/payees.py
+  test_refs:
+  - MONEY-09
+  - RULE-02
+  acceptance: Carrefour Banque/magasin dissociables et alias réversibles.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 4
+- id: T19
+  lot: 4
+  gate: G4
+  priority: P0
+  title: Règles déterministes, simulation et priorité
+  suggested_role: DOMAIN
+  reasoning_level: xhigh
+  depends_on:
+  - T17
+  - T18
+  allowed_paths:
+  - backend/app/classification/engine.py
+  - backend/app/classification/rule_store.py
+  test_refs:
+  - RULE-01
+  - RULE-02
+  - RULE-03
+  acceptance: Simulateur sans effet; validation humaine prioritaire; règles avec portée.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 4
+- id: T20
+  lot: 4
+  gate: G4
+  priority: P0
+  title: Audit, décisions et annulation reventilation
+  suggested_role: DOMAIN
+  reasoning_level: xhigh
+  depends_on:
+  - T17
+  - T19
+  allowed_paths:
+  - backend/app/services/review.py
+  - backend/app/db/
+  test_refs:
+  - RULE-04
+  acceptance: Avant/après et provenance auditables; rollback décision, pas transaction source.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 4
+- id: T21
+  lot: 5
+  gate: G5
+  priority: P0
+  title: API revue groupée et décisions
+  suggested_role: DOMAIN
+  reasoning_level: high
+  depends_on:
+  - T19
+  - T20
+  allowed_paths:
+  - backend/app/api/v1/review.py
+  test_refs:
+  - RULE-05
+  acceptance: File groupée et priorisée, action limitée sélection vs futures.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 5
+- id: T22
+  lot: 5
+  gate: G5
+  priority: P0
+  title: Page revue avec splits, règles et corrections
+  suggested_role: UI
+  reasoning_level: xhigh
+  depends_on:
+  - T21
+  - T15
+  allowed_paths:
+  - frontend/src/pages/Review/
+  - frontend/src/components/classification/
+  test_refs:
+  - RULE-05
+  - RULE-06
+  acceptance: Utilisateur peut valider/modifier/splitter et annuler sans SQL.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 5
+- id: T23
+  lot: 5
+  gate: G5
+  priority: P0
+  title: Métriques de qualité classification
+  suggested_role: ANALYTICS
+  reasoning_level: high
+  depends_on:
+  - T21
+  allowed_paths:
+  - backend/app/analytics/quality.py
+  - frontend/src/pages/Review/
+  test_refs:
+  - KPI-06
+  acceptance: Nombre/euros par origine et en attente, hors gros exceptionnels si pertinent.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 5
+- id: T24
+  lot: 6
+  gate: G6
+  priority: P0
+  title: Métriques financières canoniques
+  suggested_role: ANALYTICS
+  reasoning_level: xhigh
+  depends_on:
+  - T17
+  - T14
+  - T01
+  allowed_paths:
+  - backend/app/analytics/definitions.py
+  - docs/METRICS.md
+  test_refs:
+  - KPI-01
+  - KPI-02
+  - MONEY-04
+  - MONEY-05
+  - MONEY-06
+  - MONEY-07
+  acceptance: Valeurs exactes par flux et filtre; salaire distinct prêt et transferts.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 6
+- id: T25
+  lot: 6
+  gate: G6
+  priority: P0
+  title: Endpoints séries, catégories et drilldown
+  suggested_role: ANALYTICS
+  reasoning_level: xhigh
+  depends_on:
+  - T24
+  - T06
+  allowed_paths:
+  - backend/app/api/v1/analytics.py
+  - backend/app/analytics/queries.py
+  test_refs:
+  - KPI-03
+  - KPI-07
+  acceptance: API cohérentes, calculs centralisés, détails donnent même somme.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 6
+- id: T26
+  lot: 6
+  gate: G6
+  priority: P0
+  title: Golden dataset et tests de propriétés
+  suggested_role: QA
+  reasoning_level: xhigh
+  depends_on:
+  - T24
+  - T25
+  allowed_paths:
+  - backend/tests/golden/
+  - backend/tests/integration/
+  test_refs:
+  - MONEY-01
+  - MONEY-03
+  - MONEY-04
+  - MONEY-05
+  - MONEY-06
+  - KPI-01
+  - KPI-03
+  acceptance: Oracles manuels indépendants à un centime et tests filtres/limites.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 6
+- id: T27
+  lot: 7
+  gate: G7
+  priority: P0
+  title: Filtres partagés, période 2026 et URLs
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T25
+  - T07
+  allowed_paths:
+  - frontend/src/components/filters/
+  - frontend/src/app/
+  test_refs:
+  - UI-01
+  acceptance: Toutes pages partageant filtre canonique URL et avertissements de couverture.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 7
+- id: T28
+  lot: 7
+  gate: G7
+  priority: P0
+  title: Cockpit KPIs, séries et Sankey
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T25
+  - T27
+  allowed_paths:
+  - frontend/src/pages/Overview/
+  - frontend/src/components/charts/
+  test_refs:
+  - UI-02
+  - KPI-03
+  acceptance: KPIs traçables, Sankey et tendances sur données réelles uniquement.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 7
+- id: T29
+  lot: 7
+  gate: G7
+  priority: P0
+  title: Dépenses, marchands, revenus et drilldowns
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T25
+  - T27
+  allowed_paths:
+  - frontend/src/pages/Expenses/
+  - frontend/src/pages/Income/
+  - frontend/src/pages/Merchants/
+  test_refs:
+  - UI-02
+  - KPI-07
+  acceptance: Treemap, heatmap, Pareto, courbes et détails cohérents.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 7
+- id: T30
+  lot: 7
+  gate: G7
+  priority: P0
+  title: Formats FR, accessibilité et états incomplets
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T28
+  - T29
+  allowed_paths:
+  - frontend/src/components/
+  - frontend/src/lib/
+  test_refs:
+  - UI-03
+  - UI-04
+  acceptance: Montants lisibles, mois partiel explicite, clavier, responsive.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 7
+- id: T31
+  lot: 8
+  gate: G8
+  priority: P1
+  title: Adaptateur LLM compatible OpenAI avec opt-in
+  suggested_role: AI
+  reasoning_level: xhigh
+  depends_on:
+  - T05
+  - T21
+  allowed_paths:
+  - backend/app/classification/llm_client.py
+  - backend/app/core/config.py
+  test_refs:
+  - LLM-16
+  - LLM-18
+  acceptance: Texte simple, clés backend, provider mock et coupure réseau propre.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 8
+- id: T32
+  lot: 8
+  gate: G8
+  priority: P1
+  title: Prompt et parser textuel tolerant
+  suggested_role: AI
+  reasoning_level: xhigh
+  depends_on:
+  - T16
+  - T31
+  allowed_paths:
+  - backend/app/classification/llm_text_parser.py
+  test_refs:
+  - LLM-01
+  - LLM-02
+  - LLM-03
+  - LLM-04
+  - LLM-05
+  - LLM-06
+  - LLM-09
+  - LLM-10
+  - LLM-11
+  - LLM-12
+  - LLM-13
+  - LLM-14
+  acceptance: Récupère lignes indépendantes sans JSON strict, valide catégories/ID.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 8
+- id: T33
+  lot: 8
+  gate: G8
+  priority: P1
+  title: Consentement, caviardage et suggestions seulement
+  suggested_role: AI
+  reasoning_level: xhigh
+  depends_on:
+  - T21
+  - T32
+  - T22
+  allowed_paths:
+  - backend/app/classification/suggestions.py
+  - frontend/src/pages/Settings/
+  test_refs:
+  - LLM-07
+  - LLM-08
+  - LLM-15
+  - LLM-17
+  acceptance: Aucune sortie LLM n’écrit allocation directement; données transmises prévisualisables.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 8
+- id: T34
+  lot: 8
+  gate: G8
+  priority: P1
+  title: Évaluations corpus dégradé et fake provider
+  suggested_role: QA
+  reasoning_level: xhigh
+  depends_on:
+  - T33
+  allowed_paths:
+  - backend/tests/unit/
+  - backend/tests/integration/
+  test_refs:
+  - LLM-01
+  - LLM-18
+  acceptance: 30+ réponses LLM cassées, toutes non fatales, aucune fuite.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 8
+- id: T35
+  lot: 9
+  gate: G9
+  priority: P1
+  title: Vue enfants, charges et aides liées
+  suggested_role: ANALYTICS
+  reasoning_level: high
+  depends_on:
+  - T25
+  - T29
+  allowed_paths:
+  - backend/app/analytics/queries.py
+  - frontend/src/pages/Family/
+  test_refs:
+  - BUD-02
+  acceptance: Aides CAF déduites de la garde uniquement si appariées.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 9
+- id: T36
+  lot: 9
+  gate: G9
+  priority: P1
+  title: Budgets enveloppes, scénarios, prévision
+  suggested_role: ANALYTICS
+  reasoning_level: xhigh
+  depends_on:
+  - T25
+  - T24
+  - T27
+  allowed_paths:
+  - backend/app/analytics/forecast.py
+  - frontend/src/pages/Budgets/
+  test_refs:
+  - BUD-01
+  acceptance: Hypothèses claires, mois incomplets exclus, aucune modification DB bancaire.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 9
+- id: T37
+  lot: 9
+  gate: G9
+  priority: P1
+  title: Détection et revue d’abonnements
+  suggested_role: DOMAIN
+  reasoning_level: high
+  depends_on:
+  - T18
+  - T25
+  allowed_paths:
+  - backend/app/analytics/recurring.py
+  - frontend/src/pages/Merchants/
+  test_refs:
+  - BUD-03
+  acceptance: Heuristiques récurrence + possibilité de faux positif.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 9
+- id: T38
+  lot: 10
+  gate: G10
+  priority: P1
+  title: Moteur de faits chiffrés vérifiables
+  suggested_role: ANALYTICS
+  reasoning_level: xhigh
+  depends_on:
+  - T24
+  - T25
+  - T36
+  allowed_paths:
+  - backend/app/analytics/facts.py
+  test_refs:
+  - INS-01
+  acceptance: Chaque constat émet ID métrique, paramètres et preuve de drilldown.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 10
+- id: T39
+  lot: 10
+  gate: G10
+  priority: P1
+  title: Synthèse IA contrôlée par preuves
+  suggested_role: AI
+  reasoning_level: xhigh
+  depends_on:
+  - T31
+  - T38
+  allowed_paths:
+  - backend/app/services/insights.py
+  test_refs:
+  - INS-01
+  - INS-02
+  acceptance: Texte libre sans chiffres inventés présentés comme faits validés.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 10
+- id: T40
+  lot: 10
+  gate: G10
+  priority: P1
+  title: Page insights et actions conseillées
+  suggested_role: UI
+  reasoning_level: high
+  depends_on:
+  - T39
+  - T27
+  allowed_paths:
+  - frontend/src/pages/Insights/
+  test_refs:
+  - INS-01
+  - INS-02
+  acceptance: Chaque constat cliquable vers données, avertissements explicites.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 10
+- id: T41
+  lot: 11
+  gate: G11
+  priority: P0
+  title: Backup/restore cohérents et exports
+  suggested_role: OPS
+  reasoning_level: xhigh
+  depends_on:
+  - T12
+  - T06
+  allowed_paths:
+  - backend/app/services/backups.py
+  - scripts/backup.sh
+  - scripts/restore.sh
+  test_refs:
+  - OPS-01
+  - OPS-02
+  acceptance: WAL snapshot cohérent; restore testé DB distincte, calculs inchangés.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 11
+- id: T42
+  lot: 11
+  gate: G11
+  priority: P0
+  title: Sécurité locale, origines et confidentialité
+  suggested_role: OPS
+  reasoning_level: xhigh
+  depends_on:
+  - T05
+  - T12
+  allowed_paths:
+  - backend/app/core/security.py
+  - docs/PRIVACY.md
+  - frontend/src/lib/
+  test_refs:
+  - SEC-01
+  - SEC-02
+  - SEC-03
+  - SEC-04
+  - SEC-05
+  acceptance: Loopback, CSRF/origin, no secret leaks, HTML échappé, appels opt-in.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 11
+- id: T43
+  lot: 11
+  gate: G11
+  priority: P0
+  title: Packaging local, commandes et manuel
+  suggested_role: OPS
+  reasoning_level: high
+  depends_on:
+  - T41
+  - T42
+  - T30
+  allowed_paths:
+  - README.md
+  - scripts/
+  - docs/USER_GUIDE.md
+  test_refs:
+  - OPS-03
+  acceptance: Démarrage reproductible, import mensuel et restauration expliqués.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 11
+- id: T44
+  lot: 11
+  gate: G11
+  priority: P0
+  title: E2E complet cycle mensuel
+  suggested_role: QA
+  reasoning_level: xhigh
+  depends_on:
+  - T43
+  - T22
+  - T30
+  - T34
+  - T35
+  - T36
+  - T37
+  - T40
+  allowed_paths:
+  - frontend/tests/e2e/
+  - backend/tests/integration/
+  test_refs:
+  - FULL-01
+  acceptance: Import 2026→revue→stats→reimport→backup→restore invariant.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 11
+- id: T45
+  lot: 11
+  gate: G11
+  priority: P0
+  title: Audit final, corrections, release v1 local
+  suggested_role: ARCH
+  reasoning_level: xhigh
+  depends_on:
+  - T44
+  allowed_paths:
+  - CHANGELOG.md
+  - docs/ETAT_IMPLEMENTATION.md
+  - docs/REGISTRE_RISQUES.md
+  test_refs:
+  - RELEASE-01
+  acceptance: Tous gates PASS, limitations explicites, tests et audit indépendants tracés.
+  proof_required:
+  - diff et contrats mis à jour
+  - tests effectivement exécutés et résultats
+  - revue indépendante
+  - risques résiduels
+  specification: PLAN_ORCHESTRATION.md §F / LOT 11
