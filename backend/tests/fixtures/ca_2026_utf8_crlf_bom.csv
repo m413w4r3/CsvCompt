@@ -8,42 +8,42 @@ Solde au 28/02/2026 1 057,48 €
 Liste des opérations du compte entre le 01/01/2026 et le 28/02/2026;
 
 Date;Libellé;Débit euros;Crédit euros;
-28/02/2026;"Virement émis
+28/02/2026;"Avoir
 X0040 OPERATION FICTIVE 40
 
 
 ";;257,86;
-26/02/2026;"Virement en votre faveur
+26/02/2026;"Remboursement de prêt
 X0039 OPERATION FICTIVE 39
 
 
 ";251,73;;
-25/02/2026;"Prélèvement
+25/02/2026;"Avoir
 X0038 OPERATION FICTIVE 38
 
 
 ";;245,60;
-23/02/2026;"Paiement par carte
+23/02/2026;"Prélèvement
 X0037 OPERATION FICTIVE 37
 
 
 ";239,47;;
-22/02/2026;"Retrait au distributeur
+22/02/2026;"Paiement par carte
 X0036 OPERATION FICTIVE 36
 
 
 ";233,34;;
-20/02/2026;"Cotisation
+20/02/2026;"Virement en votre faveur
 X0035 OPERATION FICTIVE 35
 
 
 ";;227,21;
-19/02/2026;"Règlement
+19/02/2026;"Cotisation
 X0034 OPERATION FICTIVE 34
 
 
 ";221,08;;
-17/02/2026;"Avoir
+17/02/2026;"Virement en votre faveur
 X0033 OPERATION FICTIVE 33
 
 
@@ -58,12 +58,12 @@ X0031 OPERATION FICTIVE 31
 
 
 ";202,69;;
-13/02/2026;"Virement en votre faveur
+13/02/2026;"Avoir
 X0030 OPERATION FICTIVE 30
 
 
 ";;196,56;
-11/02/2026;"Prélèvement
+11/02/2026;"Paiement par carte
 X0029 OPERATION FICTIVE 29
 
 
@@ -78,77 +78,77 @@ X0011 CAFE FICTIF
 
 
 ";45,21;;
-10/02/2026;"Paiement par carte
+10/02/2026;"Avoir
 X0028 OPERATION FICTIVE 28
 
 
 ";;184,30;
-08/02/2026;"Retrait au distributeur
+08/02/2026;"Cotisation
 X0027 OPERATION FICTIVE 27
 
 
 ";178,17;;
-07/02/2026;"Cotisation
+07/02/2026;"Règlement
 X0026 OPERATION FICTIVE 26
 
 
 ";172,04;;
-05/02/2026;"Règlement
+05/02/2026;"Virement en votre faveur
 X0025 OPERATION FICTIVE 25
 
 
 ";;165,91;
-04/02/2026;"Avoir
+04/02/2026;"Virement émis
 X0024 OPERATION FICTIVE 24
 
 
 ";159,78;;
-02/02/2026;"Remboursement de prêt
+02/02/2026;"Virement en votre faveur
 X0023 OPERATION FICTIVE 23
 
 
 ";;153,65;
-01/02/2026;"Virement émis
+01/02/2026;"Paiement par carte
 X0022 OPERATION FICTIVE 22
 
 
 ";147,52;;
-30/01/2026;"Virement en votre faveur
+30/01/2026;"Retrait au distributeur
 X0021 OPERATION FICTIVE 21
 
 
 ";141,39;;
-29/01/2026;"Prélèvement
+29/01/2026;"Avoir
 X0020 OPERATION FICTIVE 20
 
 
 ";;135,26;
-27/01/2026;"Paiement par carte
+27/01/2026;"Règlement
 X0019 OPERATION FICTIVE 19
 
 
 ";129,13;;
-26/01/2026;"Retrait au distributeur
+26/01/2026;"Avoir
 X0018 OPERATION FICTIVE 18
 
 
 ";;123,00;
-24/01/2026;"Cotisation
+24/01/2026;"Virement émis
 X0017 OPERATION FICTIVE 17
 
 
 ";116,87;;
-23/01/2026;"Règlement
+23/01/2026;"Prélèvement
 X0016 OPERATION FICTIVE 16
 
 
 ";110,74;;
-21/01/2026;"Avoir
+21/01/2026;"Virement en votre faveur
 X0015 OPERATION FICTIVE 15
 
 
 ";;104,61;
-20/01/2026;"Remboursement de prêt
+20/01/2026;"Retrait au distributeur
 X0014 OPERATION FICTIVE 14
 
 
@@ -171,17 +171,17 @@ Mention """"DEMO"""" en caisse
 
 
 ";24,50;;
-11/01/2026;"Cotisation
+11/01/2026;"Avoir
 X0008 OPERATION FICTIVE 08
 
 
 ";;61,70;
-09/01/2026;"Règlement
+09/01/2026;"Retrait au distributeur
 X0007 OPERATION FICTIVE 07
 
 
 ";55,57;;
-08/01/2026;"Avoir
+08/01/2026;"Cotisation
 X0006 OPERATION FICTIVE 06
 
 

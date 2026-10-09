@@ -43,6 +43,8 @@ class Section:
     period_start: date
     period_end: date
     operations: list[Operation] = field(default_factory=list)
+    download_date: date = field(default_factory=lambda: date(2026, 10, 9))
+    period_declared: bool = True
 
 
 @dataclass
@@ -54,6 +56,8 @@ class Fixture:
     sections: list[Section]
     anomalies: list[dict[str, object]] = field(default_factory=list)
     raw_override: bytes | None = None
+    expected_status: str | None = None
+    case_oracle: dict[str, object] = field(default_factory=dict)
 
 
 def operation(
@@ -110,18 +114,21 @@ def section_lines(
 ) -> list[str]:
     account_line = section.account + ";"
     balance = format_money(section.balance_cents, thousands_separator)
+    period_line = ""
+    if section.period_declared:
+        period_line = (
+            "Liste des opérations du compte entre le "
+            f"{section.period_start:%d/%m/%Y} et le {section.period_end:%d/%m/%Y};"
+        )
     lines = [
-        "Téléchargement du 09/10/2026;",
+        f"Téléchargement du {section.download_date:%d/%m/%Y};",
         "",
         "",
         HOLDER,
         account_line,
         f"Solde au {section.balance_date:%d/%m/%Y} {balance} €",
         "",
-        (
-            "Liste des opérations du compte entre le "
-            f"{section.period_start:%d/%m/%Y} et le {section.period_end:%d/%m/%Y};"
-        ),
+        period_line,
         "",
     ]
     if include_header:
@@ -153,17 +160,16 @@ def render_sections(
 
 
 def simple_operations() -> list[Operation]:
-    kinds = [
+    debit_kinds = [
         "Paiement par carte",
         "Prélèvement",
-        "Virement en votre faveur",
         "Virement émis",
         "Remboursement de prêt",
-        "Avoir",
         "Règlement",
         "Cotisation",
         "Retrait au distributeur",
     ]
+    credit_kinds = ["Virement en votre faveur", "Avoir"]
     items: list[Operation] = []
     start = date(2026, 1, 1)
     for index in range(40):
@@ -172,7 +178,8 @@ def simple_operations() -> list[Operation]:
         amount = 1879 + index * 613
         signed = -amount if index % 5 in (0, 1, 3) else amount
         detail = f"X{index + 1:04d} OPERATION FICTIVE {index + 1:02d}"
-        items.append(operation(day.isoformat(), kinds[index % len(kinds)], detail, signed))
+        kind = debit_kinds[index % len(debit_kinds)] if signed < 0 else credit_kinds[index % len(credit_kinds)]
+        items.append(operation(day.isoformat(), kind, detail, signed))
 
     # Les deux sens du même montant le même jour restent deux lignes distinctes.
     items[0] = operation("2026-01-02", "Virement en votre faveur", "X0001 TEST +11,23", 1123)
@@ -242,7 +249,7 @@ def overlap_sections() -> tuple[Section, Section, Section]:
 
     b: list[Operation] = [
         # Une ligne antérieure à la date max de A est tout de même présente dans B (IMP-09).
-        operation("2026-01-02", "Avoir", "X0102 LIGNE ANCIENNE FICTIVE", 7600),
+        operation("2026-03-01", "Avoir", "X0301 LIGNE ANCIENNE FICTIVE", 7600),
         overlap_base(date(2026, 3, 18)),
         group_three, group_three, group_three,
         group_four, group_four,
@@ -313,6 +320,7 @@ def scenario_operations() -> list[Operation]:
         ("Prélèvement", "CARREFOUR BANQUE CONTRAT FICTIF", -12345),
         ("Paiement par carte", "VINTED ACHAT SYNTHETIQUE", -2999),
         ("Paiement par carte", "AMAZON ACHAT SYNTHETIQUE", -7050),
+        ("Paiement par carte", "BIOCOOP FICTIF VILLE", -4310),
         ("Cotisation", "CESU MENAGE GENERIQUE", -65000),
         ("Virement en votre faveur", "SALAIRE SYNTHETIQUE A", 300000),
         ("Virement en votre faveur", "SALAIRE SYNTHETIQUE B", 250000),
@@ -324,6 +332,10 @@ def scenario_operations() -> list[Operation]:
         ("Remboursement de prêt", "ECHEANCE PRET DEMO", -90000),
     ]
     random_templates: list[tuple[str, str, int, int, str]] = [
+        ("Paiement par carte", "BIOCOOP FICTIF VILLE", 1200, 45000, "debit"),
+        ("Paiement par carte", "MARCHE DES LUCIOLES FICTIF", 1200, 45000, "debit"),
+        ("Paiement par carte", "BOULANGERIE DU PARC DEMO", 500, 9000, "debit"),
+        ("Paiement par carte", "PHARMACIE DES PLATANES FICTIVE", 500, 12000, "debit"),
         ("Paiement par carte", "EPICERIE FICTIVE", 1200, 45000, "debit"),
         ("Règlement", "RESTAURANT DEMO", 1500, 12500, "debit"),
         ("Prélèvement", "GARDE ENFANT SYNTHETIQUE", 12000, 42000, "debit"),
@@ -349,7 +361,7 @@ def scenario_operations() -> list[Operation]:
         extras.append(
             operation(dates[index].isoformat(), kind, f"X{index + 1:04d} {detail}", signed)
         )
-    for index in range(12, 138):
+    for index in range(len(fixed_details), 138):
         kind, detail, low, high, direction = rng.choice(random_templates)
         cents = rng.randint(low, high)
         signed = cents if direction == "credit" else -cents
@@ -370,12 +382,22 @@ def scenario_section(operations: list[Operation]) -> Section:
     )
 
 
-def adversarial_prefix(*, include_header: bool = True, encoding: str = "cp1252") -> bytes:
-    dummy = Section(
+def adversarial_prefix(
+    *,
+    include_header: bool = True,
+    encoding: str = "cp1252",
+    section: Section | None = None,
+) -> bytes:
+    source = section or Section(
         "Compte de Dépôt carte n° 0001", date(2026, 3, 31), 105748,
         date(2026, 1, 1), date(2026, 3, 31), [],
     )
-    lines = section_lines(dummy, include_header=include_header)
+    prefix_section = Section(
+        source.account, source.balance_date, source.balance_cents,
+        source.period_start, source.period_end, [], source.download_date,
+        source.period_declared,
+    )
+    lines = section_lines(prefix_section, include_header=include_header)
     text = "\n".join(lines) + "\n"
     return text.encode(encoding)
 
@@ -402,11 +424,14 @@ def raw_adversarial(
     body: str | bytes = "",
     encoding: str = "cp1252",
     line_ending: str = "LF",
+    expected_status: str | None = None,
+    anomaly_behavior: str | None = None,
 ) -> Fixture:
     text_encoding = "utf-8" if encoding == "utf-8" else "cp1252"
-    prefix = adversarial_prefix(include_header=True, encoding=text_encoding)
+    prefix_section = sections[0] if sections else None
+    prefix = adversarial_prefix(include_header=True, encoding=text_encoding, section=prefix_section)
     if code == "MISSING_HEADER":
-        prefix = adversarial_prefix(include_header=False, encoding=text_encoding)
+        prefix = adversarial_prefix(include_header=False, encoding=text_encoding, section=prefix_section)
     if isinstance(body, bytes):
         body_bytes = body
     else:
@@ -430,9 +455,10 @@ def raw_adversarial(
         anomalies=[{
             "line_number": line_number,
             "code": code,
-            "expected_behavior": behavior,
+            "expected_behavior": anomaly_behavior or behavior,
         }],
         raw_override=raw,
+        expected_status=expected_status,
     )
 
 
@@ -507,16 +533,142 @@ def adversarial_fixtures() -> list[Fixture]:
                             b"X9001 OPERATION FICTIVE", b"X9001 OPERATION FIC\x81TIVE"
                         ),
                         encoding="cp1252-invalid"),
-        raw_adversarial("date_out_of_period_2025.csv", behavior="avertissement", code="OUT_OF_PERIOD", line_number=11,
+        raw_adversarial(
+                        "date_out_of_period_2025.csv",
+                        behavior="OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu",
+                        code="OUT_OF_PERIOD", line_number=11,
                         sections=[Section(empty_section.account, empty_section.balance_date, empty_section.balance_cents,
                                           empty_section.period_start, empty_section.period_end, [out_of_period])],
-                        body=transaction_line(out_of_period)),
+                        body=transaction_line(out_of_period), expected_status="previewed"),
         raw_adversarial("interleaved_blank_lines.csv", behavior="avertissement", code="INTERLEAVED_BLANK_LINES", line_number=11,
                         sections=[Section(empty_section.account, empty_section.balance_date, empty_section.balance_cents,
                                           empty_section.period_start, empty_section.period_end, [spaced1, spaced2])],
                         body="\n\n" + transaction_line(spaced1) + "\n\n" + transaction_line(spaced2)),
     ]
+
+    out_of_period_item = operation("2026-03-16", "Paiement par carte", "X9010 OPERATION HORS PLAGE", -1860)
+    out_of_period_section = Section(
+        empty_section.account, empty_section.balance_date, empty_section.balance_cents,
+        date(2026, 3, 1), date(2026, 3, 15), [out_of_period_item],
+        download_date=date(2026, 3, 20),
+    )
+    result.append(raw_adversarial(
+        "out_of_period_line.csv",
+        behavior="OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu",
+        code="OUT_OF_PERIOD", line_number=11, sections=[out_of_period_section],
+        body=transaction_line(out_of_period_item), expected_status="previewed",
+    ))
+
+    period_missing_op = operation("2026-03-10", "Paiement par carte", "X9011 OPERATION DEMO", -910)
+    period_missing_section = Section(
+        empty_section.account, empty_section.balance_date, empty_section.balance_cents,
+        date(2026, 3, 1), date(2026, 3, 31), [period_missing_op],
+        download_date=date(2026, 4, 1), period_declared=False,
+    )
+    result.append(raw_adversarial(
+        "section_without_period.csv", behavior="bloquant (ADR-017)", code="MISSING_PERIOD",
+        line_number=8, sections=[period_missing_section], body=transaction_line(period_missing_op),
+        expected_status="previewed",
+    ))
+
+    repeated_in_section = operation("2026-03-05", "Paiement par carte", "X9012 OPERATION FICTIVE", -1200)
+    first_repeated_section = Section(
+        empty_section.account, date(2026, 3, 10), 104548, date(2026, 3, 1), date(2026, 3, 10),
+        [repeated_in_section], download_date=date(2026, 3, 11),
+    )
+    second_repeated_section = Section(
+        empty_section.account, date(2026, 3, 10), 104548, date(2026, 3, 1), date(2026, 3, 10),
+        [repeated_in_section], download_date=date(2026, 3, 11),
+    )
+    same_account_raw = render_sections([first_repeated_section, second_repeated_section])
+    account_bytes = (first_repeated_section.account + ";").encode("cp1252")
+    first_account_at = same_account_raw.find(account_bytes)
+    second_account_at = same_account_raw.find(account_bytes, first_account_at + len(account_bytes))
+    second_account_line = same_account_raw[:second_account_at].count(b"\n") + 1
+    duplicate_account_behavior = "rejeté structurellement (IMP-13)"
+    result.append(Fixture(
+        relative_path="adversarial/same_account_two_sections.csv",
+        encoding="cp1252", line_ending="LF", expected_behavior=duplicate_account_behavior,
+        sections=[first_repeated_section, second_repeated_section],
+        anomalies=[{
+            "line_number": second_account_line,
+            "code": "DUPLICATE_ACCOUNT_SECTION",
+            "expected_behavior": duplicate_account_behavior,
+        }],
+        expected_status="rejected",
+    ))
     return result
+
+
+def provisional_fixtures() -> list[Fixture]:
+    provisional_date = date(2026, 10, 9)
+    download_next_day = date(2026, 10, 10)
+    account = "Compte de Dépôt carte n° 0001"
+    provisional_payment = operation(
+        provisional_date.isoformat(), "Paiement par carte", "X9100 PETIT COMMERCE FICTIF", -1123,
+    )
+    fingerprint = duplicate_fingerprint(
+        account,
+        provisional_payment,
+    )
+    incomplete_behavior = "jour provisoire, mois non complet, recommander export chevauchant"
+    blocking_behavior = "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu"
+
+    section_a = Section(
+        account, provisional_date, 105748, date(2026, 10, 1), provisional_date,
+        [provisional_payment], download_date=provisional_date,
+    )
+    fixture_a = Fixture(
+        relative_path="provisional_day_A.csv", encoding="cp1252", line_ending="LF",
+        expected_behavior=incomplete_behavior, sections=[section_a], expected_status="committed",
+        anomalies=[{
+            "line_number": 11,
+            "code": "PROVISIONAL_DAY",
+            "expected_behavior": incomplete_behavior,
+        }],
+        case_oracle={
+            "test_id": "IMP-11", "role": "boundary-export", "identity_fingerprint": fingerprint,
+            "provisional_date": provisional_date.isoformat(), "truth_occurrences": 2,
+            "visible_occurrences_in_file": 1, "month_complete": False, "recommend_overlap": True,
+        },
+    )
+
+    section_b = Section(
+        account, date(2026, 10, 31), 105748, download_next_day, date(2026, 10, 31),
+        [provisional_payment], download_date=download_next_day,
+    )
+    fixture_b = Fixture(
+        relative_path="provisional_day_B.csv", encoding="cp1252", line_ending="LF",
+        expected_behavior=incomplete_behavior, sections=[section_b], expected_status="previewed",
+        anomalies=[{
+            "line_number": 11,
+            "code": "OUT_OF_PERIOD",
+            "expected_behavior": blocking_behavior,
+        }],
+        case_oracle={
+            "test_id": "IMP-11", "role": "non-overlapping-followup", "identity_fingerprint": fingerprint,
+            "provisional_date": provisional_date.isoformat(), "truth_occurrences": 2,
+            "visible_occurrences_in_file": 1, "automatic_reconciliation": "blocked-out-of-period",
+            "month_complete": False, "recommend_overlap": True,
+        },
+    )
+
+    section_b_overlap = Section(
+        account, date(2026, 10, 31), 105748, provisional_date, date(2026, 10, 31),
+        [provisional_payment, provisional_payment], download_date=download_next_day,
+    )
+    fixture_b_overlap = Fixture(
+        relative_path="provisional_day_B_overlap.csv", encoding="cp1252", line_ending="LF",
+        expected_behavior="journée provisoire chevauchée : multiplicité réconciliée n=2 (IMP-11)",
+        sections=[section_b_overlap], expected_status="committed",
+        case_oracle={
+            "test_id": "IMP-11", "role": "overlapping-followup", "identity_fingerprint": fingerprint,
+            "provisional_date": provisional_date.isoformat(), "truth_occurrences": 2,
+            "visible_occurrences_in_file": 2, "reconciled_occurrences": 2,
+            "day_completed_by_overlap": True, "month_complete": False, "recommend_overlap": True,
+        },
+    )
+    return [fixture_a, fixture_b, fixture_b_overlap]
 
 
 def duplicate_fingerprint(account: str, item: Operation) -> str:
@@ -541,6 +693,10 @@ def fixture_oracle(fixture: Fixture) -> dict[str, object]:
             "min_date": min((item.booked.isoformat() for item in operations), default=None),
             "max_date": max((item.booked.isoformat() for item in operations), default=None),
             "header_balance_cents": section.balance_cents,
+            "download_date": section.download_date.isoformat(),
+            "period_declared": section.period_declared,
+            "declared_period_start": section.period_start.isoformat() if section.period_declared else None,
+            "declared_period_end": section.period_end.isoformat() if section.period_declared else None,
         })
         for item in operations:
             fingerprint = duplicate_fingerprint(section.account, item)
@@ -549,14 +705,22 @@ def fixture_oracle(fixture: Fixture) -> dict[str, object]:
         {"fingerprint": key, "count": count}
         for key, count in sorted(groups.items()) if count > 1
     ]
+    default_status = {
+        "accepté": "committed",
+        "avertissement": "committed",
+        "rejeté": "rejected",
+    }.get(fixture.expected_behavior, "previewed")
     oracle: dict[str, object] = {
         "encoding": fixture.encoding,
         "line_ending": fixture.line_ending,
         "expected_behavior": fixture.expected_behavior,
+        "expected_status": fixture.expected_status or default_status,
         "sections": per_section,
         "duplicate_groups": duplicate_groups,
         "anomalies": fixture.anomalies,
     }
+    if fixture.case_oracle:
+        oracle["case_oracle"] = fixture.case_oracle
     if fixture.relative_path == "scenario_famille_2026.csv":
         golden: dict[str, dict[str, object]] = {}
         for item in fixture.sections[0].operations:
@@ -622,6 +786,7 @@ def build_fixtures() -> list[Fixture]:
         Fixture("scenario_famille_2026.csv", "cp1252", "LF", "accepté", [scenario_sec]),
     ]
     fixtures.extend(adversarial_fixtures())
+    fixtures.extend(provisional_fixtures())
     return fixtures
 
 

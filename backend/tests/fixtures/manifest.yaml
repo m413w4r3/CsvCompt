@@ -5,6 +5,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -13,7 +14,11 @@
           "credit_cents": 334745,
           "min_date": "2026-01-02",
           "max_date": "2026-02-28",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-02-28"
         }
       ],
       "duplicate_groups": [
@@ -28,6 +33,7 @@
       "encoding": "utf-8",
       "line_ending": "CRLF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -36,7 +42,11 @@
           "credit_cents": 334745,
           "min_date": "2026-01-02",
           "max_date": "2026-02-28",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-02-28"
         }
       ],
       "duplicate_groups": [
@@ -51,6 +61,7 @@
       "encoding": "utf-8-bom",
       "line_ending": "CRLF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -59,7 +70,11 @@
           "credit_cents": 334745,
           "min_date": "2026-01-02",
           "max_date": "2026-02-28",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-02-28"
         }
       ],
       "duplicate_groups": [
@@ -74,6 +89,7 @@
       "encoding": "utf-8",
       "line_ending": "CRLF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -82,7 +98,11 @@
           "credit_cents": 334745,
           "min_date": "2026-01-02",
           "max_date": "2026-02-28",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-02-28"
         }
       ],
       "duplicate_groups": [
@@ -97,6 +117,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -105,7 +126,11 @@
           "credit_cents": 301200,
           "min_date": "2026-01-02",
           "max_date": "2026-04-28",
-          "header_balance_cents": 182345
+          "header_balance_cents": 182345,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-04-30"
         },
         {
           "account": "Compte espèce PEA",
@@ -114,7 +139,11 @@
           "credit_cents": 15430,
           "min_date": "2026-01-22",
           "max_date": "2026-04-17",
-          "header_balance_cents": 58760
+          "header_balance_cents": 58760,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-04-30"
         }
       ],
       "duplicate_groups": [],
@@ -124,6 +153,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -132,7 +162,11 @@
           "credit_cents": 0,
           "min_date": "2026-01-03",
           "max_date": "2026-03-31",
-          "header_balance_cents": 225430
+          "header_balance_cents": 225430,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [
@@ -151,15 +185,20 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
           "operation_count": 19,
           "debit_cents": 75373,
           "credit_cents": 7600,
-          "min_date": "2026-01-02",
+          "min_date": "2026-03-01",
           "max_date": "2026-05-30",
-          "header_balance_cents": 418250
+          "header_balance_cents": 418250,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-03-01",
+          "declared_period_end": "2026-05-31"
         }
       ],
       "duplicate_groups": [
@@ -178,15 +217,20 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
           "operation_count": 34,
           "debit_cents": 146966,
           "credit_cents": 7600,
-          "min_date": "2026-01-02",
+          "min_date": "2026-01-03",
           "max_date": "2026-05-30",
-          "header_balance_cents": 418250
+          "header_balance_cents": 418250,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-05-31"
         }
       ],
       "duplicate_groups": [
@@ -205,15 +249,20 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
           "operation_count": 150,
-          "debit_cents": 11865596,
-          "credit_cents": 11355519,
+          "debit_cents": 12312393,
+          "credit_cents": 9110256,
           "min_date": "2026-01-03",
           "max_date": "2026-09-30",
-          "header_balance_cents": 237845
+          "header_balance_cents": 237845,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-09-30"
         }
       ],
       "duplicate_groups": [],
@@ -284,6 +333,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -292,7 +342,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -308,6 +362,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -316,7 +371,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -332,6 +391,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -340,7 +400,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -356,6 +420,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -364,7 +429,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -380,6 +449,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -388,7 +458,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -404,6 +478,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -412,7 +487,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -428,6 +507,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -436,7 +516,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -452,6 +536,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -460,7 +545,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -476,6 +565,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -484,7 +574,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -500,6 +594,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "avertissement",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -508,7 +603,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -524,6 +623,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [],
       "duplicate_groups": [],
       "anomalies": [
@@ -538,6 +638,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -546,7 +647,11 @@
           "credit_cents": 0,
           "min_date": null,
           "max_date": null,
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -562,6 +667,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -570,7 +676,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -586,6 +696,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -594,7 +705,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -610,6 +725,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "avertissement",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -618,7 +734,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -634,6 +754,7 @@
       "encoding": "utf-8",
       "line_ending": "LF",
       "expected_behavior": "accepté",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -642,7 +763,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -658,6 +783,7 @@
       "encoding": "cp1252-invalid",
       "line_ending": "LF",
       "expected_behavior": "rejeté",
+      "expected_status": "rejected",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -666,7 +792,11 @@
           "credit_cents": 0,
           "min_date": "2026-03-03",
           "max_date": "2026-03-03",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -681,7 +811,8 @@
     "adversarial/date_out_of_period_2025.csv": {
       "encoding": "cp1252",
       "line_ending": "LF",
-      "expected_behavior": "avertissement",
+      "expected_behavior": "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu",
+      "expected_status": "previewed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -690,7 +821,11 @@
           "credit_cents": 1100,
           "min_date": "2025-12-31",
           "max_date": "2025-12-31",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -698,7 +833,7 @@
         {
           "line_number": 11,
           "code": "OUT_OF_PERIOD",
-          "expected_behavior": "avertissement"
+          "expected_behavior": "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu"
         }
       ]
     },
@@ -706,6 +841,7 @@
       "encoding": "cp1252",
       "line_ending": "LF",
       "expected_behavior": "avertissement",
+      "expected_status": "committed",
       "sections": [
         {
           "account": "Compte de Dépôt carte n° 0001",
@@ -714,7 +850,11 @@
           "credit_cents": 500,
           "min_date": "2026-03-01",
           "max_date": "2026-03-02",
-          "header_balance_cents": 105748
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-01-01",
+          "declared_period_end": "2026-03-31"
         }
       ],
       "duplicate_groups": [],
@@ -725,6 +865,230 @@
           "expected_behavior": "avertissement"
         }
       ]
+    },
+    "adversarial/out_of_period_line.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu",
+      "expected_status": "previewed",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1860,
+          "credit_cents": 0,
+          "min_date": "2026-03-16",
+          "max_date": "2026-03-16",
+          "header_balance_cents": 105748,
+          "download_date": "2026-03-20",
+          "period_declared": true,
+          "declared_period_start": "2026-03-01",
+          "declared_period_end": "2026-03-15"
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "OUT_OF_PERIOD",
+          "expected_behavior": "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu"
+        }
+      ]
+    },
+    "adversarial/section_without_period.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "bloquant (ADR-017)",
+      "expected_status": "previewed",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 910,
+          "credit_cents": 0,
+          "min_date": "2026-03-10",
+          "max_date": "2026-03-10",
+          "header_balance_cents": 105748,
+          "download_date": "2026-04-01",
+          "period_declared": false,
+          "declared_period_start": null,
+          "declared_period_end": null
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 8,
+          "code": "MISSING_PERIOD",
+          "expected_behavior": "bloquant (ADR-017)"
+        }
+      ]
+    },
+    "adversarial/same_account_two_sections.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "rejeté structurellement (IMP-13)",
+      "expected_status": "rejected",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1200,
+          "credit_cents": 0,
+          "min_date": "2026-03-05",
+          "max_date": "2026-03-05",
+          "header_balance_cents": 104548,
+          "download_date": "2026-03-11",
+          "period_declared": true,
+          "declared_period_start": "2026-03-01",
+          "declared_period_end": "2026-03-10"
+        },
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1200,
+          "credit_cents": 0,
+          "min_date": "2026-03-05",
+          "max_date": "2026-03-05",
+          "header_balance_cents": 104548,
+          "download_date": "2026-03-11",
+          "period_declared": true,
+          "declared_period_start": "2026-03-01",
+          "declared_period_end": "2026-03-10"
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "dbaccb8c4cde9d0b352f1090d56c616ed5eb1c1d71536a991a32ac316acfaea3",
+          "count": 2
+        }
+      ],
+      "anomalies": [
+        {
+          "line_number": 22,
+          "code": "DUPLICATE_ACCOUNT_SECTION",
+          "expected_behavior": "rejeté structurellement (IMP-13)"
+        }
+      ]
+    },
+    "provisional_day_A.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "jour provisoire, mois non complet, recommander export chevauchant",
+      "expected_status": "committed",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1123,
+          "credit_cents": 0,
+          "min_date": "2026-10-09",
+          "max_date": "2026-10-09",
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-09",
+          "period_declared": true,
+          "declared_period_start": "2026-10-01",
+          "declared_period_end": "2026-10-09"
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "PROVISIONAL_DAY",
+          "expected_behavior": "jour provisoire, mois non complet, recommander export chevauchant"
+        }
+      ],
+      "case_oracle": {
+        "test_id": "IMP-11",
+        "role": "boundary-export",
+        "identity_fingerprint": "4620301943e155e8c0f01557d22a2c2fcba67fee1faf4886691c94ca67e8f5d9",
+        "provisional_date": "2026-10-09",
+        "truth_occurrences": 2,
+        "visible_occurrences_in_file": 1,
+        "month_complete": false,
+        "recommend_overlap": true
+      }
+    },
+    "provisional_day_B.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "jour provisoire, mois non complet, recommander export chevauchant",
+      "expected_status": "previewed",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 1,
+          "debit_cents": 1123,
+          "credit_cents": 0,
+          "min_date": "2026-10-09",
+          "max_date": "2026-10-09",
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-10",
+          "period_declared": true,
+          "declared_period_start": "2026-10-10",
+          "declared_period_end": "2026-10-31"
+        }
+      ],
+      "duplicate_groups": [],
+      "anomalies": [
+        {
+          "line_number": 11,
+          "code": "OUT_OF_PERIOD",
+          "expected_behavior": "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu"
+        }
+      ],
+      "case_oracle": {
+        "test_id": "IMP-11",
+        "role": "non-overlapping-followup",
+        "identity_fingerprint": "4620301943e155e8c0f01557d22a2c2fcba67fee1faf4886691c94ca67e8f5d9",
+        "provisional_date": "2026-10-09",
+        "truth_occurrences": 2,
+        "visible_occurrences_in_file": 1,
+        "automatic_reconciliation": "blocked-out-of-period",
+        "month_complete": false,
+        "recommend_overlap": true
+      }
+    },
+    "provisional_day_B_overlap.csv": {
+      "encoding": "cp1252",
+      "line_ending": "LF",
+      "expected_behavior": "journée provisoire chevauchée : multiplicité réconciliée n=2 (IMP-11)",
+      "expected_status": "committed",
+      "sections": [
+        {
+          "account": "Compte de Dépôt carte n° 0001",
+          "operation_count": 2,
+          "debit_cents": 2246,
+          "credit_cents": 0,
+          "min_date": "2026-10-09",
+          "max_date": "2026-10-09",
+          "header_balance_cents": 105748,
+          "download_date": "2026-10-10",
+          "period_declared": true,
+          "declared_period_start": "2026-10-09",
+          "declared_period_end": "2026-10-31"
+        }
+      ],
+      "duplicate_groups": [
+        {
+          "fingerprint": "4620301943e155e8c0f01557d22a2c2fcba67fee1faf4886691c94ca67e8f5d9",
+          "count": 2
+        }
+      ],
+      "anomalies": [],
+      "case_oracle": {
+        "test_id": "IMP-11",
+        "role": "overlapping-followup",
+        "identity_fingerprint": "4620301943e155e8c0f01557d22a2c2fcba67fee1faf4886691c94ca67e8f5d9",
+        "provisional_date": "2026-10-09",
+        "truth_occurrences": 2,
+        "visible_occurrences_in_file": 2,
+        "reconciled_occurrences": 2,
+        "day_completed_by_overlap": true,
+        "month_complete": false,
+        "recommend_overlap": true
+      }
     }
   }
 }

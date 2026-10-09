@@ -13,26 +13,26 @@ X0314 OPERATION FICTIVE
 
 
 ";48,18;;
-24/01/2026;"Paiement par carte
-X0124 OPERATION FICTIVE
-
-
-";61,88;;
 31/01/2026;"Paiement par carte
 X0131 OPERATION FICTIVE
 
 
 ";71,47;;
+07/02/2026;"Paiement par carte
+X0207 OPERATION FICTIVE
+
+
+";38,59;;
 23/05/2026;"Paiement par carte
 X0523 OPERATION FICTIVE
 
 
 ";60,51;;
-03/01/2026;"Paiement par carte
-X0103 OPERATION FICTIVE
+10/01/2026;"Paiement par carte
+X0110 OPERATION FICTIVE
 
 
-";33,11;;
+";42,70;;
 20/03/2026;"Paiement par carte
 X0320 PETIT COMMERCE FICTIF
 
@@ -64,11 +64,11 @@ Réf. courte 42
 
 
 ";25,80;;
-02/01/2026;"Avoir
-X0102 LIGNE ANCIENNE FICTIVE
+03/01/2026;"Paiement par carte
+X0103 OPERATION FICTIVE
 
 
-";;76,00;
+";33,11;;
 22/03/2026;"Prélèvement
 X0322 SERVICE FICTIF
 Réf. courte 42
@@ -96,11 +96,11 @@ X0530 OPERATION FICTIVE
 
 
 ";70,10;;
-28/02/2026;"Paiement par carte
-X0228 OPERATION FICTIVE
+01/03/2026;"Avoir
+X0301 LIGNE ANCIENNE FICTIVE
 
 
-";67,36;;
+";;76,00;
 09/05/2026;"Paiement par carte
 X0509 OPERATION FICTIVE
 
@@ -121,16 +121,16 @@ X0331 OPERATION FICTIVE
 
 
 ";71,47;;
-17/01/2026;"Paiement par carte
-X0117 OPERATION FICTIVE
+24/01/2026;"Paiement par carte
+X0124 OPERATION FICTIVE
 
 
-";52,29;;
-14/02/2026;"Paiement par carte
-X0214 OPERATION FICTIVE
+";61,88;;
+21/02/2026;"Paiement par carte
+X0221 OPERATION FICTIVE
 
 
-";48,18;;
+";57,77;;
 20/03/2026;"Paiement par carte
 X0320 PETIT COMMERCE FICTIF
 
@@ -152,26 +152,26 @@ X0328 SERVICE FICTIF
 
 
 ";32,74;;
-07/02/2026;"Paiement par carte
-X0207 OPERATION FICTIVE
+14/02/2026;"Paiement par carte
+X0214 OPERATION FICTIVE
 
 
-";38,59;;
-10/01/2026;"Paiement par carte
-X0110 OPERATION FICTIVE
+";48,18;;
+17/01/2026;"Paiement par carte
+X0117 OPERATION FICTIVE
 
 
-";42,70;;
+";52,29;;
 07/03/2026;"Paiement par carte
 X0307 OPERATION FICTIVE
 
 
 ";38,59;;
-21/02/2026;"Paiement par carte
-X0221 OPERATION FICTIVE
+28/02/2026;"Paiement par carte
+X0228 OPERATION FICTIVE
 
 
-";57,77;;
+";67,36;;
 02/05/2026;"Paiement par carte
 X0502 OPERATION FICTIVE
 

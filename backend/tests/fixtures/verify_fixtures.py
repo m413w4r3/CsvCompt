@@ -19,9 +19,17 @@ HEADER = ["Date", "Libellé", "Débit euros", "Crédit euros", ""]
 HOLDER = "MADAME   TEST EXEMPLE OU MONSIEUR DEMO FICTIF"
 DATE_PATTERN = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 BALANCE_PATTERN = re.compile(r"^Solde au (\d{2}/\d{2}/\d{4}) ([0-9 \u00a0]+,\d{2}) €$")
+DOWNLOAD_PATTERN = re.compile(r"^Téléchargement du (\d{2}/\d{2}/\d{4})$")
+PERIOD_PATTERN = re.compile(
+    r"^Liste des opérations du compte entre le (\d{2}/\d{2}/\d{4}) et le (\d{2}/\d{2}/\d{4})$"
+)
 EMAIL_PATTERN = re.compile(rb"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PRIVATE_DIGITS_PATTERN = re.compile(rb"[0-9]{8,}")
 IBAN_PATTERN = re.compile(rb"FR76 ?([0-9A-Z]{4} ?){5}[0-9A-Z]{3}", re.IGNORECASE)
+OUT_OF_PERIOD_BEHAVIOR = (
+    "OUT_OF_PERIOD : ambiguïté bloquante pour sa clé de jour, fichier non commité tant que non résolu"
+)
+PROVISIONAL_BEHAVIOR = "jour provisoire, mois non complet, recommander export chevauchant"
 
 
 class FixtureError(Exception):
@@ -88,14 +96,15 @@ def decode_fixture(raw: bytes, declared: str, name: str) -> tuple[str, list[tupl
 
 
 def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
-    list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, str]], dict[str, dict[str, Any]]
+    list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, str]],
+    dict[str, dict[str, Any]], dict[str, int],
 ]:
     sections: list[dict[str, Any]] = []
     groups: dict[str, int] = {}
     golden_operations: dict[str, dict[str, Any]] = {}
     anomalies: list[tuple[int, str]] = []
     if not raw:
-        return sections, [], [(0, "EMPTY_FILE")], golden_operations
+        return sections, [], [(0, "EMPTY_FILE")], golden_operations, groups
 
     parser = csv.reader(io.StringIO(text, newline=""), delimiter=";", quotechar='"', strict=True)
     current: dict[str, Any] | None = None
@@ -104,10 +113,13 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
     expected_header_line: int | None = None
     blank_records: list[tuple[int, int]] = []
     operation_lines: dict[int, list[int]] = {}
+    period_expected_lines: dict[int, int] = {}
+    provisional_days: set[tuple[int, str]] = set()
     seen_bad_header_line = False
     last_line = 0
+    pending_download_date: str | None = None
 
-    def start_section(account: str) -> int:
+    def start_section(account: str, account_line: int) -> int:
         sections.append({
             "account": account,
             "operation_count": 0,
@@ -116,8 +128,13 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
             "min_date": None,
             "max_date": None,
             "header_balance_cents": None,
+            "download_date": None,
+            "period_declared": False,
+            "declared_period_start": None,
+            "declared_period_end": None,
         })
         operation_lines[len(sections) - 1] = []
+        period_expected_lines[len(sections) - 1] = account_line + 3
         return len(sections) - 1
 
     while True:
@@ -137,8 +154,20 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
             continue
 
         first = row[0] if row else ""
+        download_match = DOWNLOAD_PATTERN.fullmatch(first)
+        if download_match:
+            pending_download_date = parse_date_safe(download_match.group(1)).isoformat()
+            continue
+
         if first.startswith("Compte "):
-            current = sections[start_section(first)]
+            if current is not None and not current["period_declared"]:
+                previous_index = len(sections) - 1
+                anomalies.append((period_expected_lines[previous_index], "MISSING_PERIOD"))
+            if any(section["account"] == first for section in sections):
+                anomalies.append((record_start, "DUPLICATE_ACCOUNT_SECTION"))
+            current = sections[start_section(first, record_start)]
+            current["download_date"] = pending_download_date
+            pending_download_date = None
             current_header = False
             header_count = 0
             expected_header_line = None
@@ -156,7 +185,11 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
                 pass
             continue
 
-        if first.startswith("Liste des opérations du compte entre le "):
+        period_match = PERIOD_PATTERN.fullmatch(first)
+        if period_match:
+            current["period_declared"] = True
+            current["declared_period_start"] = parse_date_safe(period_match.group(1)).isoformat()
+            current["declared_period_end"] = parse_date_safe(period_match.group(2)).isoformat()
             expected_header_line = record_start + 2  # une ligne vide sépare le titre de l'en-tête
             continue
 
@@ -217,6 +250,28 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
             groups[groups_key] = groups.get(groups_key, 0) + 1
 
             label = row[1]
+            kind = label.splitlines()[0] if label.splitlines() else ""
+            debit_kinds = {
+                "Paiement par carte", "Prélèvement", "Virement émis", "Remboursement de prêt",
+                "Règlement", "Cotisation", "Retrait au distributeur",
+            }
+            credit_kinds = {"Virement en votre faveur", "Avoir"}
+            if kind in debit_kinds and not (debit > 0 and credit == 0):
+                anomalies.append((record_start, "INCOHERENT_LABEL_DIRECTION"))
+            if kind in credit_kinds and not (credit > 0 and debit == 0):
+                anomalies.append((record_start, "INCOHERENT_LABEL_DIRECTION"))
+
+            period_start = current["declared_period_start"]
+            period_end = current["declared_period_end"]
+            if (period_start is not None and iso_day < period_start) or (
+                period_end is not None and iso_day > period_end
+            ):
+                anomalies.append((record_start, "OUT_OF_PERIOD"))
+            elif current["download_date"] is not None and iso_day >= current["download_date"]:
+                provisional_key = (index, iso_day)
+                if provisional_key not in provisional_days:
+                    anomalies.append((record_start, "PROVISIONAL_DAY"))
+                    provisional_days.add(provisional_key)
             golden_match = re.search(r"(?:^|\n)(S(?:0[1-9]|1[0-2])) ", label)
             if golden_match:
                 golden_operations[golden_match.group(1)] = {
@@ -231,12 +286,11 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
                 anomalies.append((record_start, "LONG_LABEL"))
             if any(ord(char) > 0xFFFF for char in label):
                 anomalies.append((record_start, "UNICODE_EXOTIC"))
-            if booked.year < 2026:
-                anomalies.append((record_start, "OUT_OF_PERIOD"))
-
     if current is not None and not current_header:
         if not seen_bad_header_line:
             anomalies.append((expected_header_line or last_line + 1, "MISSING_HEADER"))
+    if current is not None and not current["period_declared"]:
+        anomalies.append((period_expected_lines[len(sections) - 1], "MISSING_PERIOD"))
 
     for section_index, blank_line in blank_records:
         if any(line > blank_line for line in operation_lines.get(section_index, [])):
@@ -247,7 +301,7 @@ def analyze_csv(text: str, raw: bytes, name: str) -> tuple[
         {"fingerprint": fingerprint, "count": count}
         for fingerprint, count in sorted(groups.items()) if count > 1
     ]
-    return sections, duplicates, anomalies, golden_operations
+    return sections, duplicates, anomalies, golden_operations, groups
 
 
 def check_privacy(raw: bytes, text: str, name: str) -> None:
@@ -284,7 +338,7 @@ def verify_one(root: Path, relative_path: str, expected: dict[str, Any]) -> None
             raise FixtureError(f"{relative_path}: les lignes vides terminales attendues sont absentes")
     check_privacy(raw, text, relative_path)
 
-    sections, duplicate_groups, anomalies, actual_golden, = analyze_csv(text, raw, relative_path)
+    sections, duplicate_groups, anomalies, actual_golden, identity_counts = analyze_csv(text, raw, relative_path)
     actual_anomalies = normalize_anomalies(encoding_anomalies + anomalies)
     expected_anomalies = normalize_anomalies([
         (int(item["line_number"]), str(item["code"])) for item in expected["anomalies"]
@@ -311,11 +365,60 @@ def verify_one(root: Path, relative_path: str, expected: dict[str, Any]) -> None
         raise FixtureError(
             f"{relative_path}: anomalies {actual_anomalies!r}, attendu {expected_anomalies!r}"
         )
-    allowed = {"accepté", "avertissement", "rejeté"}
-    if expected["expected_behavior"] not in allowed:
-        raise FixtureError(f"{relative_path}: comportement attendu inconnu")
-    if any(item["expected_behavior"] != expected["expected_behavior"] for item in expected["anomalies"]):
-        raise FixtureError(f"{relative_path}: comportement d'anomalie incohérent avec le fichier")
+    if not isinstance(expected["expected_behavior"], str) or not expected["expected_behavior"].strip():
+        raise FixtureError(f"{relative_path}: comportement attendu absent")
+    if expected["expected_status"] not in {"committed", "previewed", "rejected"}:
+        raise FixtureError(f"{relative_path}: statut attendu inconnu")
+    if any(not isinstance(item.get("expected_behavior"), str) for item in expected["anomalies"]):
+        raise FixtureError(f"{relative_path}: comportement d'anomalie absent")
+    anomaly_codes = {item["code"] for item in expected["anomalies"]}
+    if "OUT_OF_PERIOD" in anomaly_codes:
+        if expected["expected_status"] != "previewed":
+            raise FixtureError(f"{relative_path}: une ligne hors période doit empêcher le commit")
+        if not any(
+            item["code"] == "OUT_OF_PERIOD" and item["expected_behavior"] == OUT_OF_PERIOD_BEHAVIOR
+            for item in expected["anomalies"]
+        ):
+            raise FixtureError(f"{relative_path}: attente OUT_OF_PERIOD doit être bloquante")
+    if "MISSING_PERIOD" in anomaly_codes:
+        if expected["expected_status"] != "previewed" or expected["expected_behavior"] != "bloquant (ADR-017)":
+            raise FixtureError(f"{relative_path}: une section sans plage est bloquante")
+    if "DUPLICATE_ACCOUNT_SECTION" in anomaly_codes:
+        if expected["expected_status"] != "rejected":
+            raise FixtureError(f"{relative_path}: sections associées au même compte doivent être rejetées")
+
+    case = expected.get("case_oracle")
+    if case:
+        if case.get("test_id") != "IMP-11" or case.get("truth_occurrences") != 2:
+            raise FixtureError(f"{relative_path}: oracle IMP-11 invalide")
+        actual_visible = identity_counts.get(case["identity_fingerprint"], 0)
+        if actual_visible != case["visible_occurrences_in_file"]:
+            raise FixtureError(f"{relative_path}: occurrences IMP-11 différentes du manifeste")
+        if len(sections) != 1:
+            raise FixtureError(f"{relative_path}: IMP-11 attend une section")
+        section = sections[0]
+        day = case["provisional_date"]
+        if case["role"] == "boundary-export":
+            if expected["expected_behavior"] != PROVISIONAL_BEHAVIOR:
+                raise FixtureError(f"{relative_path}: attente IMP-11 de journée provisoire divergente")
+            if section["download_date"] != day or section["declared_period_end"] != day:
+                raise FixtureError(f"{relative_path}: la borne provisoire doit égaler téléchargement et fin de période")
+            if (11, "PROVISIONAL_DAY") not in actual_anomalies:
+                raise FixtureError(f"{relative_path}: journée provisoire non détectée")
+        elif case["role"] == "non-overlapping-followup":
+            if expected["expected_behavior"] != PROVISIONAL_BEHAVIOR:
+                raise FixtureError(f"{relative_path}: attente IMP-11 d'export chevauchant divergente")
+            if section["declared_period_start"] <= day or (11, "OUT_OF_PERIOD") not in actual_anomalies:
+                raise FixtureError(f"{relative_path}: export suivant doit être non chevauchant et bloqué hors période")
+            if expected["expected_status"] != "previewed":
+                raise FixtureError(f"{relative_path}: ambiguïté hors période doit bloquer le commit")
+        elif case["role"] == "overlapping-followup":
+            if not (section["declared_period_start"] <= day <= section["declared_period_end"]):
+                raise FixtureError(f"{relative_path}: le suivi doit chevaucher le jour provisoire")
+            if (11, "OUT_OF_PERIOD") in actual_anomalies or case.get("reconciled_occurrences") != 2:
+                raise FixtureError(f"{relative_path}: le chevauchement doit réconcilier deux occurrences")
+        else:
+            raise FixtureError(f"{relative_path}: rôle IMP-11 inconnu")
 
 
 def main() -> int:
@@ -346,6 +449,31 @@ def main() -> int:
         except (FixtureError, KeyError, TypeError, ValueError, UnicodeDecodeError, csv.Error) as error:
             print(f"ECHEC : {relative_path}: {error}", file=sys.stderr)
             return 1
+    provisional = {
+        Path(name).name: item.get("case_oracle")
+        for name, item in expected_fixtures.items() if item.get("case_oracle", {}).get("test_id") == "IMP-11"
+    }
+    try:
+        a = provisional["provisional_day_A.csv"]
+        b = provisional["provisional_day_B.csv"]
+        overlap = provisional["provisional_day_B_overlap.csv"]
+        if not (a["identity_fingerprint"] == b["identity_fingerprint"] == overlap["identity_fingerprint"]):
+            raise FixtureError("IMP-11: la clé de transaction diffère entre les trois fichiers")
+        if not (
+            a["visible_occurrences_in_file"] == 1
+            and b["visible_occurrences_in_file"] == 1
+            and overlap["visible_occurrences_in_file"] == 2
+            and overlap.get("reconciled_occurrences") == max(
+                a["visible_occurrences_in_file"], overlap["visible_occurrences_in_file"]
+            )
+        ):
+            raise FixtureError("IMP-11: le chevauchement ne produit pas la vérité n=2")
+    except (KeyError, TypeError) as error:
+        print(f"ERREUR : oracle IMP-11 incomplet ({error.__class__.__name__}).", file=sys.stderr)
+        return 1
+    except FixtureError as error:
+        print(f"ERREUR : {error}", file=sys.stderr)
+        return 1
     print(f"OK : {len(expected_fixtures)} fixtures vérifiées, manifest concordant, confidentialité vérifiée.")
     return 0
 
