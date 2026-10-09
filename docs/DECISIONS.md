@@ -9,7 +9,7 @@
 - **Décision** : la racine du dépôt joue le rôle de `comptes-familiaux/` : `backend/`, `frontend/`, `config/`, `docs/`, `scripts/` et `data/` sont créés directement à la racine. Les spécifications restent dans `.nimbalyst/plan_implementation_comptes_familiaux/`, ne sont pas déplacées et font autorité.
 - **Conséquences** : les chemins du plan s'entendent relativement à la racine du dépôt, sans préfixe `comptes-familiaux/`. `AGENTS.md` et `README.md` racine sont les points d'entrée ; les copies du dossier de spécification restent la référence d'origine.
 
-## ADR-002 — GPT-6 Luna indisponible : sous-agents opus / sonnet / fable
+## ADR-002 — [OBSOLÈTE, voir ADR-006] GPT-6 Luna supposé indisponible
 
 - **Date** : 2026-10-09 · **Statut** : acceptée
 - **Contexte** : le plan demande des sous-agents « gpt-luna » high/xhigh « si accessible ». L'outil Agent de l'environnement n'expose que `sonnet`, `opus`, `haiku` et `fable` (voir `docs/ETAT_IMPLEMENTATION.md`).
@@ -67,22 +67,22 @@
 - **Conséquences** : le cas KPI-06 vérifie exactement 3000 bps sur 30 % de montant non ventilé. Les sorties en sens opposés peuvent toutefois réduire le ratio actuel ; l’indicateur de couverture en opérations doit être montré avec lui.
 - **Arbitrage orchestrateur (ADR-009)** : le numérateur de `unclassified_amount_share` est `Σ abs(résidu par transaction)` (précision de la granularité du « sum » du plan, qui en conserve l'intention « part des montants non ventilés »), afin qu'un crédit et un débit non ventilés ne s'annulent jamais (INV-10, incertitude visible). Le dénominateur reste `Σ abs(montants transactionnels pertinents)`. Le résidu signé et la couverture en nombre d'opérations restent affichés. Mise en conformité de `docs/METRICS.md`, `docs/examples/metrics_examples.yaml` et `scripts/verify_metrics_examples.py` demandée à T01 (suivi).
 
-## ADR-010 — Empreinte de compte et archive brute protégée (proposée pour arbitrage G0)
+## ADR-010 — Empreinte de compte et archive brute (chiffrement d'archive refusé en v1)
 
 - **Date** : 2026-10-09 · **Statut** : acceptée avec amendement (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : les sections CSV portent un numéro bancaire, mais INV-11 interdit de le conserver ou de le journaliser en clair ; INV-01 requiert une provenance vérifiable et T12 archive les octets bruts.
-- **Décision proposée** : calculer une empreinte de compte HMAC-SHA-256 avec clé aléatoire locale versionnée dans `app_settings`, sur le numéro canonique transitoire défini précisément dans `docs/IMPORT_CONTRACT.md`, sans exposer numéro ni empreinte dans les logs/API. Le mapping de toute empreinte inconnue est choisi explicitement par alias/rôle humain à l'aperçu et reste stable. Conserver les octets CSV exacts uniquement sous chiffrement authentifié local (AES-256-GCM, clé protégée hors du répertoire des archives) ; le hash d'idempotence porte sur les octets avant chiffrement.
+- **Proposition initiale (partiellement REFUSÉE, voir arbitrage en fin d'ADR)** : calculer une empreinte de compte HMAC-SHA-256 avec clé aléatoire locale versionnée dans `app_settings`, sur le numéro canonique transitoire défini précisément dans `docs/IMPORT_CONTRACT.md`, sans exposer numéro ni empreinte dans les logs/API. Le mapping de toute empreinte inconnue est choisi explicitement par alias/rôle humain à l'aperçu et reste stable. Conserver les octets CSV exacts uniquement sous chiffrement authentifié local (AES-256-GCM, clé protégée hors du répertoire des archives) ; le hash d'idempotence porte sur les octets avant chiffrement.
 - **Conséquences** : association stable sans numéro bancaire en clair dans la base ou l'archive ; la clé HMAC doit survivre aux sauvegardes/restaurations et toute rotation doit être auditée. Le chiffrement d'archive nécessite une primitive crypto maintenue et une procédure de récupération locale.
 - **Arbitrage orchestrateur** : l'empreinte HMAC-SHA-256 du numéro de compte (clé locale dans `app_settings`, alias choisi par l'humain) est retenue. Le **chiffrement AES-256-GCM des archives est REFUSÉ pour la v1** : l'archive des octets bruts est conservée telle quelle sous `data/originals/` (ignoré par Git, permissions 0600, jamais exposée par l'API ni les logs), conformément au PLAN §D ; le SHA-256 d'idempotence porte sur ces octets. Motifs : usage local mono-utilisateur, risque de perte de clé qui rendrait les originaux (et la restauration T41) inutilisables, dépendance cryptographique supplémentaire. Le chiffrement d'archive pourra être ajouté ultérieurement par ADR. Le numéro bancaire n'est jamais écrit en base, en log ni dans une réponse d'API.
 
-## ADR-011 — Clé d'identité prudente et casse préservée (proposée pour arbitrage G0)
+## ADR-011 — Clé d'identité prudente et casse préservée
 
 - **Date** : 2026-10-09 · **Statut** : acceptée (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : l'export ne porte pas d'identifiant bancaire par opération ; une normalisation agressive peut fusionner deux opérations distinctes. IMP-08 exige que les différences de casse ne provoquent pas une fusion abusive.
 - **Décision proposée** : la clé logique est `(account_id, booked_on, amount_cents signé, identity_label)` ; `identity_label` applique NFC et réduction des espaces Unicode seulement. La casse, les accents, chiffres et ponctuation sont conservés ; `raw_label` reste intact. L'unicité inclut un `occurrence_rank` entier positif ; le hash de tuple est auxiliaire, les colonnes portent l'unicité SQL.
 - **Conséquences** : une variation de casse peut laisser deux identités et être signalée comme candidate ; elle n'est jamais auto-fusionnée. Les alias de payee restent un mécanisme de présentation/classification séparé.
 
-## ADR-012 — Réconciliation par maximum de multiplicité (proposée pour arbitrage G0)
+## ADR-012 — Réconciliation par maximum de multiplicité (amendée par ADR-017/018)
 
 - **Date** : 2026-10-09 · **Statut** : acceptée (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : les paiements sans ID unique peuvent être strictement identiques jusqu'à quatre fois ; une simple unicité de clé perd des occurrences, tandis que sommer les exports chevauchants crée des doublons.
@@ -90,21 +90,21 @@
 - **Conséquences** : `max` est commutatif pour A/B, respecte IMP-01..05/09 et rend l'ordre de lignes sans effet sur la cardinalité lorsque les fichiers sont complets. Les doublons stricts légitimes restent des transactions distinctes par rang ; la limite d'identifiabilité des extraits partiels est visible et n'est pas résolue par fusion probabiliste.
 - **Arbitrage orchestrateur** : accepté tel quel. Précision : l'absence de plage déclarée ou une troncature structurelle bloque le commit **de la section concernée uniquement**, avec résolution humaine auditée ; les exports CA standard déclarent leur période (« entre le A et le B ») et sont traités comme des journées entières. Le maximum ne supprime jamais rien : un export partiel ne peut que sous-compter une identité (limite d'identifiabilité consignée dans le registre des risques).
 
-## ADR-013 — Identifiants UUID opaques (proposée pour arbitrage G0)
+## ADR-013 — Identifiants UUID opaques
 
 - **Date** : 2026-10-09 · **Statut** : acceptée (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : les entités référencées dans l'API ont besoin d'identifiants stables ; un compteur exposerait l'ordre et dépendrait de la base physique, un numéro de compte ne peut en aucun cas servir de clé.
 - **Décision proposée** : employer des UUIDv4 texte générés côté backend pour les comptes, transactions, imports, sources et décisions. Garder les dates `YYYY-MM-DD` comme colonnes de tri et les instants techniques en UTC `Z`.
 - **Conséquences** : IDs opaques utilisables dans les liens d'audit/API et stables après backup/restore ; ils n'ordonnent pas les événements, donc toute pagination utilise une date métier puis l'UUID comme départage.
 
-## ADR-014 — Pagination serveur par curseur signé (proposée pour arbitrage G0)
+## ADR-014 — Pagination serveur par curseur signé
 
 - **Date** : 2026-10-09 · **Statut** : acceptée (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : offset/limit devient instable lorsque des imports ajoutent des dates anciennes ou lorsque la file de revue change entre deux pages ; le plan demande tri stable par date et ID.
 - **Décision proposée** : utiliser une pagination keyset opaque signée, bornée à 100 éléments et liée aux filtres. Transactions triées `(booked_on DESC, transaction_id DESC)` avec snapshot de création ; revue triée par priorité, date max puis clé stable et invalidée avec `CURSOR_STALE` si une décision change la file.
 - **Conséquences** : pas de répétition/saut dû à un offset et résultats reproductibles pendant une navigation ; le client doit redémarrer une file de revue obsolète.
 
-## ADR-015 — Idempotence des mutations et des imports (proposée pour arbitrage G0)
+## ADR-015 — Idempotence des mutations et des imports
 
 - **Date** : 2026-10-09 · **Statut** : acceptée avec amendement (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : le navigateur ou SQLite peuvent réessayer une requête après timeout ; un import identique doit rester traçable sans produire une seconde mutation.
@@ -112,9 +112,50 @@
 - **Conséquences** : retry réseau sans double décision ou double import. Les réponses persistées n'incluent aucun secret ni libellé brut au-delà du besoin contractuel ; les entrées sont redigées et expirées selon une politique documentée.
 - **Arbitrage orchestrateur** : `Idempotency-Key` est **obligatoire pour les POST de création/commit/application** (import commit, décisions, application de règle, backup) et optionnelle pour PUT/PATCH/DELETE déjà protégés par `version` optimiste. Les GET n'en portent pas.
 
-## ADR-016 — Migrations Alembic monotones, propriétaire unique (proposée pour arbitrage G0)
+## ADR-016 — Migrations Alembic monotones, propriétaire unique
 
 - **Date** : 2026-10-09 · **Statut** : acceptée (arbitrage orchestrateur, 2026-10-09)
 - **Contexte** : plusieurs tickets travailleront sur SQLite ; modifier une révision déjà appliquée peut rendre une base locale irréparable.
 - **Décision proposée** : un seul propriétaire par lot de migration, parents/révisions Alembic linéaires, sauvegarde SQLite cohérente et vérifiée avant upgrade, `upgrade` et `downgrade` raisonnables. Un downgrade n'est accepté que s'il préserve les données ; toute transformation irréversible s'arrête explicitement et demande une restauration sûre ou une migration corrective vers l'avant. Une migration appliquée n'est jamais réécrite.
 - **Conséquences** : aucun patch concurrent sur un même historique de migration ; les changements de catégories, identité ou flux nécessitent backfill/version explicites et tests sur copie.
+
+## ADR-017 — Atomicité de l'import : tout ou rien par fichier (remplace la précision « par section » d'ADR-012)
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revues G0 Opus B-02 et Luna F-01)
+- **Contexte** : ADR-012 bloquait « la section concernée uniquement », IMPORT_CONTRACT bloquait le fichier ou des clés de jour ; un commit partiel enregistrerait le hash du fichier et rendrait les lignes restantes irrécupérables (no_op).
+- **Décision** : l'unité transactionnelle est **le fichier**. Tout élément non résolu (section sans plage déclarée, ligne hors période, clé de jour ambiguë, deux sections associées au même compte, section de compte inconnue non mappée, erreur structurelle ou monétaire) empêche le commit : le fichier reste `previewed` (ou `rejected` si irrécupérable) et n'enregistre aucune transaction, `source_row` ni hash « committed ». Les résolutions humaines (mapping de compte, plage, décision de multiplicité) se font **dans l'aperçu** ; puis un unique `BEGIN IMMEDIATE` commite l'ensemble. Statuts d'import : `previewed`, `committed`, `rejected`, `no_op` — aucun statut partiel. API : pas de résultat `partial`.
+- **Conséquences** : INV-04 décidable ; un réimport après résolution n'est jamais un faux `no_op` ; l'ADR-012 est amendée en conséquence.
+
+## ADR-018 — Complétude des journées, jour de téléchargement et lignes hors période
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue Opus B-01)
+- **Contexte** : le maximum de multiplicité (ADR-012) suppose des journées complètes ; un export tiré le jour même, ou une ligne hors période déclarée, peut faire sous-compter un doublon légitime tout en affichant un mois « complet ».
+- **Décision** : (1) la date du préambule `Téléchargement du JJ/MM/AAAA` (à défaut, la date de réception) est la **date de génération** ; toute journée ≥ date de génération est `provisional` : elle compte dans les cumuls bancaires mais n'est **jamais** « complète » ; `complete_through = min(fin de période, date de génération − 1 jour)`. Un mois n'est `complete` que si son dernier jour ≤ `complete_through` pour chaque compte sélectionné ; l'aperçu recommande de refaire l'export en chevauchant la journée provisoire. (2) Une ligne datée hors de la période déclarée de sa section est `OUT_OF_PERIOD` : **ambiguïté bloquante pour sa clé de jour** (ADR-017) — elle n'est jamais utilisée par le maximum automatique ; l'aperçu propose « lier à l'occurrence existante » ou « créer le rang supplémentaire » (décision humaine auditée). (3) Un mois dont un contrôle de solde d'en-tête est en `mismatch` passe à `month_completeness = unknown`. (4) Sur le CSV réel 2026 (profil local, agrégats seulement) les dates min/max coïncident avec la période annoncée : aucune ligne hors période observée.
+- **Conséquences** : nouveaux tests IMP-11 (jour de génération provisoire), IMP-12 (ligne hors période), IMP-13 (même compte dans deux sections) ; mise à jour de la fixture `date_out_of_period_2025.csv` (comportement : bloquant pour sa clé de jour, pas simple avertissement).
+
+## ADR-019 — Durcissement de l'intégrité en base (revue Opus M-01..M-06, m-01, m-03)
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur)
+- **Décision** : (a) chaque connexion SQLite pose `PRAGMA foreign_keys=ON` **et** `recursive_triggers=ON` (listener `connect`) ; `INSERT OR REPLACE`/`REPLACE INTO` sont interdits dans le code (garde lint/grep) ; test T06 qui vérifie les PRAGMA sur une connexion du pool ; le service d'import utilise `BEGIN IMMEDIATE` explicite (mode `isolation_level=None` ou hook `begin`) et lit le hash **sous le verrou**. (b) Triggers `source_rows` : le compte de la transaction cible = compte de la section ; l'import est `previewed` ou `committed` (jamais `no_op`/`rejected`) ; `UNIQUE(import_file_id, transaction_id)` tant qu'un compte n'apparaît qu'une fois par fichier (ADR-017/IMP-13). (c) Trigger `transactions` : `occurrence_rank = 1` ou rang−1 existant (contiguïté) ; `n_existing = max(occurrence_rank)` ; le service signale `count ≠ max` comme anomalie bloquante ; contrôle de fin de commit : toute transaction a ≥ 1 `source_row`, et par import/identité le nombre de sources = `n_new`. (d) `import_files`, `import_account_sections` immuables et non supprimables dès `committed` (statut, hash, archive, couverture, mapping) ; transitions autorisées `previewed → committed|rejected` ; un `no_op` référence (`duplicate_of`) un import `committed` de même hash. (e) `allocations` : signe de l'allocation = signe de la transaction ; Σ allocations confirmées de même signe et |Σ| ≤ |montant| (l'égalité exacte est vérifiée par le service en fin de décision) ; direction des catégories (`flow_savings_out` < 0, `flow_savings_in` > 0, `flow_loan_disbursement` > 0, `income_*` > 0…) ; allocations confirmées non modifiables/supprimables en place (versionnement `superseded_by` + audit). (f) `transaction_links` : Σ liens `confirmed` par source ≤ montant du crédit ; Σ par cible ≤ |montant de l'achat| ; source = crédit `refund`, cible = débit `expense`. (g) `identity_label` : ensemble de blancs = propriété Unicode `White_Space` ; caractères `Cf` (ZWSP, BOM interne…) = avertissement d'aperçu, jamais supprimés silencieusement ; CHECK `identity_label = trim(identity_label)` et pas de double espace. (h) Seuls des `int` Python stricts (`type(x) is int`) sont liés comme montants. (i) Montant nul : **rejeté** pour le format CA (cohérent avec la fixture `zero_amount.csv`).
+- **Conséquences** : `verify_schema.py` couvre ces contraintes, IMP-06/IMP-07 (rollback, deux connexions) et DELETE/REPLACE.
+
+## ADR-020 — Représentation du flux d'une transaction, épargne sur allocations, pertinence au résidu
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue Opus M-07, Luna F-02/F-03)
+- **Décision** : `transactions` ne porte **pas** de `flow_kind` stocké. Le flux est porté par les allocations confirmées ; le flux d'une transaction est **dérivé** : `unknown` si aucune allocation confirmée, sinon le(s) `flow_kind` de ses allocations (multi-flux autorisé) ; le **résidu non ventilé** (signé) est toujours rapporté en `unknown`. Le filtre API `flow_kind=X` retient les transactions ayant une allocation confirmée de flux X ; `flow_kind=unknown` retient celles dont le résidu est ≠ 0. `savings_net_transferred` se calcule sur les **allocations confirmées** `transfer_savings` (pas sur le montant de la transaction) ; la pertinence de `unclassified_amount_share` est définie au **résidu** (tout résidu ≠ 0 est pertinent) : numérateur = Σ|résidu|, dénominateur = Σ|allocations confirmées pertinentes| + Σ|résidus| ; `operational_saving_capacity` vaut `null` si un résidu ≠ 0 existe sur la période/les comptes sélectionnés (ADR-008).
+- **Conséquences** : exemples YAML avec transaction multi-flux et transaction partiellement ventilée sur flux non pertinent ; aucune double imputation d'une sortie scindée.
+
+## ADR-021 — Imputation des remboursements liés
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue Opus M-08)
+- **Décision** : l'effet d'un lien `refund_of` **confirmé** réduit la consommation de la catégorie de l'achat d'origine **à la date de l'avoir** (jamais de réécriture rétroactive d'un mois passé). Les deux jambes (avoir et achat) doivent appartenir au périmètre de comptes sélectionné ; sinon le lien est ignoré dans cette vue (avoir « non attribué » + avertissement). Les liens `proposed` ne comptent pas. Une consommation nette négative sur un mois/catégorie est permise et signalée (« remboursement d'un achat antérieur »). Le drilldown affiche le lien et l'achat d'origine. Le type de lien est `refund_of` partout (YAML, schéma, API).
+
+## ADR-022 — Enveloppe personnelle vs dépenses du compte personnel importé
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue Opus M-09)
+- **Décision** : paramètre de filtre `personal_mode ∈ {envelope, observed}`, défaut `envelope`. `envelope` : les dépenses des comptes de rôle `personal` sont exclues de `consumption_net` ; `allocation_personal` compte. `observed` : `allocation_personal` est exclu de la lecture « vie familiale », les dépenses observées des comptes personnels sont incluses, la jambe créditrice côté compte personnel est `transfer_owned`, et le reliquat non dépensé est signalé. Jamais les deux dans le même total (PLAN §C2).
+
+## ADR-023 — Clé HMAC de compte, sauvegarde et idempotence (revue Luna F-06, F-11, F-04)
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur)
+- **Décision** : la clé HMAC est une valeur aléatoire locale dans `app_settings` (`is_secret=1`), jamais renvoyée par l'API ni journalisée ; elle est **incluse dans les sauvegardes** (qui sont des données privées au même niveau de confiance que la base : permissions 0600, exclues de Git) ; clé perdue ⇒ les comptes ne sont plus reconnus et exigent un **remappage explicite dans l'aperçu**. Les enregistrements d'idempotence sont conservés **7 jours** puis purgés (tâche au démarrage) ; les mutations créatrices restent rejouables pendant cette durée. Les faits d'un insight sont stockés dans une table `insight_facts` (un `metric_definition_id` validé contre le registre des 11 IDs de `METRICS.md` par fait) ; `insights.metric_definition_id` est supprimé. Le propriétaire G0 est le **rôle** du backlog (pas de nom nominatif).

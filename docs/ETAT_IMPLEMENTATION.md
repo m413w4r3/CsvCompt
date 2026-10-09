@@ -18,7 +18,7 @@
 
 | Gate | Jalon | Statut | Rapport |
 |---|---|---|---|
-| G0 | M0 contrats | EN COURS | — |
+| G0 | M0 contrats | **BLOCK → corrections en cours** (revues Opus + Luna du 2026-10-10 : 3 bloquants/majeurs d'import tranchés par ADR-017..023) | docs/revues/REVUE_G0_opus.md, docs/revues/REVUE_G0_luna.md |
 | G1 | M1 | à venir | — |
 | G2 | M1 | à venir | — |
 | G3 | M1 | à venir | — |
@@ -36,10 +36,10 @@
 | Ticket | Lot | Statut | Sous-agent (modèle) | Commit | Tests exécutés / résultat | Revue indépendante |
 |---|---|---|---|---|---|---|
 | T00 | 0 | PASS | Sonnet (outil Agent, avant correction de config) | dbf46ca | `check_no_private_data.sh` OK ; `validate_plan.py` OK ; `git check-ignore` confirmé | contrôle orchestrateur (revue indépendante non requise : ARCH/doc) |
-| T01 | 0 | livré, suivi ADR-009 en cours | GPT-6 Luna xhigh (session 66da88ba) | — | `verify_metrics_examples.py` PASS (re-exécuté par l'orchestrateur) ; garde OK | revue G0 à lancer |
-| T02 | 0 | actif | GPT-6 Luna xhigh (session 3e637e8f) | — | — | — |
-| T03 | 0 | actif | GPT-6 Luna xhigh (session 1d3b360f) | — | — | — |
-| T04 | 0 | en attente | — | — | — | — |
+| T01 | 0 | livré — corrections G0 en cours | GPT-6 Luna xhigh (66da88ba) | 310066e | verify_metrics_examples PASS | revue Opus + Luna : voir G0 |
+| T02 | 0 | livré — corrections G0 en cours | GPT-6 Luna xhigh (3e637e8f) | 2ac50be | verify_schema PASS | revue Opus + Luna : BLOCK → ADR-017..023 |
+| T03 | 0 | livré — compléments G0 en cours | GPT-6 Luna xhigh (1d3b360f) | 0a6572e | verify_fixtures PASS (28), déterminisme prouvé | revue Luna : OK |
+| T04 | 0 | PASS | GPT-6 Luna high (79be58cf) | f60215c | self-test 4 OK ; profil local CSV réel : 1 024 opérations, 2026-01-01→2026-10-09, 1 section, 2 groupes identiques (mult. max 4) | revue Luna : F-05 (test pytest réel à T09) |
 
 (T05..T45 : `en attente`, voir `.nimbalyst/plan_implementation_comptes_familiaux/backlog.yaml`.)
 
