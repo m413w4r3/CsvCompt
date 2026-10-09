@@ -1,6 +1,6 @@
 # Contrat d'identité et de réconciliation des imports
 
-**Version :** 1 · **Ticket :** T02 · **Gate visé :** G0 · **Références :** PLAN §B/C/D/F, MATRICE IMP-01..10, INV-01..05/08/09/11/14.
+**Version :** 1 · **Ticket :** T02 · **Gate visé :** G0 · **Références :** PLAN §B/C/D/F, MATRICE IMP-01..14, INV-01..05/08/09/11/14, ADR-017..019.
 
 Ce contrat définit l'identité des sections de compte, l'identité stricte d'une opération et la réconciliation de ses occurrences. Il ne dépend ni de l'ordre des lignes ni d'une date maximale déjà importée. Il ne fusionne jamais des opérations par ressemblance approximative.
 
@@ -13,9 +13,9 @@ Ce contrat définit l'identité des sections de compte, l'identité stricte d'un
 3. Seule l'empreinte hexadécimale et la version de clé sont enregistrées dans `accounts` et `import_account_sections`. Le numéro reçu ne sert jamais d'alias. L'alias affiché (ex. « courant familial ») est choisi explicitement par l'utilisateur ; l'API n'en propose pas un en recopiant l'en-tête.
 4. Pour une section dont l'empreinte n'existe pas, l'aperçu indique « compte inconnu — section N » et propose une association explicite : choisir un compte existant ou créer un compte et saisir son alias/rôle. Aucun commit n'est autorisé tant que chaque section exploitable n'a pas de mapping explicite. L'aperçu ne montre pas le numéro complet ; tout exemple éventuel est masqué sans valeur de retour réversible.
 5. Aux imports suivants, une empreinte égale retrouve le même `account_id` et le mapping validé reste stable. Une empreinte inconnue ne se rattache jamais à un compte par alias, libellé ou proximité. Une empreinte correspondant à plusieurs candidats ou à une clé locale perdue bloque le commit et demande une résolution humaine ; aucune nouvelle identité silencieuse n'est créée.
-6. Une rotation de clé est une opération explicite, sauvegardée et auditée qui recalcule les empreintes à partir d'une entrée protégée ou d'un remappage humain. Elle ne renumérote ni les `account_id`, ni les transactions. La sauvegarde/restauration doit préserver le secret local, sous chiffrement/protection du backup.
+6. Une rotation de clé est une opération explicite, sauvegardée et auditée qui recalcule les empreintes à partir d'une entrée protégée ou d'un remappage humain. Elle ne renumérote ni les `account_id`, ni les transactions. Chaque backup inclut la clé HMAC nécessaire aux empreintes ; l'archive du backup reste locale, ignorée par Git et en mode `0600` (ADR-023).
 
-La clé HMAC n'est pas une donnée de diagnostic. Les journaux ne contiennent ni le numéro, ni la valeur HMAC si elle peut servir de traceur inter-session ; ils peuvent contenir l'`account_id` opaque et l'alias choisi dans l'interface locale. L'accès à `app_settings` et aux archives est limité au compte local.
+La clé HMAC n'est pas une donnée de diagnostic. Les journaux ne contiennent ni le numéro, ni la valeur HMAC si elle peut servir de traceur inter-session ; ils peuvent contenir l'`account_id` opaque et l'alias choisi dans l'interface locale. L'API ne renvoie jamais la clé. L'accès à `app_settings` et aux archives est limité au compte local.
 
 ### Octets de fichier et archivage
 
@@ -35,15 +35,15 @@ La clé logique `identity_key` est le tuple ordonné :
 
 `amount_cents` est un entier signé : débit négatif, crédit positif. Un débit `-1123` et un crédit `+1123` sont donc deux identités. `flow_kind`, payee, catégorie, statut de revue et numéro de ligne n'entrent jamais dans l'identité : ce sont des données de classification ou de provenance, pas des faits bancaires fiables pour dédoublonner.
 
-Un montant nul peut être conservé comme opération source si le parseur du format la juge valide ; il reste sans allocation confirmée (par exemple `unknown` ou `reconciliation`) et ne constitue jamais un flux positif/négatif. Une ligne zéro jugée invalide par le format reste une anomalie bloquante au preview, jamais une valeur corrigée silencieusement.
+Le format Crédit Agricole rejette tout montant nul (`ZERO_AMOUNT`) au preview. Il ne crée ni transaction ni `source_row` pour cette ligne et le fichier entier ne peut pas être commité tant que l’erreur n’est pas corrigée ou le fichier rejeté (ADR-019.i).
 
 `identity_label` est dérivé prudemment du libellé CSV décodé :
 
 1. normalisation Unicode NFC ;
-2. remplacement de chaque suite de caractères Unicode blancs par une espace ASCII ;
-3. suppression des espaces de début et de fin.
+2. remplacement de chaque suite de caractères de la propriété Unicode `White_Space` par une espace ASCII ;
+3. suppression des espaces ASCII de début et de fin.
 
-La casse, les accents, la ponctuation, les chiffres et l'ordre des mots sont conservés. Il n'y a ni `casefold`, ni suppression des accents, ni tri de mots, ni translittération, ni suppression de chiffres. Cette règle est délibérément prudente : IMP-08 demande que deux libellés de casse différente ne soient pas fusionnés automatiquement. Une différence de casse produit donc deux identités strictes ; un alias de marchand peut rapprocher leur présentation ultérieurement sans fusionner les transactions.
+La casse, les accents, la ponctuation, les chiffres et l'ordre des mots sont conservés. Il n'y a ni `casefold`, ni suppression des accents, ni tri de mots, ni translittération, ni suppression de chiffres. Les caractères de catégorie Unicode `Cf` (par exemple U+200B ou un BOM interne U+FEFF) sont préservés et donnent un avertissement visible au preview ; ils ne sont jamais supprimés silencieusement. Cette règle est délibérément prudente : IMP-08 demande que deux libellés de casse différente ne soient pas fusionnés automatiquement. Une différence de casse produit donc deux identités strictes ; un alias de marchand peut rapprocher leur présentation ultérieurement sans fusionner les transactions.
 
 `raw_label` garde le champ d'origine tel que décodé (y compris ponctuation, casse et espaces internes). La clé stockée `identity_key_sha256` est un SHA-256 technique des quatre champs typés et cadrés sans ambiguïté (longueur UTF-8 + octets pour chaque composant, montant en base 10 signé). Les comparaisons d'autorité restent faites sur les quatre colonnes, et l'unicité SQL est `(account_id, booked_on, amount_cents, identity_label, occurrence_rank)` ; un hash n'est jamais l'unique preuve d'égalité.
 
@@ -51,18 +51,18 @@ La casse, les accents, la ponctuation, les chiffres et l'ordre des mots sont con
 
 ### Règle normative
 
-Pour chaque tuple `identity_key`, le commit compte :
+Pour chaque tuple `identity_key`, le commit compte (après validation du mapping et des résolutions humaines du preview) :
 
-- `n_existing` : nombre/rang maximal déjà présent pour ce compte et cette identité ; les rangs validés sont contigus de `1` à `n_existing` ;
+- `n_existing = max(occurrence_rank)` déjà présent pour ce compte et cette identité, ou `0` si aucune occurrence n'existe ; le service vérifie `count(*) = max(occurrence_rank)` avant d'utiliser ce maximum. Un trou de rang est une anomalie bloquante, jamais comblée implicitement ; les rangs validés sont contigus de `1` à `n_existing` ;
 - `n_new` : nombre d'occurrences de la même identité dans le fichier courant, tous les rangs comptés avant d'écrire.
 
-Il crée les transactions manquantes pour `n_existing + 1 … max(n_existing, n_new)` et aucune autre. Le résultat est `max(n_existing, n_new)`, jamais `n_existing + n_new`. Chaque occurrence du nouveau fichier reçoit toutefois son `source_row`, liée au rang correspondant `1 … n_new`, y compris lorsque la transaction de ce rang existait déjà. Les lignes équivalentes sont ordonnées par `logical_row_idx` uniquement pour distribuer leurs provenances ; l'ensemble de transactions et ses rangs ne dépendent pas de cet ordre.
+Il crée les transactions manquantes pour `n_existing + 1 … max(n_existing, n_new)` et aucune autre. Le résultat est `max(n_existing, n_new)`, jamais `n_existing + n_new`. Chaque occurrence admise du fichier reçoit une `source_row`, liée au rang correspondant ; les résolutions explicites d’une ambiguïté de jour peuvent lier une ligne à un rang existant ou demander le prochain rang supplémentaire. Les lignes identiques non ambiguës sont ordonnées par `logical_row_idx` uniquement pour distribuer leurs provenances ; l'ensemble automatique de transactions et ses rangs ne dépend pas de cet ordre.
 
-Le commit traite tous les groupes d'identité dans une seule transaction SQL `BEGIN IMMEDIATE`. Il relit les rangs sous le verrou d'écriture, puis s'appuie sur `UNIQUE(account_id, booked_on, amount_cents, identity_label, occurrence_rank)` comme dernière barrière contre un doublon concurrent.
+Le service calcule le SHA-256 des octets reçus, ouvre une connexion en mode autocommit (`isolation_level=None`), démarre `BEGIN IMMEDIATE`, puis lit le hash sous le verrou d'écriture. Si un import de ce hash est déjà commité, il crée la tentative `no_op` et termine sans transaction ni `source_row`. Sinon il valide sous ce même verrou la cohérence des rangs, puis écrit toutes les sections, transactions, `source_rows` et audits avant de passer l’unique import de `previewed` à `committed`. `UNIQUE(account_id, booked_on, amount_cents, identity_label, occurrence_rank)` est la dernière barrière contre un doublon concurrent.
 
 ### Exemples et invariance
 
-| État | Nombre existant | Occurrences du fichier | Créations | Résultat |
+| État | `n_existing` | `n_new` | Créations | Résultat |
 |---|---:|---:|---:|---:|
 | A apporte deux paiements identiques | 0 | 2 | ranks 1 et 2 | 2 |
 | B contient trois occurrences identiques | 2 | 3 | rank 3 seulement | 3, IMP-04 |
@@ -75,17 +75,22 @@ Pour tout ordre d'import des contenus distincts, le nombre final de transactions
 
 - **Exports plus ancien/plus récent couvrant le même jour :** aucune règle `booked_on > max(booked_on)` n'est permise. Chaque clé de chaque ligne est comparée à l'ensemble existant, même si des lignes plus récentes ont déjà été commitées. Une ligne ancienne réapparaissant dans B (IMP-09) est liée à son rang existant ; une occurrence de plus crée le rang manquant.
 - **Fenêtres non communes :** les lignes de dates sans correspondance exacte s'ajoutent. La couverture est l'union des intervalles explicitement annoncés par section ; les dates sans transaction à l'intérieur d'un intervalle ne sont pas un trou. On ne déduit aucune suppression d'une opération absente d'un autre export.
-- **Hypothèse de complétude nécessaire au maximum :** `n_new` n'est comparable à `n_existing` que si la période déclarée du CSV est complète, inclusive et non tronquée pour chaque journée couverte (toutes les opérations bancaires de cette journée sont présentes). Le format fourni exprime des dates, pas des heures ; les bornes du relevé sont traitées comme des journées entières. Si l'aperçu ne peut pas établir cette complétude — fichier tronqué, section sans plage, export explicitement partiel — il marque les clés de jour concernées comme ambiguës et bloque leur commit automatique ; il ne choisit ni de fusionner ni de créer un rang incertain. L'utilisateur fournit un export complet ou tranche via une action explicite et auditée. Sans ID bancaire unique, un export réellement partiel ne permet pas de distinguer sûrement un doublon réexporté d'un nouveau paiement identique.
+- **Jour de génération (IMP-11) :** la date du préambule `Téléchargement du JJ/MM/AAAA` est `generated_on`; si elle manque, le backend prend la date locale de réception du fichier. Chaque journée `d >= generated_on` est `provisional` : ses opérations restent dans les sommes observées, mais elle ne prouve jamais une journée complète. Pour chaque section, `complete_through = min(coverage_through, generated_on - 1 jour)`. L'aperçu recommande de télécharger à nouveau en chevauchant le dernier jour provisoire. Un mois n'est `complete` que si la couverture calendaire est continue et que sa fin est au plus `complete_through` pour chaque compte sélectionné. Si un solde d'en-tête est `mismatch`, `month_completeness=unknown`.
+- **Ligne hors période (IMP-12) :** une ligne dont `booked_on` est hors des bornes déclarées de sa section est marquée `OUT_OF_PERIOD` et exclue du maximum automatique pour sa clé de jour. Elle bloque le commit du fichier entier tant qu'une décision auditée n'est pas prise dans l'aperçu : `link_existing` vers un rang existant ou `create_occurrence` au rang supplémentaire suivant. Elle n'est jamais une simple alerte que l'on pourrait ignorer.
 - **Troisième paiement strictement identique dans B :** A a `n=2`, B `n=3` ; rank 3 est créé une fois, même si B est importé deux fois ensuite. Si B n'en contient que deux, aucun rank 3 n'est supprimé (IMP-04, jamais de purge automatique).
 - **Clés proches mais différentes :** date, signe/montant, compte ou casse/libellé distincts restent distincts. Une recherche candidate peut proposer à l'audit des identités de même compte/date/montant dont le libellé normalisé est proche ; elle enregistre les deux IDs et le motif, sans fusionner, réécrire l'identité ni supprimer une ligne. Une décision humaine explicite et auditée est requise pour toute correction ultérieure.
-- **Plusieurs sections dans le même fichier :** le compte fait partie de la clé. Deux sections de comptes différents ne se rapprochent pas ; le mapping de section est validé avant calcul des clés.
-- **Une ligne rejetée ou ambiguë :** elle reste visible par son numéro logique et son code d'anomalie. Une erreur structurelle ou monétaire bloque le commit de tout le fichier ; seuls les avertissements non bloquants peuvent coexister avec un commit complet. Les rejets persistés gardent code/champ/ligne et message redigé, jamais l'extrait brut. Aucun libellé hostile ne devient une instruction ; aucun échec partiel ne laisse de transactions.
+- **Plusieurs sections dans le même fichier (IMP-13) :** chaque section doit être explicitement mappée à un compte. Si deux sections du même fichier pointent vers le même `account_id`, le fichier est structurellement rejeté ; on ne calcule jamais `n_new` sur un compte répété. Des sections sur des comptes distincts sont autorisées et restent isolées.
+- **Une ligne rejetée ou ambiguë :** elle reste visible par son numéro logique et son code d'anomalie. Une erreur structurelle ou monétaire bloque le commit de tout le fichier ; seuls les avertissements non bloquants peuvent coexister avec un commit complet. Les rejets persistés gardent code/champ/ligne et message rédigé, jamais l'extrait brut. Aucun libellé hostile ne devient une instruction ; aucun échec partiel ne laisse de transactions.
+
+### Atomicité par fichier et statuts
+
+L'unique unité d'atomicité métier est le fichier (ADR-017). Les seuls statuts sont `previewed`, `committed`, `rejected` et `no_op`. Les sections et les clés de jour ne sont jamais commitées partiellement : si un compte n'est pas mappé, une plage manque, une ligne hors période n'est pas résolue, un rang est ambigu/non contigu, ou le parsing rencontre une erreur bloquante, aucune transaction et aucune `source_row` du fichier n'est écrite. Une anomalie récupérable laisse le fichier `previewed` pour résolution humaine dans l'aperçu ; un fichier irrécupérable peut devenir `rejected`. Après résolution, le même aperçu peut être commité en entier. Un hash déjà commité donne une tentative distincte `no_op` de zéro provenance. Aucun contrat ou résultat d'import n'utilise l'état `partial`.
 
 ## Provenance `source_rows` et idempotence de fichier
 
 Une `source_rows` représente une occurrence dans un contenu de fichier commité : elle référence `(import_file_id, section_index, logical_row_idx)`, un `transaction_id` et un hash de ligne, sans recopier le numéro bancaire. Il existe une ligne pour chaque occurrence interprétée de chaque fichier commité. Plusieurs `source_rows` d'exports chevauchants pointent vers une seule transaction (`N → 1`). L'unicité `(import_file_id, section_index, logical_row_idx)` empêche une même ligne logique de provenance d'être inscrite deux fois.
 
-Le SHA-256 du fichier entier est unique parmi les imports `committed`. Un nouvel essai avec les mêmes octets crée une tentative `no_op` rattachée à l'import d'origine et un événement d'audit, mais **0 transaction et 0 source_row nouvelle** : le contenu a déjà une représentation complète dans sa première provenance. Deux fichiers différents qui contiennent les mêmes opérations gardent chacun leurs `source_rows`.
+Le SHA-256 du fichier entier est unique parmi les imports `committed`. Un nouvel essai avec les mêmes octets crée une tentative `no_op` rattachée à l'import commité de même hash et un événement d'audit, mais **0 transaction et 0 `source_row` nouvelle** : le contenu a déjà une représentation complète dans sa première provenance. Un fichier `rejected` ou encore `previewed` ne réserve pas son hash ; après correction/résolution humaine, les mêmes octets peuvent donc être commités. Deux fichiers différents qui contiennent les mêmes opérations gardent chacun leurs `source_rows`.
 
 Les octets bruts sont archivés sans transformation et le fichier est immuable après son renommage atomique ; chemin relatif, mode de stockage `raw` et permissions attendues `0600` sont décrits dans `import_files`. Les champs sources de `transactions` (compte, date, centimes, `raw_label`, identité, rang, date d'import) et toutes les colonnes de `source_rows` sont protégés par les triggers SQL du schéma de référence ; une correction analytique ne les modifie jamais.
 
@@ -93,7 +98,7 @@ Les octets bruts sont archivés sans transformation et le fichier est immuable a
 
 Le service écrit d'abord les octets exacts dans un fichier temporaire sous `data/originals/`, lui applique le mode `0600`, puis le renomme vers `data/originals/<import_file_id>.bin`. Il exécute ensuite le commit métier sous un unique `BEGIN IMMEDIATE` : statut/sections, empreintes et couverture, transactions manquantes, `source_rows`, candidats d'audit et événement final. Une erreur de parsing bloque le commit avant cette transaction. Une erreur SQL/contrainte interrompt le commit et provoque `ROLLBACK` complet : aucune transaction, provenance ou allocation partielle n'est publiée (INV-04, IMP-06).
 
-Avec deux demandes concurrentes sur le même hash calculé sur les octets originaux, SQLite sérialise les écrivains ; la seconde relit le hash commité et est tracée `no_op`. Si le délai d'attente SQLite expire, elle répond par une erreur réessayable, sans écriture partielle. L'index unique partiel des hashes committés protège aussi contre une course résiduelle (IMP-07). Les tentatives rejetées conservent les octets originaux sous `data/originals/` en mode `0600` et un diagnostic rédigé ; elles n'altèrent jamais les imports committés, leurs sources, transactions, allocations ou décisions.
+Avec deux demandes concurrentes sur le même hash calculé sur les octets originaux, chaque service exécute `BEGIN IMMEDIATE` avant sa lecture du hash. Le premier écrivain commite ; le second attend le verrou, relit ensuite le hash commité et est tracé `no_op`. Si le délai d'attente SQLite expire, il répond par une erreur réessayable, sans écriture partielle. L'index unique partiel des hashes committés protège aussi contre une course résiduelle (IMP-07). Les tentatives rejetées conservent les octets originaux sous `data/originals/` en mode `0600` et un diagnostic rédigé ; elles n'altèrent jamais les imports committés, leurs sources, transactions, allocations ou décisions.
 
 L'archive est écrite atomiquement (fichier temporaire dans le même répertoire, permissions `0600`, puis renommage), avant la transaction DB. Si l'écriture DB échoue, l'archive brute orpheline reste dans `data/originals/` sans référence métier ; un nettoyage explicite et audité peut la retirer après vérification. Aucun code d'erreur ne renvoie le chemin ou le numéro de compte.
 
@@ -118,3 +123,9 @@ Le contrôle du solde est exact en centimes. Si le compte et deux soldes d'en-t�
 | INV-09 | Dates, couverture, compte, formule et sources des chiffres analytiques restent retraçables. |
 | INV-11 | Pas de numéro en clair en base/log/API ; l'original brut est conservé localement sous `data/originals/`, ignoré par Git, en mode `0600`, jamais exposé par l'API ni les logs. |
 | INV-14 | Toute correction, rotation ou action de masse est prévisualisée, sauvegardée, auditée et réversible. |
+
+### Garde-fous relationnels et de connexion (ADR-019)
+
+Chaque connexion SQLAlchemy/SQLite doit poser `PRAGMA foreign_keys=ON` et `PRAGMA recursive_triggers=ON` dans son hook `connect`. Le service d'import ouvre le mode autocommit puis émet `BEGIN IMMEDIATE` avant la lecture d'idempotence. `INSERT OR REPLACE` / `REPLACE INTO` est interdit dans le code applicatif : l'option SQLite remplace par suppression + insertion et peut contourner la traçabilité si les triggers récursifs ne sont pas actifs. Le schéma et le vérificateur testent ce comportement sur chaque connexion ouverte.
+
+Le parseur et le domaine n'acceptent pour les montants que des objets Python où `type(value) is int` ; cela rejette aussi `bool`, `float` intégral et texte décimal avant binding SQL. SQLite vérifie en plus le type entier et le rejet des zéros pour les transactions Crédit Agricole.

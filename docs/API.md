@@ -8,18 +8,21 @@ Les contrats HTTP de l'application sont des JSON structurés et validés. L'inte
 
 ### Filtres partagés
 
-Les listes `account_ids`, `category_ids` et `flow_kinds` sont des paramètres répétés ou des valeurs séparées par virgule. Le client les sérialise sous une forme canonique stable dans l'URL. Les filtres partagés sont :
+Les filtres répétés `account_ids`, `category_ids` et `flow_kind` acceptent plusieurs valeurs et sont sérialisés sous une forme canonique stable dans l'URL. Les filtres partagés sont :
 
 | Paramètre | Type | Sémantique |
 |---|---|---|
 | `period_start`, `period_end` | date | Bornes inclusives sur `booked_on`; requis par les endpoints analytiques. |
 | `account_ids` | liste d'UUID | Périmètre explicite des agrégats; requis et non vide pour l'analytique. Aucun mélange implicite de comptes. |
 | `category_ids` | liste d'ID stables | Filtre catégories ; la valeur absente signifie toutes les catégories compatibles du périmètre. |
-| `flow_kinds` | liste d'enums | Un ou plusieurs des 14 flux du contrat domaine. |
+| `flow_kind` | enum répétable | Flux dérivé des allocations confirmées ; `unknown` sélectionne les transactions dont le résidu signé est non nul. Il n'existe aucune colonne `transactions.flow_kind`. |
 | `status` | enum/liste | État fonctionnel de transaction, revue, import, règle ou insight selon l'endpoint. |
-| `mode` | `treasury` | `family_life` | Lecture trésorerie brute ou vie familiale conforme à `DOMAIN_MODEL.md`. |
+| `mode` | enum | `treasury` ou `family_life` ; lecture trésorerie brute ou vie familiale conforme à `DOMAIN_MODEL.md`. |
+| `personal_mode` | enum | `envelope` (défaut) ou `observed`; règle l'inclusion des allocations et dépenses de comptes `personal`, conformément à ADR-022. |
 
-Le front synchronise ces filtres dans l'URL sur les pages Transactions, Overview, Expenses, Income, Family, Merchants, Budgets et Review. Les valeurs `period_start`, `period_end`, IDs, enums et mode sont copiables/rejouables. Les libellés bancaires recherchés ne sont pas mis dans l'URL par défaut. Le défaut d'interface est l'année 2026 ; l'absence de couverture avant le premier import n'est pas une alerte de trou (ADR-003).
+`flow_kind` n'est jamais stocké sur `transactions`. Il est dérivé des allocations confirmées : sans allocation, le flux entier est `unknown`; après ventilation partielle, les flux alloués restent filtrables et le résidu signé non nul est aussi `unknown`. `flow_kind=unknown` sélectionne donc les transactions dont `amount_cents - Σ allocations confirmées` est non nul. Une transaction multi-flux peut correspondre à plusieurs valeurs. En `mode=family_life`, `personal_mode=envelope` (défaut) exclut les dépenses des comptes de rôle `personal` de `consumption_net` et compte les allocations personnelles ; `personal_mode=observed` exclut ces allocations de la lecture familiale et inclut les dépenses observées des comptes personnels, avec les transferts reçus classés `transfer_owned`. Les deux composantes ne s'additionnent jamais dans un même total.
+
+Le front synchronise ces filtres dans l'URL sur les pages Transactions, Overview, Expenses, Income, Family, Merchants, Budgets et Review. Les valeurs `period_start`, `period_end`, IDs, enums, `mode` et `personal_mode` sont copiables/rejouables. Les libellés bancaires recherchés ne sont pas mis dans l'URL par défaut. Le défaut d'interface est l'année 2026 ; l'absence de couverture avant le premier import n'est pas une alerte de trou (ADR-003).
 
 ### Pagination et cohérence
 
@@ -36,6 +39,7 @@ Forme commune :
 - Toutes les mutations exigent `Origin` local autorisé et jeton CSRF valide. `Idempotency-Key` UUID est obligatoire uniquement pour les POST qui créent ou appliquent une écriture persistante : `POST /imports/{preview_id}/commit`, `POST /rules`, `POST /rules/{rule_id}/apply`, `POST /review/decisions`, `POST /review/decisions/{decision_id}/undo`, `POST /review/llm-suggestions`, `POST /budgets`, `POST /insights/generate`, `POST /backups` et `POST /backups/restore/commit`. Les POST d'aperçu, de dry-run ou de test de connexion n'en exigent pas. Toute réutilisation d'une clé avec la même méthode/chemin/corps canonique rejoue le statut et la réponse enregistrés ; une même clé avec un corps différent renvoie `409 IDEMPOTENCY_CONFLICT`. Les réponses mémorisées ne contiennent ni clé secrète ni corps bancaire brut non nécessaire.
 - `Idempotency-Key` est facultative pour `PUT`, `PATCH` et `DELETE`; ces méthodes exigent toujours `expected_version` et le contrôle optimiste reste obligatoire. Si une clé est fournie, elle suit la même règle de rejeu/conflit. Les `GET` ne demandent, n'enregistrent ni ne traitent jamais de clé d'idempotence.
 - Toute ressource modifiable expose `version`. La requête de mutation envoie `expected_version`; une version obsolète répond `409 VERSION_CONFLICT` avec `details.current_version`.
+- Les entrées `idempotency_records` sont conservées 7 jours glissants, avec `expires_at_utc`; une purge au démarrage supprime celles expirées. Les réponses créatrices ne sont rejouables qu'au cours de cette fenêtre (ADR-023).
 - Le serveur écoute `127.0.0.1` uniquement. `GET /api/v1/health` n'appelle ni banque ni fournisseur LLM et fonctionne sans réseau externe ni clé configurée.
 - Erreur normalisée, sans secret, chemin disque, numéro de compte ou libellé réel dans les détails techniques :
 
@@ -47,14 +51,14 @@ Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `UNSUPPORTED_M
 
 ### Enveloppe analytique
 
-Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées.
+Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées. Les jours `provisional` restent dans les sommes brutes, mais ne valident jamais une couverture complète ; un contrôle de solde en `mismatch` rend `month_completeness=unknown`.
 
 ```json
 {
   "period":{"start":"2026-01-01","end":"2026-01-31","kind":"calendar_month","completeness":"complete","as_of":"2026-02-01"},
   "accounts":["550e8400-e29b-41d4-a716-446655440001"],
   "coverage":{"status":"complete","covered_from":"2026-01-01","covered_through":"2026-01-31","operation_count":2,"fully_classified_count":2},
-  "filters":{"category_ids":null,"flow_kinds":null,"mode":"treasury"},
+  "filters":{"category_ids":null,"flow_kinds":null,"mode":"treasury","personal_mode":"envelope"},
   "metric_definition_id":"bank_net_flow.v1",
   "raw_cents":-1200,
   "unit":"EUR-cent"
@@ -78,8 +82,11 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 
 | Méthode et chemin | Requête / réponse |
 |---|---|
-| `POST /api/v1/imports/preview` | `multipart/form-data file`; crée un aperçu temporaire sans transaction métier, clé d'idempotence non requise. Réponse `preview_id`, `version`, `encoding`, `file_sha256` calculé sur les octets reçus, compteurs, sommes en cents, `sections[]`, `warnings[]`, `rejections[]`, `expires_at_utc`. Les numéros ne sont jamais renvoyés. |
-| `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `expected_version`, mapping de chaque `section_index` vers un `account_id` existant ou un nouvel `{alias, account_role}`. Réponse `import_file_id`, `status`, `created_transaction_count`, `linked_source_row_count`, `new_source_row_count`, `no_op`, plages de couverture et contrôles de solde. |
+| `POST /api/v1/imports/preview` | `multipart/form-data file`; crée un aperçu temporaire sans transaction métier, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` calculé sur les octets reçus, `generated_on`, `generation_date_source`, `complete_through`, compteurs, sommes en cents, `sections[]`, `warnings[]`, `rejections[]`, `expires_at_utc`. Les numéros ne sont jamais renvoyés. |
+| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/account-mapping` | résolution humaine versionnée `{expected_version, account_id}` ou `{expected_version, new_account:{alias,account_role}}`; utilisée dans le preview avant commit. |
+| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/coverage` | résolution humaine versionnée `{expected_version, coverage_from, coverage_through}`; recalcul de `complete_through` et de la validation du preview. |
+| `PATCH /api/v1/imports/{preview_id}/rows/{logical_row_idx}/multiplicity` | `{expected_version, action:"link_existing"|"create_occurrence", transaction_id?}` ; résout une `OUT_OF_PERIOD` ou une ambiguïté de multiplicité, enregistre l'acteur et l'audit. `link_existing` exige un ID dans la même identité ; `create_occurrence` attribue le prochain rang. |
+| `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `{expected_version}` après résolution de toutes les sections/lignes. Commit atomique du fichier entier. Réponse uniquement `committed` ou `no_op`, avec compteurs, plages de couverture et contrôles de solde ; aucune réponse `partial`. |
 | `GET /api/v1/imports` | filtres `status`, `period_start`, `period_end`, curseur ; liste `ImportSummary[]` paginée. |
 | `GET /api/v1/imports/{import_file_id}` | détail statut, hash, alias de sections, bornes, soldes, compteurs, candidats ambigus et diagnostic redigé. Jamais d'archive ou de numéro. |
 | `GET /api/v1/imports/{import_file_id}/rejections` | curseur ; `logical_row_idx`, `code`, `field`, `message` non privé. Aucun dump du libellé. |
@@ -91,10 +98,16 @@ ImportSectionPreview = {section_index: integer, account_resolution: "known"|"unk
   account_id: UUID|null, account_alias: string|null, coverage_from: date|null,
   coverage_through: date|null, balance_as_of: date|null, header_balance_cents: integer|null,
   operation_count: integer, debit_total_cents: integer, credit_total_cents: integer}
-ImportSummary = {import_file_id: UUID, file_sha256: string, status: "committed"|"rejected"|"no_op",
-  created_at_utc: datetime, sections: integer, operation_count: integer,
+ImportSummary = {import_file_id: UUID, file_sha256: string, status: "previewed"|"committed"|"rejected"|"no_op",
+  created_at_utc: datetime, generated_on: date, generation_date_source: "header_download"|"received_on_fallback",
+  sections: integer, operation_count: integer,
   created_transaction_count: integer, source_row_count: integer}
+ImportResolution = {resolution_id: UUID, section_index: integer|null, logical_row_idx: integer|null,
+  code: "ACCOUNT_MAPPING_REQUIRED"|"SECTION_RANGE_REQUIRED"|"OUT_OF_PERIOD"|"MULTIPLICITY_AMBIGUOUS",
+  status: "pending"|"resolved", resolution_action: string|null, resolved_by: string|null}
 ```
+
+Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir dans le preview une décision auditée `link_existing` ou `create_occurrence`; les deux chemins restent dans un commit tout-ou-rien du fichier. Un fichier associant deux sections au même compte est structurellement rejeté. `ZERO_AMOUNT` est une erreur bloquante de format CA. Les statuts d'import ne comprennent jamais `partial`.
 
 Exemples synthétiques :
 
@@ -106,7 +119,7 @@ Content-Type: multipart/form-data; boundary=...
 ```
 
 ```json
-{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation_count":2,"sections":[{"section_index":1,"account_resolution":"unknown","account_id":null,"account_alias":null,"coverage_from":"2026-03-01","coverage_through":"2026-03-31","balance_as_of":"2026-03-31","header_balance_cents":120000,"operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000}],"warnings":[],"rejections":[],"expires_at_utc":"2026-10-09T10:15:00Z"}
+{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"status":"previewed","encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generated_on":"2026-03-31","generation_date_source":"header_download","complete_through":"2026-03-30","operation_count":2,"sections":[{"section_index":1,"account_resolution":"unknown","account_id":null,"account_alias":null,"coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","provisional_days":["2026-03-31"],"balance_as_of":"2026-03-31","header_balance_cents":120000,"operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000}],"warnings":[],"rejections":[],"expires_at_utc":"2026-10-10T10:15:00Z"}
 ```
 
 Commit synthétique :
@@ -122,7 +135,7 @@ Content-Type: application/json
 ```
 
 ```json
-{"import_file_id":"550e8400-e29b-41d4-a716-446655440011","status":"committed","no_op":false,"created_transaction_count":2,"new_source_row_count":2,"linked_source_row_count":0,"sections":[{"section_index":1,"account_id":"550e8400-e29b-41d4-a716-446655440012","coverage_from":"2026-03-01","coverage_through":"2026-03-31","balance_check_status":"unknown"}]}
+{"import_file_id":"550e8400-e29b-41d4-a716-446655440011","status":"committed","no_op":false,"created_transaction_count":2,"new_source_row_count":2,"linked_source_row_count":0,"generation_date_source":"header_download","complete_through":"2026-03-30","sections":[{"section_index":1,"account_id":"550e8400-e29b-41d4-a716-446655440012","coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","balance_check_status":"unknown"}]}
 ```
 
 Liste et rejets : `GET /api/v1/imports?status=committed` → `{"items":[{"import_file_id":"<UUID>","status":"committed","created_at_utc":"2026-10-09T10:00:00Z","sections":1,"operation_count":2,"created_transaction_count":2,"source_row_count":2}],"page":{"limit":50,"next_cursor":null}}`. `GET /api/v1/imports/<UUID>/rejections` → `{"items":[{"logical_row_idx":4,"code":"INVALID_AMOUNT","field":"debit_euros","message":"Montant non interprétable."}],"page":{"limit":50,"next_cursor":null}}`.
@@ -206,7 +219,7 @@ Tous les chemins suivants acceptent les filtres communs et renvoient l'enveloppe
 |---|---|
 | `GET /api/v1/analytics/overview` | enveloppe primaire `bank_net_flow.v1`; métriques KPI individuelles et URL de drilldown, toutes avec IDs canoniques de `METRICS.md`. |
 | `GET /api/v1/analytics/cashflow` | `bank_net_flow.v1`; sommes `by_flow_kind[]`, crédits, débits, inconnus. Le total est la somme bancaire signée. |
-| `GET /api/v1/analytics/spending-hierarchy` | `consumption_net.v1`; arbre de dépenses confirmées, remboursements validés appariés, résidus à part. |
+| `GET /api/v1/analytics/spending-hierarchy` | `consumption_net.v1`; arbre de dépenses confirmées, liens `refund_of` confirmés appliqués à la date de l'avoir, résidus à part. |
 | `GET /api/v1/analytics/series` | `metric_definition_id` demandé parmi ceux de `METRICS.md`; bucket `day`, `week` ou `month`, chaque point garde `raw_cents`/état de couverture. |
 | `GET /api/v1/analytics/merchants` | groupement par payee de `consumption_net.v1`; opération_count, cents et drilldown reprennent le même périmètre. |
 | `GET /api/v1/analytics/family` | enveloppe primaire `consumption_net.v1`; consommation, `personal_allowances.v1`, enfants/garde et remboursements liés présentés avec leurs IDs canoniques. |
@@ -214,9 +227,9 @@ Tous les chemins suivants acceptent les filtres communs et renvoient l'enveloppe
 | `GET /api/v1/analytics/data-quality` | `unclassified_amount_share.v1`, `operation_coverage.v1`, résidu absolu et signé, mois/couverture. |
 | `GET /api/v1/analytics/drilldown` | `metric_definition_id` canonique, mêmes filtres, curseur ; transactions exactes utilisées et somme recalculée. |
 
-Exemple Overview : `GET /api/v1/analytics/overview?period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=treasury` → réponse standard avec `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:-1200` et `metrics:[{"metric_definition_id":"bank_net_flow.v1","raw_cents":-1200,"unit":"EUR-cent"},{"metric_definition_id":"regular_income.v1","raw_cents":5000,"unit":"EUR-cent"}]`. Aucun ID de métrique financière n'est inventé pour le regroupement de cartes.
+Exemple Overview : `GET /api/v1/analytics/overview?period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope&flow_kind=unknown` → réponse standard avec `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:-1200` et `metrics:[{"metric_definition_id":"bank_net_flow.v1","raw_cents":-1200,"unit":"EUR-cent"},{"metric_definition_id":"regular_income.v1","raw_cents":5000,"unit":"EUR-cent"}]`. Le filtre `unknown` cible le résidu non nul ; aucun ID de métrique financière n'est inventé pour le regroupement de cartes.
 
-Exemple Drilldown sur consommation : `GET /api/v1/analytics/drilldown?metric_definition_id=consumption_net.v1&period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>` → `{"period":{"start":"2026-03-01","end":"2026-03-31","kind":"custom","completeness":"complete","as_of":"2026-10-09"},"accounts":["<UUID>"],"coverage":{"status":"complete","operation_count":2,"fully_classified_count":2},"filters":{"mode":"family_life","category_ids":["groceries_organic"],"flow_kinds":["expense","refund"]},"metric_definition_id":"consumption_net.v1","raw_cents":1200,"unit":"EUR-cent","items":[{"transaction_id":"<UUID_ACHAT>","booked_on":"2026-03-12","amount_cents":-1234,"metric_contribution_cents":1234,"transaction_links":[]},{"transaction_id":"<UUID_AVOIR>","booked_on":"2026-03-15","amount_cents":34,"metric_contribution_cents":-34,"transaction_links":[{"link_kind":"refund_of","target_transaction_id":"<UUID_ACHAT>","amount_cents":34}]}],"page":{"limit":50,"next_cursor":null}}`. Le brut de chaque opération reste intact ; `1234 - 34 = 1200` centimes, et le crédit lié qui réduit la dépense est visible avec son ID de lien et sa transaction cible (INV-09).
+Exemple Drilldown sur consommation : `GET /api/v1/analytics/drilldown?metric_definition_id=consumption_net.v1&period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope` → `{"period":{"start":"2026-03-01","end":"2026-03-31","kind":"custom","completeness":"complete","as_of":"2026-10-10"},"accounts":["<UUID>"],"coverage":{"status":"complete","operation_count":2,"fully_classified_count":2},"filters":{"mode":"family_life","personal_mode":"envelope","category_ids":["groceries_organic"],"flow_kinds":["expense","refund"]},"metric_definition_id":"consumption_net.v1","raw_cents":1200,"unit":"EUR-cent","items":[{"transaction_id":"<UUID_ACHAT>","booked_on":"2026-03-12","amount_cents":-1234,"metric_contribution_cents":1234,"transaction_links":[]},{"transaction_id":"<UUID_AVOIR>","booked_on":"2026-04-02","amount_cents":34,"metric_contribution_cents":-34,"transaction_links":[{"transaction_link_id":"<UUID_LIEN>","link_kind":"refund_of","target_transaction_id":"<UUID_ACHAT>","amount_cents":34,"status":"confirmed","attribution_date":"2026-04-02"}]}],"page":{"limit":50,"next_cursor":null}}`. Le crédit réduit la catégorie de l'achat à la date de l'avoir, même entre deux mois. Le lien ne contribue que si les deux comptes source et cible sont dans `account_ids`; sinon l'avoir reste « non attribué » avec avertissement. Le brut bancaire est inchangé et le drilldown montre les deux transactions et le lien (ADR-021, INV-09).
 
 Autres réponses analytiques synthétiques (elles reprennent toutes la même enveloppe `period/accounts/coverage/filters/metric_definition_id/raw_cents/unit`) :
 
@@ -247,10 +260,10 @@ Les périmètres compte sont persistés dans `budget_accounts` ; la création ex
 |---|---|
 | `GET /api/v1/insights` | liste des faits/synthèses conservés, états, période, metric IDs et coverage. |
 | `GET /api/v1/insights/{insight_id}` | détail, références de métriques/drilldowns et limites. |
-| `POST /api/v1/insights/generate` | `Idempotency-Key` obligatoire ; génération explicitement demandée avec filtres ; LLM utilisé seulement si opt-in déjà actif ; réponse lie chaque fait à `metric_definition_id`, période et drilldown. |
+| `POST /api/v1/insights/generate` | `Idempotency-Key` obligatoire ; génération explicitement demandée avec filtres ; LLM utilisé seulement si opt-in déjà actif ; réponse lie chaque fait à `metric_definition_id`, période et drilldown, enregistré dans `insight_facts`. |
 | `PATCH /api/v1/insights/{insight_id}` | `{expected_version, status:"ignored"|"active"|"archived"}` ; auditée. |
 
-Les textes générés restent du texte, jamais du HTML interprété ; un nombre non relié à un fait serveur n'est pas exposé comme constat vérifié. Réponse de génération : `{insight_id, status, generated_by, facts:[{metric_definition_id, raw_cents, raw_basis_points, transaction_ids}], narrative, coverage, version}`. Aucun événement LLM ne modifie une allocation.
+Les textes générés restent du texte, jamais du HTML interprété ; un nombre non relié à un fait serveur n'est pas exposé comme constat vérifié. Réponse de génération : `{insight_id, status, generated_by, facts:[{insight_fact_id, metric_definition_id, period, value_kind, raw_cents, raw_basis_points, raw_count, state_value, transaction_ids}], narrative, coverage, version}`. Chaque `metric_definition_id` est validé contre les 11 IDs canoniques de `METRICS.md`; `insights` ne porte pas de métrique unique. Aucun événement LLM ne modifie une allocation.
 
 Exemple : `POST /api/v1/insights/generate` avec `{"period_start":"2026-03-01","period_end":"2026-03-31","account_ids":["<UUID>"],"mode":"family_life"}` → `201 {"insight_id":"<UUID>","status":"active","generated_by":"deterministic","facts":[{"metric_definition_id":"consumption_net.v1","raw_cents":1200,"transaction_ids":["<UUID>"]}],"narrative":"La consommation confirmée de la période est de 1 200 centimes.","coverage":{"status":"complete"},"version":1}`. `PATCH /api/v1/insights/<UUID>` avec `{"expected_version":1,"status":"ignored"}` → `200 {"insight_id":"<UUID>","status":"ignored","version":2}`.
 
@@ -273,12 +286,12 @@ Exemple d'opt-in et de test : `PATCH /api/v1/settings` avec `{"expected_version"
 | Méthode et chemin | Contrat |
 |---|---|
 | `GET /api/v1/backups` | manifeste paginé : version de schéma, date UTC, hash, taille, originaux inclus, état ; aucun chemin local. |
-| `POST /api/v1/backups` | `Idempotency-Key` obligatoire ; `{include_originals:boolean}` ; API SQLite de backup compatible WAL, manifeste vérifié et hashé. |
+| `POST /api/v1/backups` | `Idempotency-Key` obligatoire ; `{include_originals:boolean}` ; API SQLite de backup compatible WAL, manifeste vérifié et hashé. Chaque backup inclut obligatoirement la clé HMAC locale dans son périmètre protégé (`includes_hmac_key:true`), préserve les empreintes de compte et est stocké en mode `0600`, ignoré par Git. |
 | `GET /api/v1/backups/{backup_manifest_id}` | état détaillé du manifeste et résultat `integrity_check`. |
 | `POST /api/v1/backups/restore/preview` | upload de backup ; restaure/vérifie dans DB temporaire distincte, renvoie versions, counts synthétiques, compatibilité et avertissements ; l'actuelle ne change pas. |
-| `POST /api/v1/backups/restore/commit` | `Idempotency-Key` obligatoire ; `{restore_preview_id, expected_database_version}` ; après aperçu et sauvegarde pré-restore, swap atomique/audité. |
+| `POST /api/v1/backups/restore/commit` | `Idempotency-Key` obligatoire ; `{restore_preview_id, expected_database_version}` ; après aperçu et sauvegarde pré-restore, swap atomique/audité. La restauration vérifie que la clé HMAC incluse est présente ; si elle est perdue hors backup, la reconnaissance exige un remappage explicite dans l'aperçu d'import. |
 
-Exemple : `POST /api/v1/backups` avec `{"include_originals":true}` → `201 {"backup_manifest_id":"<UUID>","schema_version":"1","archive_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","file_size_bytes":4096,"status":"verified","integrity_check":"ok"}`. Un restore non valide répond `BACKUP_INVALID` sans toucher à la base active.
+Exemple : `POST /api/v1/backups` avec `{"include_originals":true}` → `201 {"backup_manifest_id":"<UUID>","schema_version":"1","archive_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","file_size_bytes":4096,"includes_originals":true,"includes_hmac_key":true,"permissions_octal":"0600","status":"verified","integrity_check":"ok"}`. Un restore non valide répond `BACKUP_INVALID` sans toucher à la base active.
 
 Restauration : `POST /api/v1/backups/restore/preview` avec une archive synthétique vérifiable → `200 {"restore_preview_id":"<UUID>","compatible":true,"schema_version":"1","integrity_check":"ok","account_count":1,"transaction_count":2,"requires_backup_of_current":true}`. `POST /api/v1/backups/restore/commit` avec `{"restore_preview_id":"<UUID>","expected_database_version":4}` → `200 {"status":"restored","backup_manifest_id":"<UUID>","database_version":5,"audit_event_id":"<UUID>"}`. Le commit n'est possible qu'après aperçu, validation et sauvegarde de la base active.
 

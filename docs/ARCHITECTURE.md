@@ -1,6 +1,6 @@
 # Architecture et schéma relationnel v1
 
-**Version :** proposition T02 · **Gate :** G0 · **Références :** PLAN §D, §F LOT 0–6 ; ADR-001, ADR-003, ADR-005..009 ; `docs/IMPORT_CONTRACT.md`.
+**Version :** proposition T02 · **Gate :** G0 · **Références :** PLAN §D, §F LOT 0–6 ; ADR-001, ADR-003, ADR-005..009, ADR-017..023 ; `docs/IMPORT_CONTRACT.md`.
 
 Le système est une application mono-utilisateur, locale et utilisable hors ligne. Le backend Python/FastAPI est l'unique propriétaire des écritures, règles, calculs financiers et secrets. SQLite conserve une provenance immuable des mouvements ; React/TypeScript ne fait que filtrer et présenter les réponses typées.
 
@@ -27,7 +27,7 @@ Les noms de modules suivent PLAN §D. Le service d'import orchestre parser, norm
 
 ## Modèle relationnel
 
-`docs/examples/schema.sql` est la référence SQL exécutable. Chaque connexion active `PRAGMA foreign_keys=ON`. Les montants sont des `INTEGER` SQLite protégés par `typeof(...)= 'integer'`, jamais `REAL`. Les clés métier financières conservent aussi des colonnes distinctes, plutôt qu'un hash comme unique preuve. Les colonnes métier qui changent concurremment portent `version`.
+`docs/examples/schema.sql` est la référence SQL exécutable. Chaque connexion, y compris pool SQLAlchemy et Alembic, active `PRAGMA foreign_keys=ON` **et** `PRAGMA recursive_triggers=ON` dans un hook `connect`; ces PRAGMA sont locaux à chaque connexion. `INSERT OR REPLACE`/`REPLACE INTO` sont interdits dans le code applicatif et contrôlés par garde lint/grep. Les montants sont liés par le service uniquement si `type(value) is int`; le schéma vérifie `typeof(...)= 'integer'` et les règles de signe, jamais `REAL`. Les clés métier financières conservent aussi des colonnes distinctes, plutôt qu'un hash comme unique preuve. Les colonnes métier qui changent concurremment portent `version`.
 
 ```mermaid
 erDiagram
@@ -68,11 +68,22 @@ erDiagram
     insights {
         string insight_id PK
     }
+    insight_facts {
+        string insight_fact_id PK
+        string metric_definition_id
+    }
+    insight_fact_transactions {
+        string insight_fact_id PK, FK
+        string transaction_id PK, FK
+    }
+    insights ||--o{ insight_facts : contains
+    insight_facts ||--o{ insight_fact_transactions : drills_down
+    transactions ||--o{ insight_fact_transactions : used_by
 ```
 
-Le modèle comprend toutes les tables du plan : `accounts`, `import_files`, `import_account_sections`, `source_rows`, `transactions`, `payees`, `payee_aliases`, `categories`, `allocations`, `classification_suggestions`, `classification_decisions`, `rules`, `rule_executions`, `transaction_links`, `audit_events`, `app_settings`, `llm_runs`, `budgets`, `insights`, `backup_manifests`. Il ajoute `category_flow_kinds` pour rendre la matrice `flow_kind`↔catégorie vérifiable par FK, `idempotency_records` pour rejouer les mutations HTTP, `import_rejections` pour les diagnostics sans extrait privé, `import_reconciliation_candidates` pour garder les rapprochements approximatifs en audit et `budget_accounts` pour des périmètres de budget explicites multi-comptes. Les réponses qui restent ambiguës gardent leurs transactions distinctes.
+Le modèle comprend toutes les tables du plan : `accounts`, `import_files`, `import_account_sections`, `source_rows`, `transactions`, `payees`, `payee_aliases`, `categories`, `allocations`, `classification_suggestions`, `classification_decisions`, `rules`, `rule_executions`, `transaction_links`, `audit_events`, `app_settings`, `llm_runs`, `budgets`, `insights`, `backup_manifests`. Il ajoute `category_flow_kinds` pour rendre la matrice `flow_kind`↔catégorie vérifiable par FK, `idempotency_records` (rétention 7 jours) pour rejouer les mutations HTTP, `import_rejections` pour les diagnostics/résolutions sans extrait privé, `import_reconciliation_candidates` pour garder les rapprochements approximatifs en audit, `budget_accounts` pour les périmètres multi-comptes, `insight_facts` pour les faits métriques normalisés et `insight_fact_transactions` pour leurs drilldowns. Les réponses qui restent ambiguës gardent leurs transactions distinctes.
 
-La clé logique de transaction est le tuple `(account_id, booked_on, amount_cents, identity_label)` avec rang d'occurrence ; l'unicité SQL ajoute `occurrence_rank`. `source_rows` est une relation plusieurs-vers-un et chaque import distinct apporte une provenance par occurrence. Les triggers bloquent la mise à jour des colonnes sources de `transactions`, toute modification/suppression de `source_rows`, ainsi que la modification/suppression des événements d'audit. Une correction analytique crée une version/décision et un événement avant/après.
+La clé logique de transaction est le tuple `(account_id, booked_on, amount_cents, identity_label)` avec rang d'occurrence ; l'unicité SQL ajoute `occurrence_rank`, et un trigger impose la contiguïté `1..max`. `transactions` ne stocke aucun `flow_kind` : les flux viennent des allocations confirmées et tout résidu non nul est `unknown`. `source_rows` est une relation plusieurs-vers-un, unique par fichier et transaction, et chaque import distinct apporte une provenance par occurrence. Des triggers vérifient compte/section, statut du fichier, état final des sources, allocations et liens de remboursement. Les triggers bloquent la mise à jour des colonnes sources de `transactions`, toute modification/suppression de `source_rows`, ainsi que la modification/suppression des événements d'audit. Une correction d'allocation se fait par supersession auditée, jamais par écrasement.
 
 ### Flux d'écriture et de lecture
 
@@ -81,8 +92,8 @@ flowchart LR
     CSV[Octets CSV] --> P[Preview : décodage et validation]
     P --> M[Mapping explicite des sections vers accounts]
     M --> C[Commit : BEGIN IMMEDIATE]
-    C --> H[Hash SHA-256 et no-op éventuel]
-    H --> I[Sections, couverture et solde]
+    C --> H[Lecture du hash sous verrou et no-op éventuel]
+    H --> I[Sections, génération, couverture et solde]
     I --> R[Réconciliation max des multiplicités]
     R --> T[Transactions manquantes + source_rows]
     T --> A[Audit et commit SQL unique]
@@ -93,11 +104,11 @@ flowchart LR
     D --> API[Réponses typées avec drilldown]
 ```
 
-**Import :** l'aperçu parse CP1252/UTF-8 et les sections sans écrire de transactions. Il masque les numéros de compte, montre comptes inconnus, anomalies, couverture et sommes exactes, puis attend le mapping humain. Le SHA-256 porte sur les octets exacts reçus ; le commit les archive bit pour bit dans `data/originals/<import_file_id>.bin`, sous permissions `0600`, puis fait une seule transaction SQLite. Hash déjà commité → tentative `no_op`; sinon calcul des rangs manquants et `source_rows`. Rejet ou exception → aucune écriture métier partielle.
+**Import :** l'aperçu parse CP1252/UTF-8 et les sections sans écrire de transactions. Il masque les numéros de compte, montre le mapping humain, les plages, anomalies, date de génération et `complete_through`. Toute section non mappée, plage inconnue, multiplicité à trancher ou ligne `OUT_OF_PERIOD` non résolue bloque le commit du fichier entier ; deux sections mappées au même compte sont rejetées. Le SHA-256 porte sur les octets exacts reçus. Le service écrit l'archive brute sous permissions `0600`, ouvre une connexion autocommit, démarre `BEGIN IMMEDIATE`, puis lit le hash sous verrou. Hash déjà commité → tentative `no_op`; sinon une seule transaction écrit toutes les sections, transactions, `source_rows` et audits. Les seuls statuts sont `previewed`, `committed`, `rejected`, `no_op`; pas de résultat `partial`.
 
-**Ventilation :** les opérations bancaires sources sont immuables. Une règle approuvée peut créer des allocations confirmées sur opérations vierges après aperçu ; mémoire, heuristique et IA produisent des suggestions. Un choix humain conserve avant/après, auteur, origine, version et clé d'idempotence dans les décisions/audits. Annulation restaure la décision analytique précédente, pas le CSV.
+**Ventilation :** les opérations bancaires sources sont immuables. Une règle approuvée peut créer des allocations confirmées après aperçu ; les triggers garantissent le signe identique à la transaction, le plafond du montant, le sens des catégories directionnelles et l'immutabilité d'une allocation confirmée. Une correction supersède les lignes précédentes par `superseded_by` avec audit. Mémoire, heuristique et IA produisent des suggestions. Annulation restaure la décision analytique précédente, pas le CSV.
 
-**Analytique :** les endpoints interrogent une définition versionnée dans `analytics/definitions.py`; ils réutilisent les filtres compte/période/mode et retournent les IDs de transactions de drilldown. React ne recompute ni centimes ni KPI. Les réponses distinguent `0` connu de `null` inconnu et incluent couverture, exclusions et définition de métrique (INV-09/10).
+**Analytique :** les endpoints interrogent une définition versionnée dans `analytics/definitions.py`; ils réutilisent les filtres compte/période/`mode`/`personal_mode` et retournent les IDs de transactions de drilldown. `personal_mode=envelope|observed` empêche de compter à la fois les allocations personnelles et les dépenses observées du compte personnel. Un `refund_of` confirmé réduit la catégorie de l'achat à la date de l'avoir seulement quand les deux comptes sont sélectionnés ; les plafonds relationnels interdisent le sur-appariement. React ne recompute ni centimes ni KPI. Les réponses distinguent `0` connu de `null` inconnu et incluent couverture, exclusions et définition de métrique (INV-09/10).
 
 ## Contrat de sécurité et de confidentialité locale
 
@@ -116,9 +127,9 @@ flowchart LR
 ## Migrations Alembic
 
 1. Une seule personne est propriétaire des migrations du ticket/lot ; les autres changements de modèle lui sont transmis avant génération de révision. Une branche de migration a un parent unique et des révisions monotones, avec contrôle explicite de `alembic heads`.
-2. Avant `upgrade`, créer une sauvegarde SQLite cohérente via l'API de backup (WAL inclus), la vérifier (`integrity_check`) et vérifier l'espace disponible. Une migration s'exécute dans une transaction quand SQLite le permet ; reconstruction de table documentée et testée sur copie pour les opérations non transactionnelles.
+2. Avant `upgrade`, créer une sauvegarde SQLite cohérente via l'API de backup (WAL inclus, clé HMAC locale incluse, archive de sauvegarde protégée en `0600`), la vérifier (`integrity_check`) et vérifier l'espace disponible. Une migration s'exécute dans une transaction quand SQLite le permet ; reconstruction de table documentée et testée sur copie pour les opérations non transactionnelles.
 3. Chaque révision a `upgrade()` et un `downgrade()` raisonnable pour environnements de développement/fixtures. Un downgrade utilisateur n'est autorisé que s'il préserve les données ; si une transformation est irréversible, le downgrade échoue explicitement avec instruction de restaurer une sauvegarde validée ou d'appliquer une migration corrective vers l'avant.
 4. Une migration déjà appliquée à une base utilisateur n'est jamais éditée/réécrite. Toute correction crée une nouvelle révision ; les tests couvrent DB neuve, upgrade depuis la révision précédente et downgrade sur fixture.
 5. Aucun changement de taxonomie, identity key, `flow_kind` ou contrat API n'est caché dans une migration : révision, backfill exact, audit et stratégie de rollback sont documentés.
 
-La sélection UUID, la pagination par curseur, l'idempotence et la propriété des migrations sont proposées en ADR-013..016 à arbitrer au gate G0.
+Les choix d'identifiants, pagination, idempotence et propriété des migrations suivent les arbitrages acceptés ADR-013..016, ADR-017..023 au gate G0. `idempotency_records` est purgée au démarrage après 7 jours ; l'API ne promet le rejeu que dans cette fenêtre.

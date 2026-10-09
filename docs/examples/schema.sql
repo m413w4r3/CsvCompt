@@ -1,5 +1,7 @@
 -- Schéma de référence SQLite — Comptes familiaux v1 (T02 / G0)
--- Exécuter sur chaque connexion SQLite : les PRAGMA sont locaux à la connexion.
+-- À poser sur CHAQUE connexion SQLite (PRAGMA locaux à la connexion) :
+-- foreign_keys pour toutes les FK, recursive_triggers pour rendre REPLACE visible
+-- aux triggers d'interdiction de suppression. REPLACE reste interdit dans le code.
 PRAGMA foreign_keys = ON;
 PRAGMA recursive_triggers = ON;
 
@@ -33,6 +35,12 @@ CREATE TABLE import_files (
     archive_permissions_octal TEXT NOT NULL DEFAULT '0600'
         CHECK (archive_permissions_octal = '0600'),
     file_size_bytes INTEGER NOT NULL CHECK (typeof(file_size_bytes) = 'integer' AND file_size_bytes >= 0),
+    received_on TEXT NOT NULL CHECK (date(received_on) = received_on),
+    generation_date TEXT NOT NULL CHECK (date(generation_date) = generation_date),
+    generation_date_source TEXT NOT NULL
+        CHECK (generation_date_source IN ('header_download', 'received_on_fallback')),
+    parsed_operation_count INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(parsed_operation_count) = 'integer' AND parsed_operation_count >= 0),
     detected_encoding TEXT CHECK (detected_encoding IS NULL OR detected_encoding IN ('cp1252', 'utf-8', 'utf-8-sig')),
     status TEXT NOT NULL CHECK (status IN ('previewed', 'committed', 'rejected', 'no_op')),
     duplicate_of_import_file_id TEXT REFERENCES import_files(import_file_id) ON DELETE RESTRICT,
@@ -44,7 +52,8 @@ CREATE TABLE import_files (
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     CHECK ((status = 'no_op' AND duplicate_of_import_file_id IS NOT NULL)
         OR (status <> 'no_op' AND duplicate_of_import_file_id IS NULL)),
-    CHECK (duplicate_of_import_file_id IS NULL OR duplicate_of_import_file_id <> import_file_id)
+    CHECK (duplicate_of_import_file_id IS NULL OR duplicate_of_import_file_id <> import_file_id),
+    CHECK (generation_date_source <> 'received_on_fallback' OR generation_date = received_on)
 );
 
 -- Une empreinte ne peut être committée qu'une fois. Les tentatives répétées sont
@@ -60,6 +69,7 @@ CREATE TABLE import_account_sections (
     account_fingerprint TEXT CHECK (account_fingerprint IS NULL OR length(account_fingerprint) = 64),
     coverage_from TEXT CHECK (coverage_from IS NULL OR date(coverage_from) = coverage_from),
     coverage_through TEXT CHECK (coverage_through IS NULL OR date(coverage_through) = coverage_through),
+    complete_through TEXT CHECK (complete_through IS NULL OR date(complete_through) = complete_through),
     balance_as_of TEXT CHECK (balance_as_of IS NULL OR date(balance_as_of) = balance_as_of),
     header_balance_cents INTEGER CHECK (header_balance_cents IS NULL OR typeof(header_balance_cents) = 'integer'),
     reconciled_balance_cents INTEGER CHECK (reconciled_balance_cents IS NULL OR typeof(reconciled_balance_cents) = 'integer'),
@@ -75,6 +85,9 @@ CREATE TABLE import_account_sections (
 );
 CREATE INDEX ix_import_sections_account_coverage
     ON import_account_sections(account_id, coverage_from, coverage_through);
+-- IMP-13 : un même compte ne peut être représenté que par une section d'un fichier.
+CREATE UNIQUE INDEX uq_import_sections_file_account
+    ON import_account_sections(import_file_id, account_id) WHERE account_id IS NOT NULL;
 
 CREATE TABLE import_rejections (
     import_rejection_id TEXT PRIMARY KEY,
@@ -86,10 +99,23 @@ CREATE TABLE import_rejections (
     code TEXT NOT NULL,
     message TEXT NOT NULL,
     severity TEXT NOT NULL CHECK (severity IN ('warning', 'error')),
+    requires_resolution INTEGER NOT NULL DEFAULT 0 CHECK (requires_resolution IN (0, 1)),
+    resolution_status TEXT NOT NULL DEFAULT 'not_required'
+        CHECK (resolution_status IN ('not_required', 'pending', 'resolved')),
+    resolution_action TEXT CHECK (resolution_action IS NULL OR
+        resolution_action IN ('link_existing', 'create_occurrence', 'map_account', 'set_coverage')),
+    resolved_transaction_id TEXT REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
+    resolved_by TEXT,
+    resolved_at_utc TEXT CHECK (resolved_at_utc IS NULL OR substr(resolved_at_utc, -1) = 'Z'),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         CHECK (substr(created_at_utc, -1) = 'Z'),
     FOREIGN KEY (import_file_id, section_index)
-        REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT
+        REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT,
+    CHECK ((requires_resolution = 0 AND resolution_status = 'not_required')
+        OR (requires_resolution = 1 AND resolution_status IN ('pending', 'resolved'))),
+    CHECK ((resolution_status <> 'resolved')
+        OR (resolution_action IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at_utc IS NOT NULL)),
+    CHECK (code <> 'OUT_OF_PERIOD' OR requires_resolution = 1)
 );
 CREATE INDEX ix_import_rejections_file
     ON import_rejections(import_file_id, severity, section_index, logical_row_idx, import_rejection_id);
@@ -154,9 +180,12 @@ CREATE TABLE transactions (
     transaction_id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,
     booked_on TEXT NOT NULL CHECK (date(booked_on) = booked_on),
-    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer'),
+    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),
     raw_label TEXT NOT NULL,
-    identity_label TEXT NOT NULL CHECK (length(identity_label) > 0),
+    identity_label TEXT NOT NULL CHECK (
+        length(identity_label) > 0 AND identity_label = trim(identity_label)
+        AND instr(identity_label, '  ') = 0
+    ),
     identity_key_sha256 TEXT NOT NULL CHECK (
         length(identity_key_sha256) = 64 AND identity_key_sha256 NOT GLOB '*[^0-9a-f]*'
     ),
@@ -171,6 +200,20 @@ CREATE INDEX ix_transactions_account_booked
     ON transactions(account_id, booked_on DESC, transaction_id DESC);
 CREATE INDEX ix_transactions_payee_booked ON transactions(payee_id, booked_on DESC);
 
+CREATE TRIGGER trg_transactions_occurrence_contiguous
+BEFORE INSERT ON transactions
+WHEN NEW.occurrence_rank > 1 AND NOT EXISTS (
+    SELECT 1 FROM transactions prior
+    WHERE prior.account_id = NEW.account_id
+      AND prior.booked_on = NEW.booked_on
+      AND prior.amount_cents = NEW.amount_cents
+      AND prior.identity_label = NEW.identity_label
+      AND prior.occurrence_rank = NEW.occurrence_rank - 1
+)
+BEGIN
+    SELECT RAISE(ABORT, 'occurrence_rank_not_contiguous');
+END;
+
 CREATE TABLE source_rows (
     source_row_id TEXT PRIMARY KEY,
     import_file_id TEXT NOT NULL,
@@ -184,9 +227,47 @@ CREATE TABLE source_rows (
         CHECK (substr(created_at_utc, -1) = 'Z'),
     FOREIGN KEY (import_file_id, section_index)
         REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT,
-    UNIQUE (import_file_id, section_index, logical_row_idx)
+    UNIQUE (import_file_id, section_index, logical_row_idx),
+    UNIQUE (import_file_id, transaction_id)
 );
 CREATE INDEX ix_source_rows_transaction ON source_rows(transaction_id, import_file_id);
+
+CREATE TRIGGER trg_source_rows_import_status
+BEFORE INSERT ON source_rows
+WHEN NOT EXISTS (
+    SELECT 1 FROM import_files f
+    WHERE f.import_file_id = NEW.import_file_id AND f.status IN ('previewed', 'committed')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'source_row_import_status_invalid');
+END;
+
+CREATE TRIGGER trg_source_rows_account_matches_section
+BEFORE INSERT ON source_rows
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM import_account_sections s
+    JOIN transactions t ON t.transaction_id = NEW.transaction_id
+    WHERE s.import_file_id = NEW.import_file_id
+      AND s.section_index = NEW.section_index
+      AND s.account_id IS NOT NULL
+      AND s.account_id = t.account_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'source_row_account_mismatch');
+END;
+
+CREATE TRIGGER trg_source_rows_import_capacity
+BEFORE INSERT ON source_rows
+WHEN EXISTS (
+    SELECT 1 FROM import_files f
+    WHERE f.import_file_id = NEW.import_file_id AND f.status = 'committed'
+      AND (SELECT count(*) FROM source_rows s WHERE s.import_file_id = NEW.import_file_id)
+          >= f.parsed_operation_count
+)
+BEGIN
+    SELECT RAISE(ABORT, 'source_row_import_already_complete');
+END;
 
 CREATE TABLE import_reconciliation_candidates (
     reconciliation_candidate_id TEXT PRIMARY KEY,
@@ -230,6 +311,10 @@ CREATE TABLE allocations (
         CHECK (flexibility IN ('fixed', 'variable_essential', 'variable_optional', 'unknown')),
     acquisition TEXT NOT NULL DEFAULT 'unknown'
         CHECK (acquisition IN ('new', 'second_hand', 'not_applicable', 'unknown')),
+    superseded_by_allocation_id TEXT REFERENCES allocations(allocation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)
+        DEFERRABLE INITIALLY DEFERRED,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         CHECK (substr(created_at_utc, -1) = 'Z'),
@@ -240,10 +325,15 @@ CREATE TABLE allocations (
                        'cash_withdrawal_pending', 'intermediary_pending') AND amount_cents < 0)
         OR (flow_kind IN ('income_recurring', 'income_other', 'loan_disbursement', 'refund') AND amount_cents > 0)
         OR flow_kind IN ('transfer_savings', 'transfer_owned', 'reconciliation')
-    )
+    ),
+    CHECK ((superseded_by_allocation_id IS NULL AND superseded_by_audit_event_id IS NULL)
+        OR (superseded_by_allocation_id IS NOT NULL AND superseded_by_audit_event_id IS NOT NULL
+            AND superseded_by_allocation_id <> allocation_id))
 );
 CREATE INDEX ix_allocations_transaction ON allocations(transaction_id, decision);
 CREATE INDEX ix_allocations_review ON allocations(decision, origin, transaction_id);
+CREATE INDEX ix_allocations_active_transaction ON allocations(transaction_id)
+    WHERE superseded_by_allocation_id IS NULL;
 
 CREATE TABLE classification_suggestions (
     suggestion_id TEXT PRIMARY KEY,
@@ -347,6 +437,103 @@ CREATE TABLE transaction_links (
 CREATE INDEX ix_transaction_links_source ON transaction_links(source_transaction_id, status, link_kind);
 CREATE INDEX ix_transaction_links_target ON transaction_links(target_transaction_id, status, link_kind);
 
+CREATE TRIGGER trg_refund_links_confirmed_direction_insert
+BEFORE INSERT ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM transactions s
+        JOIN transactions t ON t.transaction_id = NEW.target_transaction_id
+        WHERE s.transaction_id = NEW.source_transaction_id
+          AND s.amount_cents > 0 AND t.amount_cents < 0
+          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = s.transaction_id
+                      AND a.flow_kind = 'refund' AND a.category_id = 'income_refund'
+                      AND a.superseded_by_allocation_id IS NULL)
+          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = t.transaction_id
+                      AND a.flow_kind = 'expense' AND a.amount_cents < 0
+                      AND a.superseded_by_allocation_id IS NULL)
+    ) THEN RAISE(ABORT, 'refund_link_direction_invalid') END;
+END;
+
+CREATE TRIGGER trg_refund_links_confirmed_direction_update
+BEFORE UPDATE ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM transactions s
+        JOIN transactions t ON t.transaction_id = NEW.target_transaction_id
+        WHERE s.transaction_id = NEW.source_transaction_id
+          AND s.amount_cents > 0 AND t.amount_cents < 0
+          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = s.transaction_id
+                      AND a.flow_kind = 'refund' AND a.category_id = 'income_refund'
+                      AND a.superseded_by_allocation_id IS NULL)
+          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = t.transaction_id
+                      AND a.flow_kind = 'expense' AND a.amount_cents < 0
+                      AND a.superseded_by_allocation_id IS NULL)
+    ) THEN RAISE(ABORT, 'refund_link_direction_invalid') END;
+END;
+
+CREATE TRIGGER trg_refund_links_source_cap_insert
+BEFORE INSERT ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN COALESCE((
+        SELECT sum(amount_cents) FROM transaction_links
+        WHERE source_transaction_id = NEW.source_transaction_id
+          AND link_kind = 'refund_of' AND status = 'confirmed'
+    ), 0) + NEW.amount_cents > (
+        SELECT amount_cents FROM transactions WHERE transaction_id = NEW.source_transaction_id
+    ) THEN RAISE(ABORT, 'refund_link_source_cap_exceeded') END;
+END;
+
+CREATE TRIGGER trg_refund_links_source_cap_update
+BEFORE UPDATE ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN COALESCE((
+        SELECT sum(amount_cents) FROM transaction_links
+        WHERE source_transaction_id = NEW.source_transaction_id
+          AND link_kind = 'refund_of' AND status = 'confirmed'
+          AND transaction_link_id <> OLD.transaction_link_id
+    ), 0) + NEW.amount_cents > (
+        SELECT amount_cents FROM transactions WHERE transaction_id = NEW.source_transaction_id
+    ) THEN RAISE(ABORT, 'refund_link_source_cap_exceeded') END;
+END;
+
+CREATE TRIGGER trg_refund_links_target_cap_insert
+BEFORE INSERT ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN COALESCE((
+        SELECT sum(amount_cents) FROM transaction_links
+        WHERE target_transaction_id = NEW.target_transaction_id
+          AND link_kind = 'refund_of' AND status = 'confirmed'
+    ), 0) + NEW.amount_cents + (
+        SELECT amount_cents FROM transactions WHERE transaction_id = NEW.target_transaction_id
+    ) > 0 THEN RAISE(ABORT, 'refund_link_target_cap_exceeded') END;
+END;
+
+CREATE TRIGGER trg_refund_links_target_cap_update
+BEFORE UPDATE ON transaction_links
+WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+BEGIN
+    SELECT CASE WHEN COALESCE((
+        SELECT sum(amount_cents) FROM transaction_links
+        WHERE target_transaction_id = NEW.target_transaction_id
+          AND link_kind = 'refund_of' AND status = 'confirmed'
+          AND transaction_link_id <> OLD.transaction_link_id
+    ), 0) + NEW.amount_cents + (
+        SELECT amount_cents FROM transactions WHERE transaction_id = NEW.target_transaction_id
+    ) > 0 THEN RAISE(ABORT, 'refund_link_target_cap_exceeded') END;
+END;
+
+CREATE TRIGGER trg_confirmed_transaction_links_no_delete
+BEFORE DELETE ON transaction_links
+WHEN OLD.status = 'confirmed'
+BEGIN
+    SELECT RAISE(ABORT, 'confirmed_transaction_link_immutable');
+END;
+
 CREATE TABLE audit_events (
     audit_event_id TEXT PRIMARY KEY,
     import_file_id TEXT REFERENCES import_files(import_file_id) ON DELETE RESTRICT,
@@ -417,8 +604,6 @@ CREATE INDEX ix_budget_accounts_account ON budget_accounts(account_id, budget_id
 CREATE TABLE insights (
     insight_id TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ignored', 'archived')),
-    metric_definition_id TEXT NOT NULL,
-    facts_json TEXT NOT NULL,
     narrative TEXT NOT NULL,
     generated_by TEXT NOT NULL CHECK (generated_by IN ('deterministic', 'llm')),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
@@ -429,13 +614,57 @@ CREATE TABLE insights (
 );
 CREATE INDEX ix_insights_status_created ON insights(status, created_at_utc DESC);
 
+-- Les faits sont unitaires : leur metric_definition_id est validé ici et chaque
+-- transaction utilisée peut être reliée pour le drilldown vérifiable.
+CREATE TABLE insight_facts (
+    insight_fact_id TEXT PRIMARY KEY,
+    insight_id TEXT NOT NULL REFERENCES insights(insight_id) ON DELETE RESTRICT,
+    fact_ordinal INTEGER NOT NULL CHECK (typeof(fact_ordinal) = 'integer' AND fact_ordinal > 0),
+    metric_definition_id TEXT NOT NULL CHECK (metric_definition_id IN (
+        'bank_net_flow.v1', 'consumption_net.v1', 'month_completeness.v1',
+        'monthly_delta.v1', 'operation_coverage.v1', 'operational_saving_capacity.v1',
+        'operational_saving_rate.v1', 'personal_allowances.v1', 'regular_income.v1',
+        'savings_net_transferred.v1', 'unclassified_amount_share.v1'
+    )),
+    period_start TEXT NOT NULL CHECK (date(period_start) = period_start),
+    period_end TEXT NOT NULL CHECK (date(period_end) = period_end),
+    value_kind TEXT NOT NULL CHECK (value_kind IN ('cents', 'basis_points', 'count', 'state')),
+    raw_cents INTEGER CHECK (raw_cents IS NULL OR typeof(raw_cents) = 'integer'),
+    raw_basis_points INTEGER CHECK (raw_basis_points IS NULL OR typeof(raw_basis_points) = 'integer'),
+    raw_count INTEGER CHECK (raw_count IS NULL OR (typeof(raw_count) = 'integer' AND raw_count >= 0)),
+    state_value TEXT,
+    filters_json TEXT NOT NULL,
+    coverage_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        CHECK (substr(created_at_utc, -1) = 'Z'),
+    UNIQUE (insight_id, fact_ordinal),
+    CHECK (period_start <= period_end),
+    CHECK (
+        (value_kind = 'cents' AND raw_cents IS NOT NULL AND raw_basis_points IS NULL AND raw_count IS NULL AND state_value IS NULL)
+        OR (value_kind = 'basis_points' AND raw_cents IS NULL AND raw_basis_points IS NOT NULL AND raw_count IS NULL AND state_value IS NULL)
+        OR (value_kind = 'count' AND raw_cents IS NULL AND raw_basis_points IS NULL AND raw_count IS NOT NULL AND state_value IS NULL)
+        OR (value_kind = 'state' AND raw_cents IS NULL AND raw_basis_points IS NULL AND raw_count IS NULL AND state_value IN ('complete', 'partial', 'unknown'))
+    )
+);
+CREATE INDEX ix_insight_facts_metric_period ON insight_facts(metric_definition_id, period_start, period_end);
+
+CREATE TABLE insight_fact_transactions (
+    insight_fact_id TEXT NOT NULL REFERENCES insight_facts(insight_fact_id) ON DELETE RESTRICT,
+    transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
+    contribution_cents INTEGER CHECK (contribution_cents IS NULL OR typeof(contribution_cents) = 'integer'),
+    PRIMARY KEY (insight_fact_id, transaction_id)
+);
+CREATE INDEX ix_insight_fact_transactions_transaction ON insight_fact_transactions(transaction_id, insight_fact_id);
+
 CREATE TABLE backup_manifests (
     backup_manifest_id TEXT PRIMARY KEY,
     schema_version TEXT NOT NULL,
     archive_relpath TEXT NOT NULL,
     archive_sha256 TEXT NOT NULL CHECK (length(archive_sha256) = 64 AND archive_sha256 NOT GLOB '*[^0-9a-f]*'),
     file_size_bytes INTEGER NOT NULL CHECK (typeof(file_size_bytes) = 'integer' AND file_size_bytes >= 0),
+    archive_permissions_octal TEXT NOT NULL DEFAULT '0600' CHECK (archive_permissions_octal = '0600'),
     includes_originals INTEGER NOT NULL DEFAULT 0 CHECK (includes_originals IN (0, 1)),
+    includes_hmac_key INTEGER NOT NULL DEFAULT 1 CHECK (includes_hmac_key = 1),
     status TEXT NOT NULL CHECK (status IN ('created', 'verified', 'restored', 'failed')),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         CHECK (substr(created_at_utc, -1) = 'Z'),
@@ -443,8 +672,9 @@ CREATE TABLE backup_manifests (
 );
 CREATE INDEX ix_backup_manifests_created ON backup_manifests(created_at_utc DESC);
 
--- Registre durable des mutations idempotentes HTTP. Le corps conservé est la
--- réponse contractuelle, sans secret ni libellé brut ajouté aux logs.
+-- Registre des mutations idempotentes HTTP. Les entrées expirent après 7 jours
+-- et sont purgées au démarrage ; hors fenêtre, l'API ne promet pas le rejeu.
+-- La réponse conservée n'inclut ni secret ni libellé brut non nécessaire.
 CREATE TABLE idempotency_records (
     idempotency_key TEXT PRIMARY KEY,
     http_method TEXT NOT NULL,
@@ -453,8 +683,11 @@ CREATE TABLE idempotency_records (
     response_status INTEGER NOT NULL CHECK (response_status BETWEEN 200 AND 599),
     response_json TEXT NOT NULL,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z')
+        CHECK (substr(created_at_utc, -1) = 'Z'),
+    expires_at_utc TEXT GENERATED ALWAYS AS
+        (strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc, '+7 days')) STORED
 );
+CREATE INDEX ix_idempotency_expiry ON idempotency_records(expires_at_utc);
 
 -- Les champs issus de la ligne bancaire sont en écriture unique. Un payee_id et
 -- la version peuvent évoluer par action métier auditée ; la source ne le peut pas.
@@ -508,4 +741,188 @@ CREATE TRIGGER trg_audit_events_immutable_delete
 BEFORE DELETE ON audit_events
 BEGIN
     SELECT RAISE(ABORT, 'audit_event_immutable');
+END;
+
+-- La vie d'un import est complète par fichier : aucune ligne ne peut être
+-- publiée avant le passage atomique previewed -> committed.
+CREATE TRIGGER trg_import_files_no_direct_commit
+BEFORE INSERT ON import_files
+WHEN NEW.status = 'committed'
+BEGIN
+    SELECT RAISE(ABORT, 'import_must_start_previewed');
+END;
+
+CREATE TRIGGER trg_import_files_status_transition
+BEFORE UPDATE OF status ON import_files
+WHEN NEW.status <> OLD.status
+ AND NOT (OLD.status = 'previewed' AND NEW.status IN ('committed', 'rejected'))
+BEGIN
+    SELECT RAISE(ABORT, 'import_status_transition_invalid');
+END;
+
+CREATE TRIGGER trg_import_files_noop_validate
+BEFORE INSERT ON import_files
+WHEN NEW.status = 'no_op'
+ AND NOT EXISTS (
+    SELECT 1 FROM import_files original
+    WHERE original.import_file_id = NEW.duplicate_of_import_file_id
+      AND original.status = 'committed'
+      AND original.file_sha256 = NEW.file_sha256
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'no_op_must_reference_committed_same_hash');
+END;
+
+CREATE TRIGGER trg_import_files_committed_immutable
+BEFORE UPDATE ON import_files
+WHEN OLD.status = 'committed'
+BEGIN
+    SELECT RAISE(ABORT, 'committed_import_immutable');
+END;
+
+CREATE TRIGGER trg_import_files_no_delete
+BEFORE DELETE ON import_files
+WHEN OLD.status <> 'previewed'
+BEGIN
+    SELECT RAISE(ABORT, 'import_history_immutable');
+END;
+
+CREATE TRIGGER trg_import_files_commit_guard
+BEFORE UPDATE OF status ON import_files
+WHEN OLD.status = 'previewed' AND NEW.status = 'committed'
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM import_account_sections s WHERE s.import_file_id = NEW.import_file_id
+    ) THEN RAISE(ABORT, 'committed_import_requires_section') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM import_account_sections s
+        WHERE s.import_file_id = NEW.import_file_id
+          AND (s.account_id IS NULL OR s.coverage_from IS NULL OR s.coverage_through IS NULL
+               OR s.complete_through IS NOT CASE
+                    WHEN s.coverage_through <= date(NEW.generation_date, '-1 day')
+                    THEN s.coverage_through ELSE date(NEW.generation_date, '-1 day') END)
+    ) THEN RAISE(ABORT, 'committed_import_section_unresolved') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM import_rejections r
+        WHERE r.import_file_id = NEW.import_file_id
+          AND (r.severity = 'error'
+               OR (r.requires_resolution = 1 AND r.resolution_status <> 'resolved'))
+    ) THEN RAISE(ABORT, 'committed_import_has_unresolved_rejection') END;
+    SELECT CASE WHEN (
+        SELECT count(*) FROM source_rows s WHERE s.import_file_id = NEW.import_file_id
+    ) <> NEW.parsed_operation_count
+    THEN RAISE(ABORT, 'committed_import_source_count_mismatch') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM transactions t
+        WHERE NOT EXISTS (SELECT 1 FROM source_rows s WHERE s.transaction_id = t.transaction_id)
+    ) THEN RAISE(ABORT, 'transaction_without_source_row') END;
+END;
+
+CREATE TRIGGER trg_import_sections_insert_previewed_only
+BEFORE INSERT ON import_account_sections
+WHEN NOT EXISTS (
+    SELECT 1 FROM import_files f WHERE f.import_file_id = NEW.import_file_id AND f.status = 'previewed'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'import_section_requires_previewed_file');
+END;
+
+CREATE TRIGGER trg_import_sections_committed_immutable_update
+BEFORE UPDATE ON import_account_sections
+WHEN EXISTS (
+    SELECT 1 FROM import_files f
+    WHERE f.import_file_id = OLD.import_file_id AND f.status = 'committed'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'committed_import_section_immutable');
+END;
+
+CREATE TRIGGER trg_import_sections_committed_immutable_delete
+BEFORE DELETE ON import_account_sections
+WHEN EXISTS (
+    SELECT 1 FROM import_files f
+    WHERE f.import_file_id = OLD.import_file_id AND f.status = 'committed'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'committed_import_section_immutable');
+END;
+
+CREATE TRIGGER trg_allocations_transaction_sign
+BEFORE INSERT ON allocations
+BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM transactions t WHERE t.transaction_id = NEW.transaction_id
+          AND ((t.amount_cents < 0 AND NEW.amount_cents >= 0)
+            OR (t.amount_cents > 0 AND NEW.amount_cents <= 0))
+    ) THEN RAISE(ABORT, 'allocation_sign_must_match_transaction') END;
+END;
+
+CREATE TRIGGER trg_allocations_total_cap
+BEFORE INSERT ON allocations
+BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM transactions t WHERE t.transaction_id = NEW.transaction_id
+          AND ((t.amount_cents < 0 AND
+                COALESCE((SELECT sum(a.amount_cents) FROM allocations a
+                          WHERE a.transaction_id = t.transaction_id
+                            AND a.superseded_by_allocation_id IS NULL), 0) + NEW.amount_cents < t.amount_cents)
+            OR (t.amount_cents > 0 AND
+                COALESCE((SELECT sum(a.amount_cents) FROM allocations a
+                          WHERE a.transaction_id = t.transaction_id
+                            AND a.superseded_by_allocation_id IS NULL), 0) + NEW.amount_cents > t.amount_cents))
+    ) THEN RAISE(ABORT, 'allocation_total_exceeds_transaction') END;
+END;
+
+CREATE TRIGGER trg_allocations_category_direction_insert
+BEFORE INSERT ON allocations
+WHEN (NEW.category_id IN (
+        'flow_savings_out', 'flow_loan_principal', 'flow_loan_payment_unknown_split',
+        'flow_personal_a', 'flow_personal_b', 'flow_capital_improvement',
+        'flow_cash_unallocated', 'flow_intermediary_unresolved'
+      ) AND NEW.amount_cents >= 0)
+  OR (NEW.category_id IN (
+        'flow_savings_in', 'flow_loan_disbursement', 'income_salary_a', 'income_salary_b',
+        'income_benefits', 'income_regular_other', 'income_extraordinary', 'income_refund'
+      ) AND NEW.amount_cents <= 0)
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_category_direction_invalid');
+END;
+
+CREATE TRIGGER trg_allocations_supersession_target_match
+AFTER INSERT ON allocations
+WHEN EXISTS (
+    SELECT 1 FROM allocations previous
+    WHERE previous.superseded_by_allocation_id = NEW.allocation_id
+      AND previous.transaction_id <> NEW.transaction_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_supersession_transaction_mismatch');
+END;
+
+CREATE TRIGGER trg_allocations_update_only_supersede
+BEFORE UPDATE ON allocations
+WHEN OLD.superseded_by_allocation_id IS NOT NULL
+  OR NEW.superseded_by_allocation_id IS NULL
+  OR NEW.superseded_by_audit_event_id IS NULL
+  OR NEW.version <> OLD.version + 1
+  OR NEW.allocation_id IS NOT OLD.allocation_id
+  OR NEW.transaction_id IS NOT OLD.transaction_id
+  OR NEW.category_id IS NOT OLD.category_id
+  OR NEW.flow_kind IS NOT OLD.flow_kind
+  OR NEW.amount_cents IS NOT OLD.amount_cents
+  OR NEW.origin IS NOT OLD.origin
+  OR NEW.decision IS NOT OLD.decision
+  OR NEW.beneficiary IS NOT OLD.beneficiary
+  OR NEW.cadence IS NOT OLD.cadence
+  OR NEW.flexibility IS NOT OLD.flexibility
+  OR NEW.acquisition IS NOT OLD.acquisition
+  OR NEW.created_at_utc IS NOT OLD.created_at_utc
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_update_requires_audited_supersession');
+END;
+
+CREATE TRIGGER trg_allocations_no_delete
+BEFORE DELETE ON allocations
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_delete_forbidden');
 END;
