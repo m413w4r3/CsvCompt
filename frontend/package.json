@@ -10,7 +10,9 @@
     "lint": "eslint .",
     "typecheck": "tsc -b --pretty",
     "test": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test tests/e2e/home.spec.ts",
+    "check": "npm run lint && npm run typecheck && npm run test -- --run && npm run build"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.2",
