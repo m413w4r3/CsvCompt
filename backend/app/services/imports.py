@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -13,7 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
-from app.db.models import Account, ImportFile
+from app.db.models import Account, ImportFile, Transaction
 from app.db.session import session_scope
 from app.importers.account_identity import bank_fingerprint
 from app.importers.credit_agricole import parse_export
@@ -30,6 +30,22 @@ _INSTRUCTION_PATTERN = re.compile(r"\b(ignore|disregard|follow)\b", re.IGNORECAS
 
 def _d(value: date | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _record_decision(
+    preview: dict[str, Any], *, kind: str, target: str, before: Any, after: Any
+) -> None:
+    timestamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    preview.setdefault("_decision_history", []).append(
+        {
+            "kind": kind,
+            "target": target,
+            "before": before,
+            "after": after,
+            "actor": "local_user",
+            "at_utc": timestamp,
+        }
+    )
 
 
 def _section_response(
@@ -242,6 +258,8 @@ def build_preview(
         "import_file_id": imported_id,
         "reconciliation": None,
         "_fingerprints": fingerprints,
+        "_received_on": received_on.isoformat(),
+        "_preview_protocol_version": 2,
         "_resolutions": {"account_mapping": {}, "coverage": {}, "multiplicity": {}},
         "_period_missing_sections": list(period_missing_sections),
         "_out_of_period_rows": list(out_of_period_rows),
@@ -339,6 +357,13 @@ def set_mapping(
             "new_account": {"alias": alias, "account_role": value["account_role"]},
         }
     preview["_resolutions"]["account_mapping"][str(section_index)] = mapping
+    _record_decision(
+        preview,
+        kind="account_mapping",
+        target=str(section_index),
+        before=section.get("account_mapping"),
+        after=mapping,
+    )
     section["account_mapping"] = mapping
     section["account_resolution"] = mapping["status"]
     section["account_id"] = mapping["account_id"]
@@ -361,24 +386,49 @@ def set_coverage(
     )
     if section is None:
         raise AppError("NOT_FOUND", 404, "Section introuvable.")
-    complete_through = None
-    if section["operation_count"] > 0:
-        provisional_day = generated_on or (
-            date.fromisoformat(section["max_date"]) if section["max_date"] else None
+    if section_index not in preview["_period_missing_sections"]:
+        raise AppError(
+            "VALIDATION_ERROR", 422, "Cette section n'a pas de plage de période à résoudre."
         )
-        if provisional_day is not None:
-            complete_through = min(coverage_through, provisional_day - timedelta(days=1))
-    section.update(
-        coverage_from=coverage_from.isoformat(),
-        coverage_through=coverage_through.isoformat(),
-        period_from=coverage_from.isoformat(),
-        period_to=coverage_through.isoformat(),
-        complete_through=complete_through.isoformat() if complete_through else None,
+    minimum = date.fromisoformat(section["min_date"]) if section.get("min_date") else None
+    maximum = date.fromisoformat(section["max_date"]) if section.get("max_date") else None
+    if (minimum is not None and coverage_from > minimum) or (
+        maximum is not None and coverage_through < maximum
+    ):
+        raise AppError(
+            "VALIDATION_ERROR", 422, "La plage doit contenir toutes les opérations de la section."
+        )
+    complete_through = None
+    provisional_day = generated_on or (
+        date.fromisoformat(section["max_date"])
+        if section["operation_count"] > 0 and section["max_date"]
+        else None
     )
-    preview["_resolutions"]["coverage"][str(section_index)] = {
+    if provisional_day is not None:
+        complete_through = min(coverage_through, provisional_day - timedelta(days=1))
+    previous_coverage = preview["_resolutions"]["coverage"].get(str(section_index))
+    if previous_coverage is None:
+        previous_coverage = {
+            "coverage_from": section.get("coverage_from"),
+            "coverage_through": section.get("coverage_through"),
+        }
+    next_coverage = {
         "coverage_from": coverage_from.isoformat(),
         "coverage_through": coverage_through.isoformat(),
     }
+    section.update(
+        coverage_from=coverage_from.isoformat(),
+        coverage_through=coverage_through.isoformat(),
+        complete_through=complete_through.isoformat() if complete_through else None,
+    )
+    preview["_resolutions"]["coverage"][str(section_index)] = next_coverage
+    _record_decision(
+        preview,
+        kind="coverage",
+        target=str(section_index),
+        before=previous_coverage,
+        after=next_coverage,
+    )
     preview["_period_missing_sections"] = [
         i for i in preview["_period_missing_sections"] if i != section_index
     ]
@@ -397,6 +447,7 @@ def set_multiplicity(
     action: str,
     *,
     section_index: int | None = None,
+    transaction_id: str | None = None,
 ) -> dict[str, Any]:
     matches = [
         item
@@ -416,7 +467,18 @@ def set_multiplicity(
         )
     selected = matches[0]
     resolution_key = f"{selected['section']}:{selected['row']}"
-    preview["_resolutions"]["multiplicity"][resolution_key] = {"action": action}
+    resolution = {"action": action}
+    if transaction_id is not None:
+        resolution["transaction_id"] = transaction_id
+    previous_resolution = preview["_resolutions"]["multiplicity"].get(resolution_key)
+    preview["_resolutions"]["multiplicity"][resolution_key] = resolution
+    _record_decision(
+        preview,
+        kind="multiplicity",
+        target=resolution_key,
+        before=previous_resolution,
+        after=resolution,
+    )
     preview["rejections"] = [
         r
         for r in preview["rejections"]
@@ -428,6 +490,53 @@ def set_multiplicity(
     ]
     _recalculate(preview)
     return preview
+
+
+def validate_link_existing_preview(
+    preview: dict[str, Any],
+    raw_bytes: bytes,
+    engine: Engine,
+    *,
+    section_index: int,
+    row_idx: int,
+    transaction_id: str,
+) -> None:
+    """Check a human link target at preview time against the strict row identity."""
+
+    parsed = parse_export(raw_bytes)
+    parsed_section = next((item for item in parsed.sections if item.ordinal == section_index), None)
+    row = (
+        next((item for item in parsed_section.rows if item.logical_row_idx == row_idx), None)
+        if parsed_section is not None
+        else None
+    )
+    section_preview = next(
+        (item for item in preview["sections"] if item["section_index"] == section_index), None
+    )
+    if row is None or section_preview is None:
+        raise AppError("VALIDATION_ERROR", 422, "La ligne à lier est introuvable.")
+    mapping = (
+        preview.get("_resolutions", {})
+        .get("account_mapping", {})
+        .get(str(section_index), section_preview.get("account_mapping", {}))
+    )
+    account_id = mapping.get("account_id") if isinstance(mapping, dict) else None
+    if not account_id:
+        raise AppError(
+            "VALIDATION_ERROR", 422, "Un compte connu est requis pour lier une occurrence."
+        )
+    identity_label = normalize_label(row.raw_label).identity_label.value
+    with session_scope(engine) as session:
+        transaction = session.get(Transaction, transaction_id)
+        if transaction is None or (
+            transaction.account_id,
+            transaction.booked_on,
+            transaction.amount_cents,
+            transaction.identity_label,
+        ) != (account_id, row.booked_on, row.amount_cents, identity_label):
+            raise AppError(
+                "VALIDATION_ERROR", 422, "La transaction cible n'a pas la même identité."
+            )
 
 
 def public_preview(preview: dict[str, Any]) -> dict[str, Any]:
