@@ -2,7 +2,12 @@
 
 ## Source de vérité
 
-`docs/examples/schema.sql` est le schéma SQLite de référence gelé au gate G0. La révision `0001_initial` exécute le fichier embarqué `backend/app/db/migrations/sql/0001_initial.sql`, dont les octets doivent rester identiques à la référence. Les tests comparent cette identité, puis comparent tables, index et triggers de `sqlite_master` après migration.
+`backend/app/db/migrations/sql/0001_initial.sql` et `versions/0001_initial.py` sont gelées au commit `1066748` (SHA-256 vérifiés par `MIG-FREEZE-01`). La révision `0002_t17_refund_safety` porte les évolutions T17. `docs/examples/schema.sql` représente désormais la tête `0001 + 0002`; les tests comparent le résultat Alembic à tous les objets tables, index et triggers de cette référence.
+
+`0002` reconstruit uniquement `classification_decisions` (copie de toutes les
+lignes et colonnes, avec `clear` ajouté à l'ensemble des actions), ajoute
+`refund_link_allocation_parts` et son index, remplace quatre triggers et ajoute
+dix triggers. Le schéma de tête contient 29 tables, 34 index et 75 triggers.
 
 Les modèles SQLAlchemy 2.x de `backend/app/db/models.py` couvrent toutes les tables. Les montants restent des `Integer` en centimes signés; les dates sont en `YYYY-MM-DD`, et chaque horodatage UTC est stocké sous la forme stricte `YYYY-MM-DDTHH:MM:SS.mmmZ` (millisecondes), avec des objets `date` et des `datetime` conscients du fuseau UTC côté Python. Les clés UUIDv4 des entités sont générées côté application et vérifiées en base; les clés naturelles et l'identifiant stable de catégorie restent non nulles sans être transformés en UUID. Les champs `version` activent le verrouillage optimiste de l'ORM et un trigger exige `NEW.version = OLD.version + 1` sur toute mise à jour.
 
@@ -10,11 +15,32 @@ Les modèles décrivent les colonnes et les relations utiles. Ils ne remplacent 
 
 ## Allocations et liens de remboursement (ADR-027)
 
-Une allocation est active si `superseded_by_allocation_id IS NULL` et `retracted_at_utc IS NULL`. Une révision peut la retirer en renseignant ensemble `retracted_at_utc` et `retracted_by_decision_id`; le trigger vérifie que la décision concerne la même transaction. Un retrait ou une supersession fige ensuite toute la ligne, et `DELETE` reste interdit. Les plafonds et sommes s'appuient uniquement sur les allocations actives. Une allocation déjà référencée par un lien de remboursement confirmé et actif ne peut pas être retirée ou supersédée.
+Une allocation est active si `superseded_by_allocation_id IS NULL` et `retracted_at_utc IS NULL`. Une révision peut la retirer en renseignant ensemble `retracted_at_utc` et `retracted_by_decision_id`; le trigger vérifie que la décision concerne la même transaction. Un retrait ou une supersession fige ensuite toute la ligne, et `DELETE` reste interdit. Les plafonds et sommes s'appuient uniquement sur les allocations actives. Une allocation référencée par un lien de remboursement confirmé et actif, directement ou via ses parts matérialisées, ne peut pas être retirée ou supersédée.
 
-Chaque lien `refund_of` enregistre son `source_allocation_id` (allocation `refund` active du crédit) et peut référencer un `target_allocation_id` précis. Les triggers limitent la somme confirmée par allocation source à son montant, par allocation cible à sa valeur absolue, ainsi que par transaction cible au total des dépenses actives. Plusieurs allocations refund d'un même crédit peuvent donc soutenir des liens distincts. L'index partiel des liens ne réserve une identité que pour `proposed` ou `confirmed` non supersédés; les lignes `rejected` restent dans l'historique sans empêcher une nouvelle proposition.
+Chaque lien `refund_of` enregistre son `source_allocation_id` (allocation `refund` active du crédit) et peut référencer un `target_allocation_id` précis. Source et cible sont obligatoirement du même compte, y compris lors d'une écriture SQL brute. Une supersession conserve la transaction et l'allocation source, mais peut corriger la cible et le montant. Pour un lien sans allocation cible, `refund_link_allocation_parts` fige à la confirmation les parts ADR-007 par allocation active ; le service analytique relit ces mêmes centimes. Les triggers limitent, pour chaque allocation expense, le cumul des liens ciblés et des parts proratisées à sa valeur absolue, ainsi que par transaction cible au total des dépenses actives. Plusieurs allocations refund d'un même crédit peuvent donc soutenir plusieurs remboursements. L'index partiel des liens ne réserve une identité que pour `proposed` ou `confirmed` non supersédés; les lignes `rejected` restent dans l'historique sans empêcher une nouvelle proposition.
 
-La révision `0001_initial` est amendable en place tant qu'aucune base réelle n'existe (ADR-025.2 et ADR-027). Elle sera gelée à la première base réelle; après ce point, toute évolution passe par une nouvelle migration et la référence SQL est mise à jour de façon contrôlée.
+### Gel de 0001 et règle de migration
+
+La première base réelle a été créée à la révision `0001_initial`. Les deux
+fichiers de cette migration sont immuables ; tout changement de schéma passe
+par une nouvelle révision additive (`0002`, puis `0003`…), jamais par une
+édition de `0001`. Le test `MIG-FREEZE-01` épingle les empreintes et demande
+explicitement de « créer 0003 » si le gel est violé.
+
+Toute montée sur une base existante passe par
+`uv run python -m app.db.migrate upgrade`, qui crée une sauvegarde cohérente
+avant Alembic, la vérifie (`integrity_check`, SHA-256 et manifeste) et applique
+les modes `0700`/`0600`. Les reconstructions de tables s'exécutent dans la
+transaction Alembic avec `foreign_keys` désactivé avant `BEGIN`; la migration
+réinstalle les triggers puis exige `PRAGMA integrity_check = ok` et aucune ligne
+de `PRAGMA foreign_key_check` avant commit. `foreign_keys` est réactivé après
+la migration. Ne jamais lancer les tests ou les vérifications sur `data/`.
+
+Le downgrade de 0002 refuse par défaut. Il exige une sauvegarde vérifiée de la
+révision source et `COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1`; l'action de décision
+`clear` est alors réduite à `undo` et les parts matérialisées sont supprimées.
+Une révision publiée reste inchangée, y compris en cas de défaut : créer une
+révision corrective vers l'avant.
 
 Chaque connexion issue de `create_sqlite_engine()` active `foreign_keys` et `recursive_triggers`, ainsi que le mode WAL et les paramètres de concurrence. L'environnement Alembic utilise cette même fabrique et les paramètres `Settings`. Les opérations ORM de lecture passent par `get_db`, qui active `PRAGMA query_only=ON` et annule sa transaction à la fermeture. Aucun commit n'est implicite dans la dépendance.
 

@@ -108,12 +108,71 @@ def split_by_amounts(amount_cents: int, parts: MoneyParts) -> dict[str, int]:
     return result
 
 
+def _bounded_prorata(
+    amount_cents: int, weights: Mapping[str, int], capacities: Mapping[str, int]
+) -> dict[str, int]:
+    """Allocate cents proportionally with integer largest remainders and caps."""
+    if amount_cents > sum(capacities.values()):
+        raise MoneySplitError("REFUND_PRORATA_INFEASIBLE: remaining capacity is insufficient")
+
+    result = {category_id: 0 for category_id in weights}
+    remaining = amount_cents
+    active = {category_id for category_id in weights if capacities[category_id] > 0}
+    while remaining and active:
+        denominator = sum(weights[category_id] for category_id in active)
+        capped = {
+            category_id
+            for category_id in active
+            if remaining * weights[category_id] > capacities[category_id] * denominator
+        }
+        if capped:
+            for category_id in sorted(capped):
+                cap = capacities[category_id]
+                result[category_id] = cap
+                remaining -= cap
+                active.remove(category_id)
+            continue
+
+        floors: dict[str, int] = {}
+        remainders: dict[str, int] = {}
+        for category_id in active:
+            quotient, remainder = divmod(remaining * weights[category_id], denominator)
+            floors[category_id] = quotient
+            remainders[category_id] = remainder
+        allocated = sum(floors.values())
+        residual = remaining - allocated
+        for category_id, amount in floors.items():
+            result[category_id] = amount
+        recipients = sorted(
+            (
+                category_id
+                for category_id in active
+                if floors[category_id] < capacities[category_id]
+            ),
+            key=lambda category_id: (-remainders[category_id], category_id),
+        )
+        if residual > len(recipients):
+            raise MoneySplitError("REFUND_PRORATA_INFEASIBLE: bounded residual cannot be assigned")
+        for category_id in recipients[:residual]:
+            result[category_id] += 1
+        remaining = 0
+
+    if remaining or sum(result.values()) != amount_cents:
+        raise MoneySplitError("REFUND_PRORATA_INFEASIBLE: bounded residual cannot be assigned")
+    if any(value < 0 or value > capacities[category_id] for category_id, value in result.items()):
+        raise MoneySplitError("bounded prorata exceeded a category capacity")
+    return {category_id: result[category_id] for category_id in sorted(result)}
+
+
 def prorate_link(amount_cents: int, allocations: MoneyParts) -> dict[str, int]:
-    """Attribute a positive refund link across expense categories by exact ratio.
+    """Attribute a positive refund link with bounded largest-remainder proration.
 
     ``allocations`` contains ``(category_id, negative_expense_cents)`` pairs.
-    Repeated category IDs are aggregated by absolute amount. Zero attribution for
-    a category is valid for very small refunds; the sum always equals the link.
+    Repeated category IDs are aggregated by absolute amount. Those gross
+    category amounts are also the default capacities. Integer quotas are
+    floored, then residual cents go by descending fractional remainder and
+    ascending category ID. A link larger than total capacity is infeasible.
+    Zero attribution for a category is valid for very small refunds.
     """
     amount = _strict_int(amount_cents, "amount_cents")
     if amount <= 0:
@@ -126,16 +185,35 @@ def prorate_link(amount_cents: int, allocations: MoneyParts) -> dict[str, int]:
     if denominator <= 0:
         raise MoneySplitError("at least one non-zero expense allocation is required")
 
-    order = sorted(weights, key=lambda category_id: (-weights[category_id], category_id))
-    remaining = amount
-    result: dict[str, int] = {}
-    for index, category_id in enumerate(order):
-        if index == len(order) - 1:
-            part_cents = remaining
-        else:
-            part_cents = _round_ratio_half_away(amount * weights[category_id], denominator)
-            remaining -= part_cents
-        result[category_id] = part_cents
-    if sum(result.values()) != amount:
-        raise MoneySplitError("prorated refund does not sum exactly to the link amount")
-    return result
+    return _bounded_prorata(amount, weights, weights)
+
+
+def prorate_link_bounded(
+    amount_cents: int, allocations: MoneyParts, capacities_cents: Mapping[str, int]
+) -> dict[str, int]:
+    """Prorate by gross expense weights while respecting remaining category caps.
+
+    ``capacities_cents`` has one non-negative strict integer capacity for each
+    merged expense category. Any quota clipped by its cap is redistributed in
+    the same deterministic proportion over the categories still below their
+    caps. Insufficient total remaining capacity raises ``MoneySplitError``.
+    """
+    amount = _strict_int(amount_cents, "amount_cents")
+    if amount <= 0:
+        raise MoneySplitError("refund link amount must be positive")
+    parsed = _as_pairs(allocations)
+    if any(value >= 0 for _, value in parsed):
+        raise MoneySplitError("proration weights must be negative expense amounts")
+    weights = _merge([(category_id, abs(value)) for category_id, value in parsed])
+    denominator = sum(weights.values())
+    if denominator <= 0:
+        raise MoneySplitError("at least one non-zero expense allocation is required")
+    capacities: dict[str, int] = {}
+    for category_id, raw_capacity in capacities_cents.items():
+        capacity = _strict_int(raw_capacity, "category capacity")
+        if capacity < 0:
+            raise MoneySplitError("category capacities must be non-negative")
+        capacities[category_id] = capacity
+    if set(capacities) != set(weights):
+        raise MoneySplitError("capacities must match the expense categories")
+    return _bounded_prorata(amount, weights, capacities)

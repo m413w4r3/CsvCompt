@@ -175,7 +175,7 @@
 - **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue G1 MAJ-01..MAJ-07)
 - **Décision** :
   1. **Enveloppe d'erreur** (MAJ-05) : la forme officielle est `{"error": {"code", "message", "details"}}` (déjà implémentée côté backend et frontend). `docs/API.md` est amendé en conséquence (exemples inclus) ; un test de contrat compare les exemples d'`API.md` aux réponses réelles. `/health` : les 4 champs obligatoires (`status`, `api_version`, `storage_status`, `llm_enabled`) + champs additifs documentés dans `API.md` (`version`, `time_utc`, `database{status,revision}`, `offline_ready`).
-  2. **Migration 0001 non publiée** (MAJ-06) : aucune base utilisateur n'existe encore ; la migration `0001_initial` et `docs/examples/schema.sql` (source de vérité) sont **amendées en place** pour imposer `NOT NULL` et le format UUIDv4 texte sur toutes les clés primaires (`CHECK length=36 AND GLOB`), pour aligner la précision des horodatages UTC (`%Y-%m-%dT%H:%M:%fZ`, millisecondes, avec CHECK de format strict) et pour imposer en base le verrou optimiste (`BEFORE UPDATE … WHEN NEW.version <> OLD.version + 1` sur les tables versionnées). **Gel** : dès la première création d'une base réelle (usage local à partir de G3), `0001` est immuable ; toute évolution ultérieure = nouvelle révision (ADR-016 inchangée).
+  2. **Migration 0001 non publiée au moment de cette décision** (MAJ-06) : avant la première base réelle, `0001_initial` et `docs/examples/schema.sql` pouvaient être amendées en place pour imposer `NOT NULL` et le format UUIDv4 texte sur toutes les clés primaires (`CHECK length=36 AND GLOB`), la précision des horodatages UTC (`%Y-%m-%dT%H:%M:%fZ`) et le verrou optimiste (`BEFORE UPDATE … WHEN NEW.version <> OLD.version + 1` sur les tables versionnées). Ce régime a pris fin à la première base réelle ; ADR-031 fixe désormais la révision 0001 au commit `1066748` et impose une nouvelle révision pour tout changement ultérieur.
   3. **Session d'écriture** (MAJ-01/02) : le commit n'a jamais lieu après l'envoi de la réponse. Les écritures passent par une unité de travail explicite `with write_transaction(...)` dans le service/handler (commit **avant** de retourner), en `BEGIN IMMEDIATE` ; `sqlite3.OperationalError: database is locked` → `503 DATABASE_BUSY` (réessayable), `StaleDataError`/version périmée → `409 VERSION_CONFLICT`. `get_db` ne sert plus qu'aux lectures.
   4. **Sauvegarde obligatoire** (MAJ-07) : la CLI Alembic standard ne peut pas migrer une base non vide sans passer par la routine de sauvegarde ; `COMPTES_ALLOW_DATA_LOSS_DOWNGRADE` ne coupe les FK qu'en `downgrade` (m-06).
   5. **Secrets/logs** (MAJ-03/04) : les logs d'accès uvicorn sont désactivés ou rédigés (pas de chemins/query en clair) ; les erreurs de validation des `Settings` ne reproduisent jamais la valeur fournie.
@@ -200,9 +200,74 @@
 
 - **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, retour T17)
 - **Contexte** : T17 constate que (a) une allocation confirmée ne peut être que remplacée, jamais retirée de façon auditable (retour à « non ventilée » impossible, donc annulation T20 impossible) ; (b) `transaction_links` ne référence pas l'allocation source `refund`, donc un seul remboursement actif par crédit ; (c) l'index d'unicité des liens actifs inclut les liens rejetés non supersédés.
-- **Décision** (migration `0001` toujours amendable en place : aucune base utilisateur réelle n'existe, ADR-025.2 ; gel à la première base réelle) :
+- **Décision** (règle de migration désormais fixée par ADR-031 : toutes les évolutions T17 de cette décision sont dans `0002_t17_refund_safety`) :
   1. **Retrait** : une allocation peut être *retirée* par une action humaine auditée : colonnes `retracted_at_utc` et `retracted_by_decision_id` (NULL = active) ; une allocation est **active** si `superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL` ; les triggers de signe/plafond/somme et toutes les lectures (métriques, résidu, liens) ne considèrent que les allocations actives ; une allocation retirée ou supersédée est immuable (aucune autre modification) ; le retrait ne peut être posé qu'avec une décision existante de la même transaction ; jamais de DELETE.
   2. **Liens par allocation** : `transaction_links` porte `source_allocation_id` (allocation `refund` active du crédit) et `target_allocation_id` ; plafonds : Σ liens `confirmed` par allocation source ≤ montant de cette allocation, Σ par allocation cible ≤ |montant de cette allocation| ; plusieurs remboursements actifs par crédit autorisés (une ventilation `refund` + `income_other` + plusieurs achats liés).
   3. **Unicité** : l'index d'unicité des liens actifs ne porte que sur les liens `proposed|confirmed` non supersédés (les `rejected` sont conservés comme historique et n'empêchent pas une nouvelle proposition).
-- **Conséquences** : mise à jour de `docs/examples/schema.sql`, de `0001_initial.sql`, des modèles, de `verify_schema.py` et des tests ; T17 adapte `clear_allocations` et les liens ; T18/T19/T24 ne lisent que les allocations actives.
+- **Conséquences** : la migration `0002_t17_refund_safety` met à jour les objets SQL nécessaires sans modifier la migration gelée 0001 ; `docs/examples/schema.sql`, les modèles, `verify_schema.py` et les tests reflètent la tête 0001+0002 ; T17 adapte `clear_allocations` et les liens ; T18/T19/T24 ne lisent que les allocations actives.
 
+
+## ADR-028 — Parts proratisées matérialisées et plafond combiné par allocation
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue T17 BLOCK B-01, correctif T17)
+- **Contexte** : la revue T17 a prouvé qu'un lien de remboursement proratisé (`target_allocation_id` NULL) n'était pas compté dans le plafond d'une allocation cible : prorata de 10 000 puis lien ciblé de 8 000 sur une allocation de 10 000 conduisaient à −3 000 centimes nets sur cette catégorie.
+- **Décision** :
+  1. À la confirmation d'un lien proratisé, le service calcule les parts par allocation d'achat selon ADR-007 (centimes entiers, arrondi et résidu déterministes) et les **matérialise** dans `refund_link_allocation_parts`. Le service, les contrôles de capacité et la lecture analytique utilisent ce même vecteur.
+  2. Consommation d'une allocation = Σ liens ciblés + Σ parts proratisées matérialisées ; le plafond combiné est contrôlé par le service ET par triggers SQL (allocation dépensée active, somme des parts, validité, plafond).
+  3. Le calcul proportionnel n'est pas reproduit en SQL : le service est le seul producteur pris en charge de la répartition exacte ; le schéma garantit qu'une écriture directe ne peut jamais rendre négatif le net d'une allocation.
+  4. Le retrait auditable d'allocation (ADR-027.1) est refusé tant qu'un lien proposé/confirmé la référence en source ou en cible.
+- **Conséquences** : migration `0002_t17_refund_safety` matérialise les parts et leurs gardes SQL sans modifier 0001 ; IDs de tests MONEY-11..14, KPI-03/KPI-07 dans `docs/MATRICE_TESTS_ADDENDUM.md`.
+
+## ADR-030 — Durcissement G3 : archives orphelines, OUT_OF_PERIOD, `not_started`, alias
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue G3 MAJ-01, MAJ-02, m-01..m-11)
+- **Décision** :
+  1. **Archives orphelines (MAJ-02)** : sur toute exception avant le `COMMIT` confirmé, l'archive est supprimée si aucun `import_files` commité ne la référence ; inventaire + purge auditée au démarrage des `originals/*.bin` non référencés de plus de 24 h ; deux liens `link_existing` vers la même cible ⇒ `can_commit=false`. Amende ADR-010 / IMPORT_COMMIT.
+  2. **OUT_OF_PERIOD (MAJ-01)** : l'aperçu expose, pour chaque ligne concernée, les transactions candidates de même identité stricte (`transaction_id`, rang, date d'import, sans libellé supplémentaire) ; l'UI propose « Lier à l'opération existante » par sélection (défaut s'il existe un candidat) ; « Créer une occurrence » crée **toujours** une nouvelle opération (rang n+1) et exige confirmation quand l'identité existe déjà.
+  3. **Complétude (m-04)** : `period.completeness` accepte la valeur additive `not_started` (mois antérieur à la première couverture, non alertable, ADR-003).
+  4. **Comptes (m-02)** : unicité d'alias (casefold) et absence d'empreinte revérifiées au commit (`ACCOUNT_ALIAS_CONFLICT`, `ACCOUNT_FINGERPRINT_CONFLICT`) ; l'index unique `lower(alias)` en base est reporté après T17 (propriétaire de la migration).
+  5. **Entiers (m-03)** : aucun total hors 2^53 n'atteint le frontend ; `errorElement` de route obligatoire.
+  6. **Solde d'en-tête (m-05)** : confirmé sur le profil réel (« Solde au » = date de téléchargement) ; ADR-024.2 rend le contrôle inerte ; correctif `T14b` (delta entre deux exports consécutifs) à planifier.
+
+## ADR-031 — Gel de 0001 (première base réelle) et migrations additives
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur ; amende ADR-025.2 et ADR-027)
+- **Contexte** : l'utilisateur a importé de vraies données via le frontend ; `data/db/comptes.sqlite` est à la révision `0001_initial` avec exactement le schéma de `0001_initial.sql` du commit `1066748` (126 objets identiques, vérifié par comparaison de `sqlite_master`, sans lire de données). Les amendements en place de `0001` effectués depuis (T17 : parts proratisées, retrait, triggers) divergent donc de cette base.
+- **Décision** :
+  1. `0001_initial.sql` et `versions/0001_initial.py` sont **gelés** à leur contenu de `1066748` ; un test de gel (SHA-256 épinglés) échoue à toute modification.
+  2. Tout changement de schéma est une **nouvelle révision** (`0002`, `0003`…) sûre sur base non vide : reconstruction de tables par create/copy/drop/rename, réinstallation de tous les triggers, `integrity_check` + `foreign_key_check`, sauvegarde automatique vérifiée avant migration (ADR-025.4), downgrade conforme à la politique de perte de données explicite.
+  3. `docs/examples/schema.sql` reste la référence du schéma de **tête** ; la parité migrée ↔ `schema.sql` ↔ modèles est vérifiée par `verify_schema.py` et les tests.
+  4. Les tests n'ouvrent jamais `data/` : bases temporaires uniquement.
+- **Conséquences** : delta T17 → migration `0002` ; `rule_executions.batch_id/rule_version` (proposition T19) → `0003` (T20) ; l'index unique `lower(alias)` (ADR-030.4) → migration dédiée.
+
+## Proposition d'ADR — Répartition prorata bornée (numéro à attribuer)
+
+- **Statut** : proposition T17, numérotation et arbitrage réservés à l'orchestrateur.
+- **Contexte** : le prorata de remboursement hérité d'ADR-007 arrondissait les
+  catégories et affectait le résidu à la dernière. Après des remboursements
+  antérieurs, cette méthode pouvait dépasser la capacité restante d'une
+  catégorie, même lorsque la capacité totale suffisait.
+- **Décision proposée** :
+  1. Pour les liens `refund_of` proratisés, agréger les poids par catégorie à
+     partir des montants absolus des allocations `expense` actives. La capacité
+     d'une catégorie est la capacité active restante après les liens confirmés
+     précédents, ciblés ou proratisés.
+  2. Répartir en centimes entiers par la méthode des plus grands restes. Si une
+     part calculée dépasse sa capacité, plafonner cette catégorie et redistribuer
+     le résidu au prorata des poids initiaux entre les catégories encore
+     disponibles. Départager les restes égaux par `category_id` croissant.
+  3. Pour une catégorie ventilée sur plusieurs allocations, distribuer sa part
+     par `allocation_id` croissant sans dépasser la capacité restante de chacune.
+     Matérialiser uniquement les parts strictement positives; leur somme égale
+     toujours le montant positif du lien.
+  4. Si le montant dépasse la somme des capacités restantes, refuser atomiquement
+     la confirmation avec `REFUND_PRORATA_INFEASIBLE`; ne pas tronquer le lien,
+     réduire son montant ni écrire des parts partielles.
+  5. Le calcul reste entier, déterministe et sans `float`. Cette règle concerne
+     le prorata des remboursements (`prorate_link`) ; le split des allocations
+     par points de base (`split_by_basis_points`) conserve la règle ADR-007.
+- **Conséquences proposées** : les parts de chaque lien sont figées à la
+  confirmation, les liens suivants utilisent les capacités restantes, et les
+  oracles MONEY-15/MONEY-20 vérifient la conservation, les plafonds, l'ordre
+  déterministe et le refus conservateur. Cette proposition accompagne la
+  migration `0002_t17_refund_safety` sans modifier la migration 0001 gelée.

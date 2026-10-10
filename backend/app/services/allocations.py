@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import wraps
 from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -119,6 +122,23 @@ class _NormalizedPart:
 
 def _fail(code: str, status: int, message: str) -> AppError:
     return AppError(code, status, message)
+
+
+def _translate_integrity_errors[**P, R](function: Callable[P, R]) -> Callable[P, R]:
+    """Keep raw SQLite constraint failures inside the typed service contract."""
+
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return function(*args, **kwargs)
+        except IntegrityError as error:
+            raise _fail(
+                "ALLOCATION_CONFLICT",
+                409,
+                "La mutation des allocations entre en conflit avec une contrainte métier.",
+            ) from error
+
+    return wrapped
 
 
 def _strict_int(value: object, field: str) -> int:
@@ -293,6 +313,54 @@ def _active_link_exists(session: Session, transaction_id: str) -> bool:
     return session.scalar(statement.limit(1)) is not None
 
 
+def _reject_proposed_links_after_allocation_change(
+    session: Session, transaction_id: str, actor: str
+) -> None:
+    """Reject proposals tied to the allocation snapshot being replaced or cleared."""
+    links = list(
+        session.scalars(
+            select(TransactionLink)
+            .where(
+                TransactionLink.link_kind == "refund_of",
+                TransactionLink.status == "proposed",
+                TransactionLink.superseded_by_transaction_link_id.is_(None),
+                (TransactionLink.source_transaction_id == transaction_id)
+                | (TransactionLink.target_transaction_id == transaction_id),
+            )
+            .order_by(TransactionLink.transaction_link_id)
+        )
+    )
+    for link in links:
+        before = {
+            "transaction_link_id": link.transaction_link_id,
+            "source_transaction_id": link.source_transaction_id,
+            "source_allocation_id": link.source_allocation_id,
+            "target_transaction_id": link.target_transaction_id,
+            "target_allocation_id": link.target_allocation_id,
+            "amount_cents": link.amount_cents,
+            "status": "proposed",
+        }
+        after = {**before, "status": "rejected", "reason": "allocation_changed"}
+        session.add(
+            AuditEvent(
+                target_type="transaction_link",
+                target_id=link.transaction_link_id,
+                action="refund_link.rejected",
+                actor=actor,
+                before_json=json.dumps(
+                    before, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                after_json=json.dumps(
+                    after, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+            )
+        )
+        link.status = "rejected"
+        link.version += 1
+    if links:
+        session.flush()
+
+
 def _allocation_json(rows: Sequence[Allocation]) -> list[dict[str, str | int]]:
     return [
         {
@@ -353,7 +421,7 @@ def _write_decision_and_audit(
     before: list[dict[str, str | int]] | None,
     after: list[dict[str, str | int]] | None,
     audit_event_id: str,
-) -> None:
+) -> str:
     before_json = (
         None
         if before is None
@@ -364,9 +432,10 @@ def _write_decision_and_audit(
         if after is None
         else json.dumps(after, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+    decision_id = str(uuid.uuid4())
     session.add(
         ClassificationDecision(
-            decision_id=str(uuid.uuid4()),
+            decision_id=decision_id,
             transaction_id=transaction_id,
             action=action,
             actor=actor,
@@ -385,8 +454,10 @@ def _write_decision_and_audit(
             after_json=after_json,
         )
     )
+    return decision_id
 
 
+@_translate_integrity_errors
 def allocate(
     engine: Engine,
     transaction_id: str,
@@ -453,6 +524,9 @@ def allocate(
                 "Cette transaction participe à un remboursement confirmé; revoyez d'abord le lien.",
             )
 
+        if current:
+            _reject_proposed_links_after_allocation_change(session, transaction_id, actor_value)
+
         new_allocation_ids = [str(uuid.uuid4()) for _ in normalized_parts]
         after_json_value = _requested_json(normalized_parts, new_allocation_ids, origin_value.value)
         before_json_value = _allocation_json(current)
@@ -507,6 +581,7 @@ def allocate(
     return get_allocation_state(engine, transaction_id)
 
 
+@_translate_integrity_errors
 def clear_allocations(
     engine: Engine,
     transaction_id: str,
@@ -514,14 +589,10 @@ def clear_allocations(
     actor: str,
     expected_version: int,
 ) -> AllocationState:
-    """Return a blank transaction to its current state when already unallocated.
-
-    Schema v1 has no safe representation for superseding the last active
-    allocation without a replacement. For populated transactions this raises a
-    precise error rather than deleting, mutating, or inventing a zero allocation.
-    """
+    """Audibly retract every active allocation without changing bank data."""
     actor_value = _actor_value(actor)
     expected = _strict_int(expected_version, "expected_version")
+    audit_event_id = str(uuid.uuid4())
     with write_transaction(engine) as session:
         transaction = session.get(Transaction, transaction_id)
         if transaction is None:
@@ -529,18 +600,41 @@ def clear_allocations(
         if transaction.version != expected:
             raise VersionConflictError()
         current = _active_allocations(session, transaction_id)
-        if current:
+        if not current:
+            return get_allocation_state(engine, transaction_id)
+
+        if _active_link_exists(session, transaction_id):
             raise _fail(
-                "ALLOCATION_CLEAR_UNSUPPORTED_SCHEMA",
+                "ALLOCATION_HAS_CONFIRMED_REFUND_LINK",
                 409,
-                "Le schéma v1 exige une allocation de remplacement pour toute supersession; "
-                "il ne permet pas un état vide auditable.",
+                "Retirez ou remplacez les liens de remboursement actifs avant de retirer "
+                "les allocations.",
             )
-        if not actor_value:
-            raise _fail("ALLOCATION_INVALID", 422, "Un acteur non vide est requis.")
+        _reject_proposed_links_after_allocation_change(session, transaction_id, actor_value)
+        before = _allocation_json(current)
+        decision_id = _write_decision_and_audit(
+            session,
+            transaction_id=transaction_id,
+            actor=actor_value,
+            action="clear",
+            audit_action="allocation.retracted",
+            before=before,
+            after=[],
+            audit_event_id=audit_event_id,
+        )
+        session.flush()
+
+        retracted_at = datetime.now(UTC)
+        for allocation in current:
+            allocation.retracted_at_utc = retracted_at
+            allocation.retracted_by_decision_id = decision_id
+            allocation.version += 1
+        transaction.version += 1
+        session.flush()
     return get_allocation_state(engine, transaction_id)
 
 
+@_translate_integrity_errors
 def get_allocation_state(engine: Engine, transaction_id: str) -> AllocationState:
     """Read confirmed active allocations, signed residual, state, and derived flow."""
     with session_scope(engine) as session:

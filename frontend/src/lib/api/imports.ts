@@ -1,6 +1,8 @@
 import { request } from './client'
 import type { ImportListItem, ImportPreview } from '../../types/transactions'
 
+const IMPORT_COMMIT_TIMEOUT_MS = 120_000
+
 export function createImportPreview(file: File) {
   const form = new FormData()
   form.set('file', file)
@@ -28,7 +30,7 @@ export function resolveMultiplicity(id: string, logicalRow: number, body: Record
 }
 
 export function commitImport(id: string, expectedVersion: number, idempotencyKey: string) {
-  return request<Record<string, unknown>>(`/imports/${encodeURIComponent(id)}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ expected_version: expectedVersion }) })
+  return request<Record<string, unknown>>(`/imports/${encodeURIComponent(id)}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ expected_version: expectedVersion }) }, IMPORT_COMMIT_TIMEOUT_MS)
 }
 
 export function listImports(cursor?: string | null) {

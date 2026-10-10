@@ -1,6 +1,7 @@
 # État d'implémentation — Comptes familiaux
 
 > Tenu par l'orchestrateur. Mis à jour à chaque ticket validé. Une ligne n'est `PASS` que si une preuve d'exécution est référencée.
+> Dernier audit complet : 2026-10-10 (reprise d'orchestration, après le premier import réel réussi via le frontend).
 
 ## Configuration d'orchestration
 
@@ -8,53 +9,55 @@
 |---|---|
 | Orchestrateur | Claude Sonnet 5.5 (`claude-sonnet-5-5`), effort high |
 | Sous-agents demandés | GPT-6 Luna (high / xhigh) |
-| Sous-agents réellement utilisés | **GPT-6 Luna disponible** via sous-sessions Nimbalyst (`spawn_session`, modèle `openai-codex:gpt-6-luna`), effort `high` ou `xhigh` selon le backlog. (L'outil `Agent` n'expose pas ce modèle : il n'est utilisé que pour des revues indépendantes ponctuelles, jamais pour implémenter.) |
-| Revues indépendantes | Sous-session GPT-6 Luna distincte de l'auteur ; pour les composants financiers sensibles, revue complémentaire par un modèle d'une autre famille (`claude-code:opus`). |
+| Sous-agents réellement utilisés | **GPT-6 Luna** via sous-sessions Nimbalyst (`spawn_session`, modèle `openai-codex:gpt-6-luna`), effort `high` ou `xhigh`. L'outil `Agent` n'expose pas ce modèle. Limite plateforme : 4 sous-sessions simultanées. |
+| Revues indépendantes | Sous-session GPT-6 Luna distincte de l'auteur ; pour les composants financiers sensibles / gates, revue par `claude-code:opus`. |
 | Règle | L'orchestrateur **n'implémente pas** : il rédige les missions, contrôle, intègre et committe. |
 | Spécifications | `.nimbalyst/plan_implementation_comptes_familiaux/` (non déplacées) |
-| Racine du projet | racine du dépôt (le plan prévoit `comptes-familiaux/` : ici le dépôt *est* cette racine) |
+| Racine du projet | racine du dépôt |
 
 ## Jalons / gates
 
 | Gate | Jalon | Statut | Rapport |
 |---|---|---|---|
-| G0 | M0 contrats | **PASS** (2026-10-10, après 3 revues indépendantes et amendements ADR-017..024 ; réserves R1/R2 → vérifiées à G3 via T14, R3 → G4 via T17) | docs/revues/REVUE_G0_opus.md, REVUE_G0_luna.md, REVUE_G0_confirmation.md |
-| G1 | M1 | **PASS** (2026-10-10 ; revue Opus : 0 bloquant, 7 majeurs levés par le durcissement ADR-025, mineurs m-01..m-17 traités sauf m-14 [épinglage SHA : risque accepté, docs/CI.md]) | docs/revues/REVUE_G1.md ; `make check` rejoué : 119 backend, 21 intégration, 41 frontend, 2 E2E |
-| G2 | M1 | à venir | — |
-| G3 | M1 | à venir | — |
-| G4 | M2 | à venir | — |
+| G0 | M0 contrats | **PASS** (2026-10-10) | docs/revues/REVUE_G0_*.md |
+| G1 | M1 | **PASS** (2026-10-10) | docs/revues/REVUE_G1.md |
+| G2 | M1 | **PASS** (BLOCK de REVUE_G2 levé par ADR-026 ; levée confirmée par REVUE_G3 : B-01, M-01..M-05 corrigés) ; réserve m-03 (entiers > 2^53) traitée dans le durcissement G3 | docs/revues/REVUE_G2.md, REVUE_G3.md |
+| G3 | M1 | **PASS sous réserves** (0 BLOQUANT, 2 MAJEUR, 11 MINEUR). Durcissement MAJ-01/MAJ-02/m-01..m-11 en cours ; m-05 (contrôle de solde inerte sur exports réels, confirmé sur le profil réel : « Solde au » = date de téléchargement) → correctif T14b à planifier | docs/revues/REVUE_G3.md |
+| G4 | M2 | en cours (T16 PASS, T18 livré, T17 BLOCK → correctif en cours, T19/T20 à faire) | docs/revues/REVUE_T17.md |
 | G5 | M2 | à venir | — |
 | G6 | M3 | à venir | — |
 | G7 | M3 | à venir | — |
 | G8 | M4 | à venir | — |
 | G9 | M5 | à venir | — |
 | G10 | M5 | à venir | — |
-| G11 | M6 | à venir | — |
+| G11 | M6 | à venir (T41 livré, T42 en cours) | — |
 
 ## Tickets
 
-| Ticket | Lot | Statut | Sous-agent (modèle) | Commit | Tests exécutés / résultat | Revue indépendante |
-|---|---|---|---|---|---|---|
-| T00 | 0 | PASS | Sonnet (outil Agent, avant correction de config) | dbf46ca | `check_no_private_data.sh` OK ; `validate_plan.py` OK ; `git check-ignore` confirmé | contrôle orchestrateur (revue indépendante non requise : ARCH/doc) |
-| T01 | 0 | PASS | GPT-6 Luna xhigh (66da88ba) | 310066e, 08baf71, b01dac9 | verify_metrics_examples PASS (29 oracles, re-exécuté) | Opus + Luna (G0) |
-| T02 | 0 | PASS | GPT-6 Luna xhigh (3e637e8f) | 2ac50be, 797001c, 73f485c | verify_schema PASS (preuves de mutation /tmp, re-exécuté) | Opus + Luna (G0) |
-| T03 | 0 | PASS | GPT-6 Luna xhigh (1d3b360f) | 0a6572e, 76e2b0f | verify_fixtures PASS (34 fixtures), déterminisme prouvé | Opus + Luna (G0) |
-| T04 | 0 | PASS | GPT-6 Luna high (79be58cf) | f60215c | self-test 4 OK ; profil local CSV réel : 1 024 opérations, 2026-01-01→2026-10-09, 1 section, 2 groupes identiques (mult. max 4) | revue Luna : F-05 (test pytest réel à T09) |
+| Ticket | Lot | Statut | Commit(s) | Preuve / revue |
+|---|---|---|---|---|
+| T00..T04 | 0 | PASS | dbf46ca … f60215c | G0 PASS (3 revues) |
+| T05..T08 | 1 | PASS | 2ebdabf … a4e6d2e, 04efd55 | G1 PASS |
+| T09, T10, T11 | 2 | PASS | 3d55f9c, 6a553d2, cbb30dd, bec0ba5, ef5c4b1 | G2 PASS (REVUE_G3 confirmation) |
+| T12, T13 | 3 | PASS sous réserves | 4359a48, ef5c4b1 | REVUE_G3 : idempotence, concurrence, atomicité prouvées ; MAJ-02 (archives orphelines) en correction |
+| T14 | 3 | PASS sous réserves | aeb7b32 | REVUE_G3 ; m-04, m-05 en correction |
+| T15 | 3 | PASS sous réserves | aeb7b32 | REVUE_G3 ; MAJ-01 (OUT_OF_PERIOD), m-07, m-09 en correction |
+| T16 | 4 | PASS (revue G4 à faire) | 4a3c7c4 | tests unitaires/intégration ; revue de G4 à faire |
+| T17 | 4 | **BLOCK → correctif en cours** | 1066748 (checkpoint) | REVUE_T17 : plafond proratisé/ciblé, retrait ADR-027, trigger inter-comptes, docs |
+| T18 | 4 | livré (revue G4 à faire) | 7870c7b | tests ; revue G4 à faire |
+| T19..T40 | 4-10 | en attente | — | dépendances : T17 validé |
+| T41 | 11 | livré, revue indépendante à planifier | non commité | auteur : tests OPS-01/OPS-02 ; revue formelle à faire |
+| T42 | 11 | actif | — | — |
+| T43..T45 | 11 | en attente | — | — |
 
-| T05 | 1 | PASS | GPT-6 Luna high (00951927) | 2ebdabf, 9dcb3f0, 04efd55 | make check vert (re-exécuté) | revue G1 Opus |
-| T06 | 1 | PASS | GPT-6 Luna xhigh (fa4084ae) | 9dcb3f0, 04efd55 | parité migrée↔schema.sql, garde-fous rejoués sur base migrée, make check vert | revue G1 Opus |
-| T07 | 1 | PASS | GPT-6 Luna high (9633eb61) | 39290d2, e58d240 | 41 tests Vitest, axe-core 0 violation, 3 tests a11y | revue G1 Opus |
-| T08 | 1 | PASS | GPT-6 Luna high (e7342a88) | a4e6d2e, 04efd55 | make check, smoke E2E chaîne réelle | revue G1 Opus |
+## Corrections transverses
 
-| T09 | 2 | PASS (revue G2 à faire) | GPT-6 Luna xhigh (22c63a14) | 3d55f9c | 78 tests ; test opt-in exécuté localement sur le CSV réel : passed (1 024 opérations, 0 anomalie bloquante) | revue interne ; revue G2 à faire |
-| T10 | 2 | PASS (revue G2 à faire) | GPT-6 Luna xhigh (6fe1c22a) | 6a553d2 | 70 tests importers | revue interne ; revue G2 à faire |
-| T11 | 2 | actif | GPT-6 Luna high | — | — | — |
-
-(T12..T45 : `en attente`, voir `.nimbalyst/plan_implementation_comptes_familiaux/backlog.yaml`.)
+| Sujet | Statut |
+|---|---|
+| Test intermittent `0001` dans un UUID (`preview_id`) | cause prouvée (collision fortuite, pas de fuite) ; helper structurel + tests déterministes ; revue : ACCEPTÉ SOUS RÉSERVES (liste blanche contractuelle, 3 assertions analogues dans `test_quality_imports.py`) → correctif en cours |
 
 ## Constats d'audit initial (09/10/2026)
 
 - Plan validé par `scripts/validate_plan.py` : 46 tickets, 12 gates, 87 IDs de catégories.
-- CSV 2026 local : 1 024 opérations, 01/01/2026 → 09/10/2026, CP1252, LF, une seule section « Compte de Dépôt carte » (confirme CSV-06). Le CSV 2025 contient deux sections (compte courant + compte espèces PEA) : fixture de compatibilité uniquement.
-- Dépôt Git sans commit initial au démarrage.
-- Aucune contradiction bloquante détectée (voir `DECISIONS.md` pour les arbitrages de cadrage mineurs).
+- CSV 2026 local : 1 024 opérations, 01/01/2026 → 09/10/2026, CP1252, LF, une seule section.
+- Profil réel (2026-10-10, dates uniquement) : « Solde au » = date de téléchargement = date de la dernière opération (cf. REVUE_G3 m-05).

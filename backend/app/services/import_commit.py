@@ -11,13 +11,12 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
-from app.db.errors import DatabaseBusyError
 from app.db.models import (
     Account,
     AuditEvent,
@@ -44,7 +43,7 @@ from app.services.app_secrets import read_hmac_key
 from app.services.idempotency import find_replay, request_fingerprint, save_response
 from app.services.import_archive import ImportArchive
 from app.services.import_preview_store import ImportPreviewStore
-from app.services.imports import _rejection_code
+from app.services.imports import MAX_IMPORT_OPERATION_COUNT, _rejection_code
 
 _HTTP_METHOD = "POST"
 
@@ -141,20 +140,64 @@ def _add_audit(
     )
 
 
-def _existing_for_key(session: Session, key: IdentityKey) -> list[Transaction]:
-    account_id, booked_on, amount_cents, identity_label = key
-    return list(
-        session.scalars(
-            select(Transaction)
-            .where(
-                Transaction.account_id == account_id,
-                Transaction.booked_on == date.fromisoformat(booked_on),
-                Transaction.amount_cents == amount_cents,
-                Transaction.identity_label == identity_label,
+def _existing_for_keys(
+    session: Session, keys: set[IdentityKey]
+) -> dict[IdentityKey, list[Transaction]]:
+    """Load existing strict identities in bounded batches, then index them in memory."""
+
+    identities = list(keys)
+    result: dict[IdentityKey, list[Transaction]] = {key: [] for key in identities}
+    for offset in range(0, len(identities), 200):
+        chunk = identities[offset : offset + 200]
+        statement = select(Transaction).where(
+            or_(
+                *(
+                    and_(
+                        Transaction.account_id == account_id,
+                        Transaction.booked_on == date.fromisoformat(booked_on),
+                        Transaction.amount_cents == amount_cents,
+                        Transaction.identity_label == identity_label,
+                    )
+                    for account_id, booked_on, amount_cents, identity_label in chunk
+                )
             )
-            .order_by(Transaction.occurrence_rank)
         )
+        for transaction in session.scalars(statement):
+            key: IdentityKey = (
+                transaction.account_id,
+                transaction.booked_on.isoformat(),
+                transaction.amount_cents,
+                transaction.identity_label,
+            )
+            result[key].append(transaction)
+    for transactions in result.values():
+        transactions.sort(key=lambda item: item.occurrence_rank)
+    return result
+
+
+def _mark_mapping_conflict(preview: dict[str, Any], code: str, section_index: int) -> None:
+    message = {
+        "ACCOUNT_ALIAS_CONFLICT": "Cet alias est déjà utilisé par un autre compte.",
+        "ACCOUNT_FINGERPRINT_CONFLICT": (
+            "Cette identité de compte est déjà associée à un autre compte."
+        ),
+    }[code]
+    preview["rejections"] = [
+        item
+        for item in preview.get("rejections", [])
+        if item.get("code") not in {"ACCOUNT_ALIAS_CONFLICT", "ACCOUNT_FINGERPRINT_CONFLICT"}
+    ]
+    preview["rejections"].append(
+        {
+            "code": code,
+            "severity": "blocking",
+            "section": section_index,
+            "logical_row_idx": None,
+            "field": "account_mapping",
+            "message": message,
+        }
     )
+    preview["can_commit"] = False
 
 
 def _new_transaction(
@@ -318,6 +361,7 @@ def _validate_link_targets_before_archive(
     account_mappings = resolutions.get("account_mapping", {})
     section_views = {int(item["section_index"]): item for item in preview["sections"]}
     pending: list[tuple[str, IdentityKey]] = []
+    targets: set[str] = set()
     for item in prepared_rows:
         if not item.out_of_period:
             continue
@@ -334,6 +378,13 @@ def _validate_link_targets_before_archive(
                 422,
                 "La résolution link_existing doit cibler une transaction existante.",
             )
+        if transaction_id in targets:
+            raise AppError(
+                "MULTIPLICITY_RESOLUTION_INVALID",
+                422,
+                "Deux lignes hors période ne peuvent pas viser la même transaction.",
+            )
+        targets.add(transaction_id)
         pending.append(
             (
                 transaction_id,
@@ -402,10 +453,28 @@ def _resolve_accounts(
                     "ACCOUNT_MAPPING_INVALID", 422, "Le compte sélectionné est indisponible."
                 )
             if fingerprint is not None and account.bank_fingerprint not in (None, fingerprint):
+                _mark_mapping_conflict(preview, "ACCOUNT_FINGERPRINT_CONFLICT", section_index)
                 raise AppError(
-                    "ACCOUNT_FINGERPRINT_CONFLICT", 409, "Le mapping du compte est incompatible."
+                    "ACCOUNT_FINGERPRINT_CONFLICT",
+                    409,
+                    "Le mapping du compte est incompatible.",
                 )
             if fingerprint is not None and account.bank_fingerprint is None:
+                fingerprint_owner = session.scalar(
+                    select(Account.account_id)
+                    .where(
+                        Account.bank_fingerprint == fingerprint,
+                        Account.account_id != account.account_id,
+                    )
+                    .limit(1)
+                )
+                if fingerprint_owner is not None:
+                    _mark_mapping_conflict(preview, "ACCOUNT_FINGERPRINT_CONFLICT", section_index)
+                    raise AppError(
+                        "ACCOUNT_FINGERPRINT_CONFLICT",
+                        409,
+                        "Cette identité de compte est déjà associée à un autre compte.",
+                    )
                 account.bank_fingerprint = fingerprint
                 account.fingerprint_key_version = 1
                 account.version += 1
@@ -421,6 +490,22 @@ def _resolve_accounts(
         role = new_account.get("account_role")
         if not isinstance(alias, str) or not alias.strip() or len(alias) > 80:
             raise AppError("ACCOUNT_MAPPING_INVALID", 422, "L'alias du compte est invalide.")
+        normalized_alias = alias.strip().casefold()
+        existing_aliases = session.scalars(select(Account.alias))
+        if any(value.strip().casefold() == normalized_alias for value in existing_aliases):
+            _mark_mapping_conflict(preview, "ACCOUNT_ALIAS_CONFLICT", section_index)
+            raise AppError(
+                "ACCOUNT_ALIAS_CONFLICT", 409, "Cet alias est déjà utilisé par un autre compte."
+            )
+        if fingerprint is not None and session.scalar(
+            select(Account.account_id).where(Account.bank_fingerprint == fingerprint)
+        ):
+            _mark_mapping_conflict(preview, "ACCOUNT_FINGERPRINT_CONFLICT", section_index)
+            raise AppError(
+                "ACCOUNT_FINGERPRINT_CONFLICT",
+                409,
+                "Cette identité de compte est déjà associée à un autre compte.",
+            )
         account = Account(
             alias=alias.strip(),
             account_role=role,
@@ -607,9 +692,7 @@ def _commit_in_transaction(
         for item in prepared_rows
     ]
     relevant_keys = {item.identity_key for item in prepared_with_accounts}
-    existing_transactions: dict[IdentityKey, list[Transaction]] = {
-        identity_key: _existing_for_key(session, identity_key) for identity_key in relevant_keys
-    }
+    existing_transactions = _existing_for_keys(session, relevant_keys)
     existing_occurrences = [
         ExistingOccurrence(key, transaction.occurrence_rank, transaction.transaction_id)
         for key, transactions in existing_transactions.items()
@@ -719,20 +802,16 @@ def _commit_in_transaction(
 
     row_targets: dict[tuple[int, int], str] = {}
     for assignment in plan.assignments:
-        row_targets[
-            (
-                next(
-                    item.section.ordinal
-                    for item in normal_rows
-                    if item.identity_key == assignment.identity_key
-                    and item.row.logical_row_idx == assignment.logical_row_idx
-                ),
-                assignment.logical_row_idx,
-            )
-        ] = transaction_ids[(assignment.identity_key, assignment.occurrence_rank)]
+        row_source = rows_by_identity_and_index[
+            (assignment.identity_key, assignment.logical_row_idx)
+        ]
+        row_targets[(row_source.section.ordinal, assignment.logical_row_idx)] = transaction_ids[
+            (assignment.identity_key, assignment.occurrence_rank)
+        ]
     row_targets.update(link_rows)
 
     source_ids: dict[tuple[int, int], str] = {}
+    source_key_by_id: dict[str, tuple[int, int]] = {}
     seen_targets: set[str] = set()
     for item in sorted(
         prepared_with_accounts, key=lambda value: (value.section.ordinal, value.row.logical_row_idx)
@@ -752,6 +831,7 @@ def _commit_in_transaction(
         seen_targets.add(target_id)
         source_id = str(uuid.uuid4())
         source_ids[source_key] = source_id
+        source_key_by_id[source_id] = source_key
         session.add(
             SourceRow(
                 source_row_id=source_id,
@@ -795,16 +875,28 @@ def _commit_in_transaction(
         )
         operation_objects.append(operation)
         object_metadata[id(operation)] = (source_ids[source_key], row_targets[source_key])
+    candidate_groups = {
+        (account_id, date.fromisoformat(booked_on), amount_cents)
+        for account_id, booked_on, amount_cents, _identity_label in relevant_keys
+    }
     existing_candidate_ids: set[str] = set()
-    for item in prepared_with_accounts:
-        account_id, booked_on, amount_cents, _identity_label = item.identity_key
-        for transaction in session.scalars(
-            select(Transaction).where(
-                Transaction.account_id == account_id,
-                Transaction.booked_on == date.fromisoformat(booked_on),
-                Transaction.amount_cents == amount_cents,
+    candidate_group_list = list(candidate_groups)
+    # Candidate lookups are grouped and bounded to avoid one SELECT per CSV row.
+    for offset in range(0, len(candidate_group_list), 300):
+        chunk = candidate_group_list[offset : offset + 300]
+        statement = select(Transaction).where(
+            or_(
+                *(
+                    and_(
+                        Transaction.account_id == account_id,
+                        Transaction.booked_on == booked_on,
+                        Transaction.amount_cents == amount_cents,
+                    )
+                    for account_id, booked_on, amount_cents in chunk
+                )
             )
-        ):
+        )
+        for transaction in session.scalars(statement):
             if transaction.transaction_id in existing_candidate_ids:
                 continue
             existing_candidate_ids.add(transaction.transaction_id)
@@ -825,10 +917,8 @@ def _commit_in_transaction(
         if right_source is not None and left_transaction is not None:
             inserted_candidates.add((right_source, left_transaction))
     for source_id, candidate_id in sorted(inserted_candidates):
-        if (
-            row_targets[next(key for key, value in source_ids.items() if value == source_id)]
-            == candidate_id
-        ):
+        source_key = source_key_by_id[source_id]
+        if row_targets[source_key] == candidate_id:
             continue
         session.add(
             ImportReconciliationCandidate(
@@ -871,9 +961,10 @@ def _commit_in_transaction(
     )
     if orphan_id is not None:
         raise AppError("COMMIT_INTEGRITY_FAILED", 409, "Une transaction n'a pas de source.")
+    final_transactions = _existing_for_keys(session, relevant_keys)
     for key in relevant_keys:
         ranks = sorted(
-            transaction.occurrence_rank for transaction in _existing_for_key(session, key)
+            transaction.occurrence_rank for transaction in final_transactions.get(key, [])
         )
         if ranks and ranks != list(range(1, max(ranks) + 1)):
             raise AppError(
@@ -944,8 +1035,8 @@ def commit_preview(
 ) -> dict[str, Any]:
     """Commit a fully resolved preview as one SQLite transaction.
 
-    Raw bytes are archived before entering ``BEGIN IMMEDIATE``. A database
-    failure leaves that opaque file unreferenced in ``originals`` for quarantine.
+    Raw bytes are staged before ``BEGIN IMMEDIATE`` and removed after any
+    uncommitted failure unless a committed import references the archive.
     """
 
     if (
@@ -960,99 +1051,170 @@ def commit_preview(
     )
     # Fast replay lookup allows a retried request to succeed after its preview
     # file has been removed. The authoritative lookup still runs under IMMEDIATE.
-    with session_scope(engine) as lookup_session:
-        replay = find_replay(
-            lookup_session,
-            idempotency_key=idempotency_key,
-            http_method=_HTTP_METHOD,
-            canonical_path=canonical_path,
-            request_sha256=request_sha256,
-        )
-    if replay is not None:
-        return replay[1]
-    preview = store.get(preview_id)
-    _validate_preview(preview, expected_version)
-    raw_bytes = store.raw_bytes(preview_id)
-    digest = hashlib.sha256(raw_bytes).hexdigest()
-    if digest != preview.get("file_sha256"):
-        raise AppError("PREVIEW_INVALID", 409, "Les octets de l'aperçu ne correspondent plus.")
-    parsed = parse_export(raw_bytes)
-    unresolved_blocking = any(
-        anomaly.severity == "blocking"
-        and not (
-            anomaly.code.value == "OUT_OF_PERIOD"
-            and anomaly.section_ordinal is not None
-            and anomaly.logical_row_idx is not None
-            and f"{anomaly.section_ordinal}:{anomaly.logical_row_idx}"
-            in preview.get("_resolutions", {}).get("multiplicity", {})
-        )
-        and not (
-            anomaly.code.value == "MISSING_PERIOD"
-            and anomaly.section_ordinal is not None
-            and str(anomaly.section_ordinal) in preview.get("_resolutions", {}).get("coverage", {})
-        )
-        for anomaly in parsed.anomalies
-    )
-    if unresolved_blocking or parsed.operation_count != preview.get("operation_count"):
-        raise AppError("IMPORT_NOT_COMMITTABLE", 422, "Le fichier ne peut pas être commité.")
-    prepared_rows = _prepare_rows(raw_bytes, parsed.sections, parsed)
-    if len(prepared_rows) != parsed.operation_count:
-        raise AppError(
-            "IMPORT_NOT_COMMITTABLE", 422, "Le nombre d'opérations de l'aperçu est incohérent."
-        )
-    _validate_link_targets_before_archive(engine, preview, prepared_rows)
-
-    archive = ImportArchive(data_dir)
-    import_file_id = str(uuid.uuid4())
-    archive_path = archive.write(import_file_id, raw_bytes)
-    preview_for_transaction = dict(preview)
-    # The transient upload bytes never enter SQLite or an error response.
-    preview_for_transaction["_raw_bytes"] = raw_bytes
-    actor_value = actor.strip()[:80] if isinstance(actor, str) else "local_user"
-    if not actor_value:
-        actor_value = "local_user"
-
-    try:
-        with write_transaction(engine) as session:
-            replay = find_replay(
-                session,
+    def lookup_replay() -> tuple[int, dict[str, Any]] | None:
+        with session_scope(engine) as lookup_session:
+            return find_replay(
+                lookup_session,
                 idempotency_key=idempotency_key,
                 http_method=_HTTP_METHOD,
                 canonical_path=canonical_path,
                 request_sha256=request_sha256,
-                remove_expired=True,
             )
-            if replay is not None:
-                response = replay[1]
-                outcome = "replay"
-            else:
-                response = _commit_in_transaction(
+
+    replay = lookup_replay()
+    if replay is not None:
+        return replay[1]
+    commit_marked = False
+    archive = ImportArchive(data_dir)
+    archive_path: Path | None = None
+    archive_reservation: int | None = None
+    commit_confirmed = False
+    try:
+        try:
+            preview = store.begin_commit(preview_id, expected_version)
+            commit_marked = True
+        except AppError as error:
+            if error.code == "IMPORT_PREVIEW_EXPIRED":
+                replay = lookup_replay()
+                if replay is not None:
+                    return replay[1]
+            raise
+
+        _validate_preview(preview, expected_version)
+        raw_bytes = store.raw_bytes(preview_id)
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        if digest != preview.get("file_sha256"):
+            raise AppError("PREVIEW_INVALID", 409, "Les octets de l'aperçu ne correspondent plus.")
+        parsed = parse_export(raw_bytes)
+        unresolved_blocking = any(
+            anomaly.severity == "blocking"
+            and not (
+                anomaly.code.value == "OUT_OF_PERIOD"
+                and anomaly.section_ordinal is not None
+                and anomaly.logical_row_idx is not None
+                and f"{anomaly.section_ordinal}:{anomaly.logical_row_idx}"
+                in preview.get("_resolutions", {}).get("multiplicity", {})
+            )
+            and not (
+                anomaly.code.value == "MISSING_PERIOD"
+                and anomaly.section_ordinal is not None
+                and str(anomaly.section_ordinal)
+                in preview.get("_resolutions", {}).get("coverage", {})
+            )
+            for anomaly in parsed.anomalies
+        )
+        if unresolved_blocking or parsed.operation_count != preview.get("operation_count"):
+            raise AppError("IMPORT_NOT_COMMITTABLE", 422, "Le fichier ne peut pas être commité.")
+        if parsed.operation_count > MAX_IMPORT_OPERATION_COUNT:
+            raise AppError(
+                "TOO_MANY_OPERATIONS",
+                413,
+                (
+                    "Le fichier dépasse le plafond de "
+                    f"{MAX_IMPORT_OPERATION_COUNT} opérations par import."
+                ),
+            )
+        prepared_rows = _prepare_rows(raw_bytes, parsed.sections, parsed)
+        if len(prepared_rows) != parsed.operation_count:
+            raise AppError(
+                "IMPORT_NOT_COMMITTABLE", 422, "Le nombre d'opérations de l'aperçu est incohérent."
+            )
+        _validate_link_targets_before_archive(engine, preview, prepared_rows)
+
+        import_file_id = str(uuid.uuid4())
+        archive_path = archive.directory / f"{import_file_id}.bin"
+        # This shared flock starts before the archive appears and remains held
+        # until SQLite confirms commit or the unreferenced archive is removed.
+        archive_reservation = archive.acquire_commit_reservation()
+        try:
+            archive_path = archive.write(import_file_id, raw_bytes)
+        except BaseException:
+            _remove_unreferenced_archive(engine, archive, archive_path, import_file_id)
+            raise
+
+        preview_for_transaction = dict(preview)
+        # The transient upload bytes never enter SQLite or an error response.
+        preview_for_transaction["_raw_bytes"] = raw_bytes
+        actor_value = actor.strip()[:80] if isinstance(actor, str) else "local_user"
+        if not actor_value:
+            actor_value = "local_user"
+
+        try:
+            with write_transaction(engine) as session:
+                replay = find_replay(
                     session,
-                    preview=preview_for_transaction,
-                    parsed=parsed,
-                    prepared_rows=prepared_rows,
-                    import_file_id=import_file_id,
-                    archive_relpath=archive.relative_path(import_file_id),
-                    file_sha256=digest,
                     idempotency_key=idempotency_key,
-                    request_sha256=request_sha256,
+                    http_method=_HTTP_METHOD,
                     canonical_path=canonical_path,
-                    actor=actor_value,
+                    request_sha256=request_sha256,
+                    remove_expired=True,
                 )
-                outcome = "no_op" if response["status"] == "no_op" else "committed"
-        if outcome in {"replay", "no_op"}:
+                if replay is not None:
+                    response = replay[1]
+                    outcome = "replay"
+                else:
+                    response = _commit_in_transaction(
+                        session,
+                        preview=preview_for_transaction,
+                        parsed=parsed,
+                        prepared_rows=prepared_rows,
+                        import_file_id=import_file_id,
+                        archive_relpath=archive.relative_path(import_file_id),
+                        file_sha256=digest,
+                        idempotency_key=idempotency_key,
+                        request_sha256=request_sha256,
+                        canonical_path=canonical_path,
+                        actor=actor_value,
+                    )
+                    outcome = "no_op" if response["status"] == "no_op" else "committed"
+            commit_confirmed = True
+            if outcome in {"replay", "no_op"}:
+                _remove_unreferenced_archive(engine, archive, archive_path, import_file_id)
+            store.delete(preview_id, during_commit=True)
+            return response
+        except AppError as error:
+            if not commit_confirmed:
+                _remove_unreferenced_archive(engine, archive, archive_path, import_file_id)
+            if error.code in {"ACCOUNT_ALIAS_CONFLICT", "ACCOUNT_FINGERPRINT_CONFLICT"}:
+                preview["rejections"] = preview_for_transaction["rejections"]
+                preview["can_commit"] = False
+                store.update_commit_failure(preview_id, preview)
+            raise
+        except IntegrityError as error:
+            if not commit_confirmed:
+                _remove_unreferenced_archive(engine, archive, archive_path, import_file_id)
+            raise AppError(
+                "IMPORT_CONFLICT",
+                409,
+                "Le commit entre en conflit avec une contrainte d'intégrité.",
+            ) from error
+        except BaseException:
+            if not commit_confirmed:
+                _remove_unreferenced_archive(engine, archive, archive_path, import_file_id)
+            raise
+    finally:
+        if archive_reservation is not None:
+            archive.release_commit_reservation(archive_reservation)
+        if commit_marked:
+            store.finish_commit(preview_id)
+
+
+def _remove_unreferenced_archive(
+    engine: Engine, archive: ImportArchive, archive_path: Path, import_file_id: str
+) -> None:
+    """Delete a staged archive unless a committed import row owns it."""
+
+    try:
+        with session_scope(engine) as session:
+            referenced = session.scalar(
+                select(ImportFile.import_file_id).where(
+                    ImportFile.import_file_id == import_file_id,
+                    ImportFile.status == "committed",
+                    ImportFile.archive_relpath == archive.relative_path(import_file_id),
+                )
+            )
+        if referenced is None:
             archive.remove(archive_path)
-        store.delete(preview_id)
-        return response
-    except AppError as error:
-        if error.code == "IDEMPOTENCY_CONFLICT":
-            archive.remove(archive_path)
-        raise
-    except IntegrityError as error:
-        raise AppError(
-            "IMPORT_CONFLICT",
-            409,
-            "Le commit entre en conflit avec une contrainte d'intégrité.",
-        ) from error
-    except DatabaseBusyError:
-        raise
+    except Exception:
+        # A later startup sweep removes any aged file once SQLite is available.
+        return

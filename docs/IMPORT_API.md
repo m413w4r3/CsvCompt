@@ -20,7 +20,11 @@ HMAC (`known`, `unknown`, `ambiguous`), anomalies et `can_commit`. Les détails
 d'anomalie stockés sont plafonnés (1 000 par catégorie par défaut) ;
 `anomaly_counts` et `anomaly_summary` conservent les agrégats et le nombre de
 détails omis. Tout rejet bloquant reste bloquant même si son détail dépasse le
-plafond.
+plafond. Un fichier contient au plus 4 000 lignes d'opérations. Tout champ de
+centimes qui dépasse `2^53 - 1` est exposé à `null`; l'objet qui le porte ajoute
+`total_out_of_range: true`. Cette règle s'applique aux totaux, soldes d'en-tête,
+contrôles de solde, montants, résidus et allocations dans toutes les réponses
+d'API.
 4. Les octets et l'état sont stockés temporairement sous `data/import-previews`
 (ou `preview_dir`) dans un répertoire `0700`, avec des fichiers `0600` et des
 noms UUID opaques. Le TTL par défaut est de 1 800 secondes ; le quota cumulé par
@@ -32,7 +36,8 @@ et répond 204. Un aperçu expiré, supprimé ou absent répond `410
 IMPORT_PREVIEW_EXPIRED`.
 6. Les PATCH exigent `expected_version`. Un conflit donne `409
 VERSION_CONFLICT`; une mutation réussie incrémente `version` et recalcule les
-rejets restants et `can_commit`.
+rejets restants et `can_commit`. Pendant un commit, un PATCH répond `409
+IMPORT_COMMIT_IN_PROGRESS` et ne modifie pas l'aperçu.
 7. La date `generated_on` de repli est la date locale du système (`date.today()`)
 avec `generation_date_source: "received_on_fallback"`. La date du client ou du
 fuseau Paris n'est pas substituée.
@@ -64,11 +69,20 @@ fuseau Paris n'est pas substituée.
   lignes. Une décision est mémorisée avec acteur, horodatage et ancienne valeur.
   Le lien n'est pas réconcilié avant T13.
 
+Pour chaque rejet `OUT_OF_PERIOD`, `out_of_period_candidates` expose les
+candidats strictement égaux par compte, date, montant signé et `identity_label`.
+Chaque candidat contient seulement `{transaction_id, occurrence_rank,
+imported_at_utc}` ; aucun libellé n'est ajouté. La liste est vide tant qu'un
+compte inconnu n'est pas associé. Le client sélectionne une cible sans afficher
+l'UUID et demande une confirmation explicite avant `create_occurrence` si une
+transaction de cette identité existe déjà.
+
 `can_commit` est faux si une anomalie bloquante demeure, si une section ayant un
 numéro reconnu attend son mapping, si une couverture est requise, si une ligne
 `OUT_OF_PERIOD` n'a pas de décision, si des détails de décision ont été omis au
-plafond, ou si deux sections aboutissent au même compte. Les rejets non
-résolus restent visibles. Le hash déjà commité est indiqué uniquement par
+plafond, si deux liens `link_existing` ciblent la même transaction, ou si deux
+sections aboutissent au même compte. Les rejets non résolus restent visibles.
+Le hash déjà commité est indiqué uniquement par
 `already_imported: true` et `import_file_id`.
 
 ## Erreurs normalisées
@@ -79,12 +93,14 @@ Toutes les erreurs suivent `{"error":{"code":"…","message":"…","details":{}}
 |---:|---|---|
 | 400 | `VALIDATION_ERROR` | formulaire ou taille déclarée invalide |
 | 409 | `VERSION_CONFLICT` | `expected_version` périmé |
+| 409 | `IMPORT_COMMIT_IN_PROGRESS` | aperçu verrouillé pendant le commit |
 | 409 | `ACCOUNT_MAPPING_LOCKED` | tentative de remapper une section `known` |
 | 409 / 422 | `ACCOUNT_FINGERPRINT_CONFLICT` | empreinte déjà liée ou incompatible avec le compte |
 | 409 | `ACCOUNT_ALIAS_CONFLICT` | alias existant ou répété dans l'aperçu |
 | 409 | `MULTIPLICITY_AMBIGUOUS` | index logique présent dans plusieurs sections sans `section_index` |
 | 410 | `IMPORT_PREVIEW_EXPIRED` | aperçu absent, supprimé ou TTL écoulé |
 | 413 | `FILE_TOO_LARGE` | corps déclaré manifestement trop grand ou fichier au-dessus du plafond |
+| 413 | `TOO_MANY_OPERATIONS` | plus de 4 000 lignes d'opérations; distinct de `FILE_TOO_LARGE` |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | type non autorisé ou contenu binaire manifeste |
 | 422 | `CSV_INVALID` | CSV mal formé |
 | 422 | `VALIDATION_ERROR` | mapping, plage, alias, ou cible `link_existing` invalide |

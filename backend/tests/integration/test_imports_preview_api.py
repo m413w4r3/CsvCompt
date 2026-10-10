@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,9 +21,88 @@ from app.importers.account_identity import bank_fingerprint
 from app.importers.credit_agricole import parse_export
 from app.importers.normalize import normalize_label
 from app.main import create_app
+from app.services import import_preview_store as import_preview_store_module
 from app.services.app_secrets import ensure_hmac_key
+from tests.helpers.privacy import (
+    assert_no_account_numbers_in_logs as _assert_no_account_numbers_in_logs,
+)
+from tests.helpers.privacy import (
+    assert_payload_has_no_account_numbers as _assert_preview_has_no_account_numbers,
+)
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
+
+
+def _force_uuid4_values_containing_0001(monkeypatch: pytest.MonkeyPatch) -> None:
+    counter = 0
+
+    def deterministic_uuid4() -> UUID:
+        nonlocal counter
+        counter += 1
+        return UUID(f"00000001-0000-4000-8000-{counter:012x}")
+
+    monkeypatch.setattr(import_preview_store_module.uuid, "uuid4", deterministic_uuid4)
+
+
+def test_privacy_scanner_allows_account_digits_inside_canonical_preview_uuid() -> None:
+    preview_id = str(UUID("00000001-0000-4000-8000-000000000001"))
+    payload = {"preview_id": preview_id, "version": 1, "warnings": []}
+
+    assert "0001" in preview_id
+    _assert_preview_has_no_account_numbers(payload, json.dumps(payload), {"0001"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"warnings": [{"message": "Compte 0001 divulgué"}]},
+        {"sections": [{"account_alias": "Compte 0001"}]},
+        {"details": {"0001": "clé de détail"}},
+    ],
+    ids=("anomaly-message", "account-alias", "json-key"),
+)
+def test_privacy_scanner_rejects_account_digits_in_content_and_keys(payload: Any) -> None:
+    with pytest.raises(AssertionError, match="compte synthétique divulgué"):
+        _assert_preview_has_no_account_numbers(payload, json.dumps(payload), {"0001"})
+
+
+def test_privacy_scanner_detects_content_leak_alongside_allowed_uuid() -> None:
+    payload = {
+        "preview_id": "00000001-0000-4000-8000-000000000001",
+        "warnings": [{"message": "Compte 0001 divulgué"}],
+    }
+
+    with pytest.raises(AssertionError, match="compte synthétique divulgué"):
+        _assert_preview_has_no_account_numbers(payload, json.dumps(payload), {"0001"})
+
+
+def test_privacy_scanner_rejects_uuid_under_noncontract_account_alias_id() -> None:
+    identifier = "00000001-0000-4000-8000-000000000001"
+    payload = {"account_alias_id": identifier}
+
+    with pytest.raises(AssertionError, match="compte synthétique divulgué"):
+        _assert_preview_has_no_account_numbers(payload, json.dumps(payload), {"0001"})
+
+
+def test_log_scanner_masks_only_identifiers_validated_in_preview_payload() -> None:
+    allowed_id = "00000001-0000-4000-8000-000000000001"
+    _assert_no_account_numbers_in_logs(f"preview_id={allowed_id}", {"0001"}, {allowed_id})
+
+    other_id = "00000001-0000-4000-8000-000000000002"
+    with pytest.raises(AssertionError, match="compte synthétique divulgué"):
+        _assert_no_account_numbers_in_logs(f"message={other_id}", {"0001"}, {allowed_id})
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    ("123456780001", "1234", "0001"),
+    ids=("full-account-number", "first-four-digits", "last-four-digits"),
+)
+def test_privacy_scanner_checks_full_number_and_plausible_fragments(fragment: str) -> None:
+    payload = {"warnings": [{"message": f"synthétique {fragment}"}]}
+
+    with pytest.raises(AssertionError, match="compte synthétique divulgué"):
+        _assert_preview_has_no_account_numbers(payload, json.dumps(payload), {"123456780001"})
 
 
 def _ready_client(
@@ -171,12 +251,18 @@ def test_CSV_05_preview_multiple_and_cancel_leave_business_tables_unchanged(tmp_
 
 
 @pytest.mark.integration
-def test_preview_fixture_totals_and_safe_response(tmp_path: Path) -> None:
+def test_preview_fixture_totals_and_safe_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, _database = _ready_client(tmp_path)
+    _force_uuid4_values_containing_0001(monkeypatch)
+    forced_preview_id = UUID("00000001-0000-4000-8000-000000000001")
     source = (FIXTURES / "ca_2026_simple.csv").read_bytes()
     response = _upload(client, source)
     assert response.status_code == 200
     result = response.json()
+    assert result["preview_id"] == str(forced_preview_id)
+    assert "0001" in response.text
     assert result["status"] == "previewed"
     assert result["reconciliation"] is None
     assert result["sections"][0]["operation_count"] == result["operation_count"]
@@ -187,7 +273,12 @@ def test_preview_fixture_totals_and_safe_response(tmp_path: Path) -> None:
     assert any(item["code"] == "ACCOUNT_MAPPING_REQUIRED" for item in result["rejections"])
     encoded = response.text
     assert b"Compte" not in response.content
-    assert b"0001" not in response.content
+    account_numbers = {
+        section.account_number_canonical.value
+        for section in parse_export(source).sections
+        if section.account_number_canonical is not None
+    }
+    _assert_preview_has_no_account_numbers(result, encoded, account_numbers)
     assert "raw_label" not in encoded
     resolved = client.patch(
         f"/api/v1/imports/{result['preview_id']}/sections/1/account-mapping",
@@ -250,14 +341,18 @@ def test_IMP_12_out_of_period_resolution_and_IMP_13_duplicate_section_blocking(
 
 @pytest.mark.integration
 def test_all_adversarial_synthetic_fixtures_return_preview_without_500(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _database = _ready_client(tmp_path)
+    _force_uuid4_values_containing_0001(monkeypatch)
     manifest = json.loads((FIXTURES / "manifest.yaml").read_text(encoding="utf-8"))["fixtures"]
+    allowed_identifiers: set[str] = set()
     for fixture in sorted((FIXTURES / "adversarial").glob("*.csv")):
         response = _upload(client, fixture.read_bytes())
         assert response.status_code == 200, fixture.name
         payload = response.json()
+        assert payload["preview_id"].startswith("00000001-")
+        assert "0001" in payload["preview_id"]
         assert "can_commit" in payload
         assert payload["can_commit"] is False, fixture.name
         expected_codes = {
@@ -270,14 +365,17 @@ def test_all_adversarial_synthetic_fixtures_return_preview_without_500(
         assert expected_codes <= actual_codes, fixture.name
         assert all("raw_label" not in rejection for rejection in payload["rejections"])
         parser_result = parse_export(fixture.read_bytes())
+        account_numbers: set[str] = set()
         for parsed_section in parser_result.sections:
             if parsed_section.account_number_canonical is not None:
-                number = parsed_section.account_number_canonical.value
-                assert number not in response.text
-                assert number not in caplog.text
+                account_numbers.add(parsed_section.account_number_canonical.value)
         for parsed_row in parser_result.rows:
             assert parsed_row.raw_label not in response.text
             assert parsed_row.raw_label not in caplog.text
+        allowed_identifiers.update(
+            _assert_preview_has_no_account_numbers(payload, response.text, account_numbers)
+        )
+        _assert_no_account_numbers_in_logs(caplog.text, account_numbers, allowed_identifiers)
 
 
 @pytest.mark.integration

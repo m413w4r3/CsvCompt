@@ -121,7 +121,7 @@ def test_ADR_027_allocations_and_refund_links_use_allocation_identity() -> None:
 
 
 def test_T06_ORM_05_all_reference_tables_have_a_typed_model() -> None:
-    assert len(Base.metadata.tables) == 28
+    assert len(Base.metadata.tables) == 29
     assert "flow_kind" not in Transaction.__table__.columns
     assert "expires_at_utc" not in Base.metadata.tables["idempotency_records"].columns
     assert all(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,8 +13,10 @@ from app.db.migrate import upgrade_to_head
 from app.db.models import Transaction
 from app.db.session import session_scope
 from app.main import create_app
+from app.services import import_preview_store as import_preview_store_module
 from app.services.app_secrets import ensure_hmac_key
 from app.services.balance_checks import BalanceCheck
+from tests.helpers.privacy import assert_payload_has_no_account_numbers
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -30,6 +32,17 @@ def _ready_app(tmp_path: Path, name: str):
     )
     upgrade_to_head(settings)
     return create_app(settings)
+
+
+def _force_uuid4_values_containing_0001(monkeypatch: pytest.MonkeyPatch) -> None:
+    counter = 0
+
+    def deterministic_uuid4() -> UUID:
+        nonlocal counter
+        counter += 1
+        return UUID(f"00000001-0000-4000-8000-{counter:012x}")
+
+    monkeypatch.setattr(import_preview_store_module.uuid, "uuid4", deterministic_uuid4)
 
 
 def _upload(client: TestClient, fixture: str) -> dict[str, object]:
@@ -104,8 +117,12 @@ def _resolve_out_of_period_to_existing(
     ids=["nonoverlap-leaves-day-missing", "overlap-completes-provisional-day"],
 )
 def test_ADR_024_imported_provisional_day_requires_overlap(
-    tmp_path: Path, followup_fixture: str, day_nine_status: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    followup_fixture: str,
+    day_nine_status: str,
 ) -> None:
+    _force_uuid4_values_containing_0001(monkeypatch)
     app = _ready_app(tmp_path, "provisional")
     with TestClient(app) as client:
         initial = _map_account(
@@ -141,7 +158,7 @@ def test_ADR_024_imported_provisional_day_requires_overlap(
         assert whole_month.status_code == 200, whole_month.text
         assert whole_month.json()["coverage"]["status"] == "partial"
         assert "bank_fingerprint" not in whole_month.text
-        assert "0001" not in whole_month.text
+        assert_payload_has_no_account_numbers(whole_month.json(), whole_month.text, {"0001"})
 
         balances = client.get(
             f"/api/v1/accounts/{account_id}/balance-checks",
@@ -151,13 +168,14 @@ def test_ADR_024_imported_provisional_day_requires_overlap(
         assert balances.json()["items"]
         assert all(item["status"] == "not_comparable" for item in balances.json()["items"])
         assert "bank_fingerprint" not in balances.text
-        assert "0001" not in balances.text
+        assert_payload_has_no_account_numbers(balances.json(), balances.text, {"0001"})
 
 
 @pytest.mark.integration
 def test_IMP_10_multi_account_coverage_and_account_list_keep_current_and_pea_separate(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _force_uuid4_values_containing_0001(monkeypatch)
     app = _ready_app(tmp_path, "multi-account")
     with TestClient(app) as client:
         fixture_bytes = (FIXTURES / "ca_2026_simple.csv").read_bytes()
@@ -200,7 +218,7 @@ def test_IMP_10_multi_account_coverage_and_account_list_keep_current_and_pea_sep
         assert items[pea_id]["coverage"]["operation_count"] == 40
         assert "bank_fingerprint" not in listed.text
         assert "account_fingerprint" not in listed.text
-        assert "0001" not in listed.text
+        assert_payload_has_no_account_numbers(listed.json(), listed.text, {"0001"})
 
 
 @pytest.mark.integration
@@ -295,7 +313,7 @@ def test_scenario_famille_2026_fixture_is_committed_and_read_as_coverage(tmp_pat
         assert pre_start.json()["coverage"]["status"] == "not_started"
         assert pre_start.json()["coverage"]["missing_days"] == []
         # completeness a trois états; coverage.status distingue le pré-démarrage d'une alerte.
-        assert pre_start.json()["period"]["completeness"] == "partial"
+        assert pre_start.json()["period"]["completeness"] == "not_started"
 
 
 @pytest.mark.integration

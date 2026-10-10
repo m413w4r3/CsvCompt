@@ -26,7 +26,12 @@ export async function request<T>(
     : controller.signal
 
   try {
-    const response = await fetch(`/api/v1${path}`, { ...options, signal, headers: { Accept: 'application/json', ...options.headers } })
+    const response = await fetch(`/api/v1${path}`, {
+      ...options,
+      redirect: 'error',
+      signal,
+      headers: { Accept: 'application/json', ...options.headers },
+    })
     const payload: unknown = response.status === 204 ? undefined : await response.json().catch(() => undefined)
     if (!response.ok) {
       const error = payload && typeof payload === 'object' && 'error' in payload

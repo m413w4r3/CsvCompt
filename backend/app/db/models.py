@@ -548,6 +548,26 @@ class TransactionLink(VersionedMixin, CreatedAtMixin, Base):
     )
 
 
+class RefundLinkAllocation(Base):
+    """Exact allocation-level attribution frozen when a prorated refund confirms."""
+
+    __tablename__ = "refund_link_allocation_parts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["transaction_link_id"],
+            ["transaction_links.transaction_link_id"],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(["allocation_id"], ["allocations.allocation_id"], ondelete="RESTRICT"),
+    )
+
+    transaction_link_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    allocation_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class AuditEvent(CreatedAtMixin, Base):
     __tablename__ = "audit_events"
 

@@ -20,7 +20,9 @@ fi
 export SMOKE_API_PORT
 database="$tmp_dir/import.sqlite"
 DATABASE_URL="sqlite:///$database" DATA_DIR="$tmp_dir/data" uv run python -m app.db.migrate upgrade
-APP_HOST=127.0.0.1 APP_PORT="$SMOKE_API_PORT" DATABASE_URL="sqlite:///$database" DATA_DIR="$tmp_dir/data" \
+APP_HOST=127.0.0.1 APP_PORT="$SMOKE_API_PORT" \
+  CORS_ALLOWED_ORIGINS='["http://127.0.0.1:4173","http://localhost:4173"]' \
+  DATABASE_URL="sqlite:///$database" DATA_DIR="$tmp_dir/data" \
   uv run --project "$repo" uvicorn app.main:create_app --factory --app-dir "$repo/backend" \
   --host 127.0.0.1 --port "$SMOKE_API_PORT" >"$tmp_dir/backend.log" 2>&1 &
 backend_pid=$!

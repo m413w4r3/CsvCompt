@@ -165,7 +165,7 @@ def test_IMP_01_same_file_three_times_is_one_commit_then_two_traced_no_ops(
 
 
 @pytest.mark.integration
-def test_IMP_06_mid_commit_failure_rolls_back_rows_and_new_account_but_keeps_quarantine(
+def test_IMP_06_mid_commit_failure_rolls_back_rows_and_removes_unreferenced_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from app.services import import_commit
@@ -200,9 +200,7 @@ def test_IMP_06_mid_commit_failure_rolls_back_rows_and_new_account_but_keeps_qua
         after = _table_snapshot(database)
         assert after == before
         archives = list((data_dir / "originals").glob("*.bin"))
-        assert len(archives) == 1
-        assert archives[0].read_bytes() == raw
-        assert archives[0].stat().st_mode & 0o777 == 0o600
+        assert archives == []
 
 
 @pytest.mark.integration

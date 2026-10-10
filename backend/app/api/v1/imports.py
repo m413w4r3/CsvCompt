@@ -34,16 +34,19 @@ from app.db.models import (
 )
 from app.services.app_secrets import ensure_hmac_key
 from app.services.idempotency import purge_expired_idempotency, sign_cursor, verify_cursor
+from app.services.import_archive import purge_orphaned_archives
 from app.services.import_commit import commit_preview
 from app.services.import_preview_store import ImportPreviewStore
 from app.services.imports import (
     build_preview,
     public_preview,
+    refresh_link_candidates,
     set_coverage,
     set_mapping,
     set_multiplicity,
     validate_link_existing_preview,
 )
+from app.services.transactions import sanitize_api_cents
 
 
 @asynccontextmanager
@@ -54,6 +57,9 @@ async def _imports_lifespan(application: Any) -> AsyncIterator[None]:
     if storage_status == "ok" and detail_status == "ok":
         with suppress(DatabaseBusyError, OperationalError):
             purge_expired_idempotency(application.state.db_engine)
+            purge_orphaned_archives(
+                application.state.db_engine, application.state.settings.data_dir
+            )
     # Absent, corrupt, or busy storage is left to the ordinary readiness path;
     # expiration is retried on the next successful startup.
     yield
@@ -132,9 +138,10 @@ class SectionPreview(BaseModel):
     coverage_through: date | None
     complete_through: date | None
     operation_count: int
-    debit_total_cents: int
-    credit_total_cents: int
-    net_cents: int
+    debit_total_cents: int | None
+    credit_total_cents: int | None
+    net_cents: int | None
+    total_out_of_range: bool = False
     balance_as_of: date | None
     header_balance_cents: int | None
     min_date: date | None
@@ -160,6 +167,7 @@ class PreviewResponse(BaseModel):
     sections: list[SectionPreview]
     warnings: list[dict[str, Any]]
     rejections: list[dict[str, Any]]
+    out_of_period_candidates: list[dict[str, Any]] = Field(default_factory=list)
     can_commit: bool
     expires_at_utc: str
     reconciliation: None = None
@@ -220,6 +228,7 @@ class CommittedSection(BaseModel):
     complete_through: date | None
     balance_as_of: date | None
     header_balance_cents: int | None
+    total_out_of_range: bool = False
 
 
 class CommitResponse(BaseModel):
@@ -269,6 +278,7 @@ class ImportSectionDetail(BaseModel):
     complete_through: date | None
     balance_as_of: date | None
     header_balance_cents: int | None
+    total_out_of_range: bool = False
     operation_count: int | None
 
 
@@ -296,6 +306,7 @@ class RejectionItem(BaseModel):
     code: str
     field: str | None
     message: str
+    resolution_status: Literal["pending", "resolved", "not_required"]
 
 
 class RejectionPage(BaseModel):
@@ -386,6 +397,7 @@ def resolve_account_mapping(
     else:
         resolution = {"new_account": body.new_account.model_dump() if body.new_account else None}
     updated = set_mapping(preview, section_index, resolution, engine)
+    refresh_link_candidates(updated, _store(request).raw_bytes(str(preview_id)), engine)
     return public_preview(_store(request).update(str(preview_id), updated))
 
 
@@ -513,14 +525,16 @@ def commit_import(
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
 ) -> dict[str, Any]:
     engine = _database_ready(request)
-    return commit_preview(
-        str(preview_id),
-        body.expected_version,
-        idempotency_key,
-        "local_user",
-        engine=engine,
-        store=_store(request),
-        data_dir=request.app.state.settings.data_dir,
+    return sanitize_api_cents(
+        commit_preview(
+            str(preview_id),
+            body.expected_version,
+            idempotency_key,
+            "local_user",
+            engine=engine,
+            store=_store(request),
+            data_dir=request.app.state.settings.data_dir,
+        )
     )
 
 
@@ -671,6 +685,7 @@ def get_import_rejections(
                 "code": row.code,
                 "field": row.field_name,
                 "message": row.message,
+                "resolution_status": row.resolution_status,
             }
             for row in records
         ]
@@ -747,7 +762,7 @@ def get_import_detail(request: Request, import_file_id: UUID) -> dict[str, Any]:
                 .order_by(ImportRejection.code)
             )
         )
-        return {
+        return sanitize_api_cents({
             "import_file_id": record.import_file_id,
             "file_sha256": record.file_sha256,
             "status": record.status,
@@ -773,4 +788,4 @@ def get_import_detail(request: Request, import_file_id: UUID) -> dict[str, Any]:
                 for source_id, transaction_id, reason in candidates
             ],
             "diagnostics": [{"code": code, "count": count} for code, count in diagnostics],
-        }
+        })

@@ -30,6 +30,7 @@ class ImportPreviewStore:
         self.max_bytes = max_bytes
         self.clock = clock or (lambda: datetime.now(UTC))
         self._lock = threading.RLock()
+        self._commit_in_progress: set[str] = set()
         self._ensure_directory()
         self.purge_expired()
 
@@ -161,6 +162,10 @@ class ImportPreviewStore:
     def update(self, preview_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             current = self.get(preview_id)
+            if preview_id in self._commit_in_progress:
+                raise AppError(
+                    "IMPORT_COMMIT_IN_PROGRESS", 409, "Le commit de cet aperçu est en cours."
+                )
             if payload.get("version") != current["version"]:
                 raise AppError(
                     "VERSION_CONFLICT",
@@ -176,8 +181,48 @@ class ImportPreviewStore:
             )
             return next_value
 
-    def delete(self, preview_id: str) -> None:
+    def begin_commit(self, preview_id: str, expected_version: int) -> dict[str, Any]:
+        """Atomically mark an approved preview as committing before reading its bytes."""
+
         with self._lock:
+            current = self.get(preview_id)
+            if preview_id in self._commit_in_progress:
+                raise AppError(
+                    "IMPORT_COMMIT_IN_PROGRESS", 409, "Le commit de cet aperçu est en cours."
+                )
+            if current.get("version") != expected_version:
+                raise AppError(
+                    "VERSION_CONFLICT",
+                    409,
+                    "Cet aperçu a changé.",
+                    {"current_version": current.get("version")},
+                )
+            self._commit_in_progress.add(preview_id)
+            return current
+
+    def finish_commit(self, preview_id: str) -> None:
+        with self._lock:
+            self._commit_in_progress.discard(preview_id)
+
+    def update_commit_failure(self, preview_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a fresh blocking state after an authoritative commit-time conflict."""
+
+        with self._lock:
+            current = self.get(preview_id)
+            next_value = dict(payload)
+            next_value["version"] = current["version"] + 1
+            self._atomic_write(
+                self._path(preview_id),
+                json.dumps(next_value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            )
+            return next_value
+
+    def delete(self, preview_id: str, *, during_commit: bool = False) -> None:
+        with self._lock:
+            if preview_id in self._commit_in_progress and not during_commit:
+                raise AppError(
+                    "IMPORT_COMMIT_IN_PROGRESS", 409, "Le commit de cet aperçu est en cours."
+                )
             path = self._path(preview_id)
             path.unlink(missing_ok=True)
             path.with_suffix(".bin").unlink(missing_ok=True)

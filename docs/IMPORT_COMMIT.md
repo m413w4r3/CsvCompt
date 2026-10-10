@@ -29,15 +29,17 @@ Un nouvel export qui ne contient qu'un rang ne supprime jamais les rangs déjà
 commités.
 
 Les lignes `OUT_OF_PERIOD` ne participent pas au maximum automatique. L'aperçu
-requiert une décision humaine : `link_existing` fournit un identifiant de
+requiert une décision humaine et expose, pour chaque ligne concernée, les
+candidats de même identité stricte : `transaction_id`, `occurrence_rank` et
+`imported_at_utc`, sans libellé. `link_existing` fournit l'identifiant d'une
 transaction existante du même compte, vérifié pendant l'aperçu, revérifié avant
 l'archive et une seconde fois sous `BEGIN IMMEDIATE` contre les quatre champs
-d'identité (`account_id`, date, montant signé, `identity_label`) ; un index logique partagé entre sections
-exige `section_index` ;
-`create_occurrence` ajoute explicitement le rang suivant après le maximum
-automatique. Une cible incompatible ou déjà utilisée par une autre ligne du
-même fichier bloque le commit. Une journée provisoire est conservée dans les
-sommes, reste hors de la couverture complète, et n'est pas extrapolée.
+d'identité (`account_id`, date, montant signé, `identity_label`) ; un index
+logique partagé entre sections exige `section_index`. `create_occurrence` crée
+toujours une nouvelle transaction de rang suivant (`max(n_existing, n_new) + 1`).
+Deux lignes du fichier ne peuvent pas lier la même cible. Une journée provisoire
+est conservée dans les sommes, reste hors de la couverture complète, et n'est
+pas extrapolée.
 
 ## Archive, transaction et quarantaine
 
@@ -60,11 +62,31 @@ d'idempotence sont écrits dans la même transaction. Le statut passe de
 
 Le contrôle final vérifie le nombre total de provenances, leur identité et leur
 compte, l'absence de transaction sans source et la continuité des rangs. Toute
-exception avant validation SQL annule l'ensemble des écritures. Comme SQLite et
-le système de fichiers ne partagent pas de transaction, l'archive écrite avant
-la transaction reste alors orpheline dans `originals/`, sans référence dans la
-base. Elle est en quarantaine et n'est supprimée automatiquement ni par
-l'endpoint ni par le rollback.
+exception avant confirmation du `COMMIT` annule l'ensemble des écritures. Si
+aucun `import_files` commité ne référence l'archive, elle est supprimée avant
+de renvoyer l'erreur. Un arrêt brutal peut laisser un `.bin` non référencé ; au
+démarrage, avant l'acceptation des requêtes, et via `purge_orphaned_archives`,
+le backend inventorie puis purge les `.bin` non référencés et les `.tmp`
+d'écriture abandonnés de `originals/` après 24 heures. L'âge est le plus récent
+de `mtime` et `ctime`, afin qu'un simple réglage de `mtime` ne rende pas un
+fichier récent purgeable.
+
+Avant toute écriture de l'archive, le commit prend un verrou advisory `flock`
+partagé sur `.archive-lifecycle.lock` à la racine du répertoire de données (à
+côté de `originals/`, jamais dedans pour préserver le contrat de restauration);
+il le garde jusqu'à
+confirmation du COMMIT SQLite ou suppression de l'archive non référencée. La
+purge prend le même verrou en exclusif non bloquant et saute tout l'inventaire
+si un commit ou une écriture est actif, y compris dans un autre processus. Ce
+verrou interprocessus est la réservation du cycle de vie; aucune colonne métier
+ni migration n'est requise.
+
+La purge écrit et commit d'abord l'événement d'audit d'intention, avec les
+seuls comptages `archive_count` et `temporary_count`, puis supprime les fichiers
+candidats. L'échec d'écriture d'audit laisse tous les fichiers en place. Aucun
+chemin, libellé ni identifiant de fichier n'apparaît dans l'événement. Les
+archives de `no_op` sont supprimées après le commit de la tentative et leur
+chemin reste `NULL`.
 
 ## Idempotence et concurrence
 
@@ -90,19 +112,34 @@ doublon ou un rang non contigu. Une base occupée répond `503 DATABASE_BUSY`.
 - `GET /api/v1/imports/{import_file_id}` expose sections, couvertures, soldes
   source, compteurs, candidats d'audit et diagnostics rédigés.
 - `GET /api/v1/imports/{import_file_id}/rejections` n'expose que l'index
-  logique, le code, le champ et le message fixe.
+  logique, le code, le champ, le message fixe et `resolution_status` (`resolved`,
+  `pending` ou `not_required`), sans libellé.
 
 Les erreurs suivent l'enveloppe REST standard. Les résolutions manquantes sont
 des conflits `409`; les données ou mappings invalides sont `422`; le verrou
-SQLite est `503 DATABASE_BUSY`; les collisions d'intégrité sont ramenées à une
-erreur `409 IMPORT_CONFLICT`. Les messages ne contiennent ni libellé, numéro,
-empreinte HMAC ni chemin disque.
+SQLite est `503 DATABASE_BUSY`; une collision d'alias ou d'empreinte constatée
+au commit répond respectivement `409 ACCOUNT_ALIAS_CONFLICT` ou `409
+ACCOUNT_FINGERPRINT_CONFLICT` et rend l'aperçu non commitable avec son état
+recalculé. Les autres collisions d'intégrité sont ramenées à `409
+IMPORT_CONFLICT`. Les messages ne contiennent ni libellé, numéro, empreinte
+HMAC ni chemin disque.
 
 ## Limites v1
 
 L'algorithme ne peut pas déduire les occurrences absentes d'une journée
 provisoire et ne fusionne jamais par similarité. Une décision explicite est
-requise pour une ligne hors période. Le contrôle de solde et la couverture
-analytique ne sont pas calculés par T12/T13 ; les seuls champs de solde et de
-couverture déclarés dans l'en-tête sont conservés par section pour T14.
-L'archive orpheline après rollback nécessite un nettoyage explicite et vérifié.
+requise pour une ligne hors période. Un import est plafonné par défaut à 4 000
+lignes d'opérations afin de garder la section critique sous 10 secondes sur la
+mesure synthétique documentée : 4 000 lignes prennent 4,97 s sur la machine de
+validation. Avant ce plafond, la revue avait mesuré 2 000 lignes à 2,972 s puis
+2,452 s, 8 000 à 19,105 s puis 13,669 s, et 16 000 à 52,050 s puis 44,208 s
+sur ses deux révisions. Sur cette livraison, les mesures sont 2 000 à 2,205 s,
+4 000 à 4,965 s et 8 000 à 13,069 s. La mesure à 8 000 a uniquement servi à
+comparer les coûts et a temporairement contourné le plafond dans son harness;
+elle ne correspond pas à une taille importable prise en charge.
+Les identités et cibles de rapprochement sont chargées par lots, et les
+correspondances ligne/cible sont indexées en mémoire. Le contrôle de
+solde et la couverture analytique ne sont pas calculés par T12/T13 ; les seuls
+champs de solde et de couverture déclarés dans l'en-tête sont conservés par
+section pour T14. Les archives orphelines récentes sont purgées après 24 heures
+si un arrêt brutal a empêché le nettoyage immédiat.

@@ -11,17 +11,24 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unicodedata
 import uuid
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from datetime import date, timedelta
+from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA = ROOT / "docs" / "examples" / "schema.sql"
+FROZEN_0001_HASHES = {
+    "backend/app/db/migrations/sql/0001_initial.sql": (
+        "b3ee949ad9aedddd6bb6c07ac0b1c1cad41709d8da0d861df676e1db7c49b257"
+    ),
+    "backend/app/db/migrations/versions/0001_initial.py": (
+        "3d5fa08337a46a336f65e71b48fcdedd8866dca2ebf9e6a093905190c15e4d92"
+    ),
+}
 ACCOUNT_ID = "00000000-0000-4000-8000-000000000001"
 ACCOUNT_B_ID = "00000000-0000-4000-8000-000000000002"
 UUID_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -44,6 +51,7 @@ UUID_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "llm_runs": ("llm_run_id",),
     "payee_aliases": ("payee_alias_id",),
     "payees": ("payee_id",),
+    "refund_link_allocation_parts": ("transaction_link_id", "allocation_id"),
     "rule_executions": ("rule_execution_id",),
     "rules": ("rule_id",),
     "source_rows": ("source_row_id",),
@@ -90,12 +98,17 @@ def report(label: str) -> None:
 
 
 def expect_integrity_error(
-    label: str, action: Callable[[], object], expected: str | None = None
+    label: str,
+    action: Callable[[], object],
+    expected: str | tuple[str, ...] | None = None,
 ) -> None:
     try:
         action()
     except sqlite3.IntegrityError as error:
-        if expected is not None and expected not in str(error):
+        expected_values = (expected,) if isinstance(expected, str) else expected
+        if expected is not None and not any(
+            candidate in str(error) for candidate in expected_values or ()
+        ):
             raise VerificationError(
                 f"{label}: erreur SQLite inattendue {str(error)!r}, attendu {expected!r}"
             ) from error
@@ -401,6 +414,61 @@ def insert_classification_decision(
     return decision_id
 
 
+def _schema_prorated_parts(
+    connection: sqlite3.Connection, target_id: str, amount_cents: int
+) -> list[tuple[str, int]]:
+    rows = list(
+        connection.execute(
+            """SELECT allocation_id, category_id, -amount_cents
+               FROM allocations WHERE transaction_id=? AND flow_kind='expense'
+                 AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
+               ORDER BY category_id, allocation_id""",
+            (target_id,),
+        )
+    )
+    category_weights: dict[str, int] = defaultdict(int)
+    for _allocation_id, category_id, capacity in rows:
+        category_weights[str(category_id)] += int(capacity)
+    denominator = sum(category_weights.values())
+    ordered_categories = sorted(
+        category_weights, key=lambda category_id: (-category_weights[category_id], category_id)
+    )
+    category_parts: dict[str, int] = {}
+    remaining = amount_cents
+    for index, category_id in enumerate(ordered_categories):
+        if index == len(ordered_categories) - 1:
+            part = remaining
+        else:
+            weight = category_weights[category_id]
+            part = (2 * amount_cents * weight + denominator) // (2 * denominator)
+            remaining -= part
+        category_parts[category_id] = part
+
+    result: list[tuple[str, int]] = []
+    for category_id, part in category_parts.items():
+        category_rows = sorted(
+            (
+                (str(allocation_id), int(capacity))
+                for allocation_id, row_category, capacity in rows
+                if row_category == category_id
+            ),
+            key=lambda item: item[0],
+        )
+        if part > sum(capacity for _allocation_id, capacity in category_rows):
+            raise VerificationError("répartition proratisée dépasse une capacité synthétique")
+        unassigned = part
+        for allocation_id, capacity in category_rows:
+            allocated = min(unassigned, capacity)
+            if allocated:
+                result.append((allocation_id, allocated))
+                unassigned -= allocated
+            if unassigned == 0:
+                break
+        if unassigned:
+            raise VerificationError("parts proratisées synthétiques incomplètes")
+    return result
+
+
 def insert_refund_link(
     connection: sqlite3.Connection,
     source_id: str,
@@ -423,13 +491,47 @@ def insert_refund_link(
             (source_id,),
         ).fetchone()
         source_allocation_id = None if row is None else str(row[0])
-    connection.execute(
-        """INSERT INTO transaction_links
-           (transaction_link_id, source_transaction_id, target_transaction_id,
-            link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
-           VALUES (?, ?, ?, 'refund_of', ?, ?, ?, ?)""",
-        (link_id, source_id, target_id, amount, source_allocation_id, target_allocation_id, status),
-    )
+    materialize_prorata = status == "confirmed" and target_allocation_id is None
+    insert_status = "proposed" if status in ("confirmed", "rejected") else status
+    connection.execute("SAVEPOINT insert_refund_link")
+    try:
+        connection.execute(
+            """INSERT INTO transaction_links
+               (transaction_link_id, source_transaction_id, target_transaction_id,
+                link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
+               VALUES (?, ?, ?, 'refund_of', ?, ?, ?, ?)""",
+            (
+                link_id,
+                source_id,
+                target_id,
+                amount,
+                source_allocation_id,
+                target_allocation_id,
+                insert_status,
+            ),
+        )
+        if materialize_prorata:
+            connection.executemany(
+                """INSERT INTO refund_link_allocation_parts
+                   (transaction_link_id, allocation_id, amount_cents) VALUES (?, ?, ?)""",
+                [
+                    (link_id, allocation_id, part_cents)
+                    for allocation_id, part_cents in _schema_prorated_parts(
+                        connection, target_id, amount
+                    )
+                ],
+            )
+        if status in ("confirmed", "rejected"):
+            connection.execute(
+                "UPDATE transaction_links SET status=?, version=version+1 "
+                "WHERE transaction_link_id=?",
+                (status, link_id),
+            )
+        connection.execute("RELEASE SAVEPOINT insert_refund_link")
+    except BaseException:
+        connection.execute("ROLLBACK TO SAVEPOINT insert_refund_link")
+        connection.execute("RELEASE SAVEPOINT insert_refund_link")
+        raise
     return link_id
 
 
@@ -1740,7 +1842,9 @@ def verify_allocations(schema_path: Path) -> None:
             (retract_transaction,),
         ).fetchone()[0]
         if active_after_retraction != -1000:
-            raise VerificationError("ADR-027 allocation retirée encore comprise dans la somme active")
+            raise VerificationError(
+                "ADR-027 allocation retirée encore comprise dans la somme active"
+            )
         report("ADR-027 retrait audité, immuable et exclu du plafond/somme actifs")
         expect_integrity_error(
             "ADR-019.b allocation amount_cents REAL rejeté",
@@ -1844,7 +1948,7 @@ def verify_refund_links(schema_path: Path) -> None:
         seed_financial_categories(connection)
         credit = insert_transaction(
             connection,
-            identity=(ACCOUNT_ID, "2026-04-02", 20000, "Avoir synthétique"),
+            identity=(ACCOUNT_B_ID, "2026-04-02", 20000, "Avoir synthétique"),
             occurrence_rank=1,
         )
         purchase_a = insert_transaction(
@@ -1878,13 +1982,116 @@ def verify_refund_links(schema_path: Path) -> None:
             amount_cents=-10000,
         )
         add_category(connection, "restaurants", "expense")
-        restaurant_allocation = insert_allocation(
+        insert_allocation(
             connection,
             purchase_a,
             category_id="restaurants",
             flow_kind="expense",
             amount_cents=-5000,
         )
+        cross_account_target = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-29", -1000, "Cible autre compte"),
+            occurrence_rank=1,
+        )
+        insert_allocation(
+            connection,
+            cross_account_target,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-1000,
+        )
+        expect_integrity_error(
+            "MONEY-13 lien SQL inter-comptes refusé",
+            lambda: insert_refund_link(
+                connection,
+                credit,
+                cross_account_target,
+                1,
+                status="proposed",
+                source_allocation_id=source_allocation,
+            ),
+            "refund_link_direction_invalid",
+        )
+        mixed_credit = insert_transaction(
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-04-06", 18000, "Avoir test plafonds combinés"),
+            occurrence_rank=1,
+        )
+        mixed_source_allocation = insert_allocation(
+            connection,
+            mixed_credit,
+            category_id="income_refund",
+            flow_kind="refund",
+            amount_cents=18000,
+        )
+        mixed_purchase = insert_transaction(
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-03-31", -20000, "Achat test plafonds combinés"),
+            occurrence_rank=1,
+        )
+        mixed_grocery_allocation = insert_allocation(
+            connection,
+            mixed_purchase,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-10000,
+        )
+        insert_allocation(
+            connection,
+            mixed_purchase,
+            category_id="restaurants",
+            flow_kind="expense",
+            amount_cents=-10000,
+        )
+        insert_refund_link(
+            connection,
+            mixed_credit,
+            mixed_purchase,
+            10000,
+            source_allocation_id=mixed_source_allocation,
+        )
+        expect_integrity_error(
+            "MONEY-11 SQL lien prorata puis ciblé dépasse le plafond d'allocation",
+            lambda: insert_refund_link(
+                connection,
+                mixed_credit,
+                mixed_purchase,
+                8000,
+                source_allocation_id=mixed_source_allocation,
+                target_allocation_id=mixed_grocery_allocation,
+            ),
+            "refund_link_target_allocation_cap_exceeded",
+        )
+        mixed_parts = dict(
+            connection.execute(
+                """SELECT a.category_id, sum(p.amount_cents)
+                   FROM refund_link_allocation_parts p
+                   JOIN allocations a ON a.allocation_id=p.allocation_id
+                   JOIN transaction_links l ON l.transaction_link_id=p.transaction_link_id
+                   WHERE l.target_transaction_id=? AND l.status='confirmed'
+                   GROUP BY a.category_id""",
+                (mixed_purchase,),
+            )
+        )
+        mixed_caps = dict(
+            connection.execute(
+                """SELECT category_id, -sum(amount_cents) FROM allocations
+                   WHERE transaction_id=? AND flow_kind='expense'
+                   AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
+                   GROUP BY category_id""",
+                (mixed_purchase,),
+            )
+        )
+        mixed_net = {
+            category_id: cap - int(mixed_parts.get(category_id, 0))
+            for category_id, cap in mixed_caps.items()
+        }
+        if mixed_parts != {"groceries": 5000, "restaurants": 5000}:
+            raise VerificationError("MONEY-11 les parts SQL ne respectent pas le split ADR-007")
+        if any(amount < 0 for amount in mixed_net.values()) or sum(mixed_net.values()) != 10000:
+            raise VerificationError("MONEY-11 le refus SQL a laissé un net catégorie négatif")
+        report("MONEY-11 parts ADR-007 et plafonds combinés prorata/ciblé au niveau SQL")
         insert_allocation(
             connection, purchase_b, category_id="groceries", flow_kind="expense", amount_cents=-5000
         )
@@ -1929,7 +2136,7 @@ def verify_refund_links(schema_path: Path) -> None:
             identity=(ACCOUNT_B_ID, "2026-01-10", -5000, "Achat synthétique C"),
             occurrence_rank=1,
         )
-        insert_allocation(
+        target_c_allocation = insert_allocation(
             connection, target_c, category_id="groceries", flow_kind="expense", amount_cents=-5000
         )
         expect_integrity_error(
@@ -1940,11 +2147,14 @@ def verify_refund_links(schema_path: Path) -> None:
                 target_c,
                 1,
                 source_allocation_id=source_allocation,
+                target_allocation_id=target_c_allocation,
             ),
             "refund_link_source_cap_exceeded",
         )
         second_credit = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-04-03", 10000, "Autre avoir"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-04-03", 10000, "Autre avoir"),
+            occurrence_rank=1,
         )
         second_credit_source = insert_allocation(
             connection,
@@ -2035,7 +2245,9 @@ def verify_refund_links(schema_path: Path) -> None:
                 source_allocation_id=second_credit_source,
             )
         except sqlite3.IntegrityError as error:
-            raise VerificationError("ADR-027 le lien rejected bloque une nouvelle proposition") from error
+            raise VerificationError(
+                "ADR-027 le lien rejected bloque une nouvelle proposition"
+            ) from error
         statuses = connection.execute(
             """SELECT status FROM transaction_links WHERE transaction_link_id IN (?, ?)
                ORDER BY status""",
@@ -2051,6 +2263,14 @@ def verify_refund_links(schema_path: Path) -> None:
             1,
             status="proposed",
             source_allocation_id=second_source_allocation,
+        )
+        connection.executemany(
+            """INSERT INTO refund_link_allocation_parts
+               (transaction_link_id, allocation_id, amount_cents) VALUES (?, ?, ?)""",
+            [
+                (proposed_source_overflow, allocation_id, part_cents)
+                for allocation_id, part_cents in _schema_prorated_parts(connection, target_c, 1)
+            ],
         )
         expect_integrity_error(
             "ADR-027 plafond source par allocation lors de confirmation",
@@ -2078,7 +2298,7 @@ def verify_refund_links(schema_path: Path) -> None:
         )
         inactive_source_credit = insert_transaction(
             connection,
-            identity=(ACCOUNT_ID, "2026-04-05", 1000, "Avoir retiré synthétique"),
+            identity=(ACCOUNT_B_ID, "2026-04-05", 1000, "Avoir retiré synthétique"),
             occurrence_rank=1,
         )
         inactive_source_allocation = insert_allocation(
@@ -2200,7 +2420,7 @@ def verify_refund_links(schema_path: Path) -> None:
                 """INSERT INTO transaction_links
                    (transaction_link_id, source_transaction_id, target_transaction_id, link_kind,
                     amount_cents, source_allocation_id, target_allocation_id, status)
-                   VALUES (?, ?, ?, 'refund_of', 9000, ?, ?, 'confirmed')""",
+                   VALUES (?, ?, ?, 'refund_of', 9000, ?, ?, 'proposed')""",
                 (replacement, credit, purchase_a, source_allocation, grocery_allocation),
             )
             connection.execute(
@@ -2208,6 +2428,11 @@ def verify_refund_links(schema_path: Path) -> None:
                    (audit_event_id, target_type, target_id, action, actor, before_json, after_json)
                    VALUES (?, 'transaction_link', ?, 'supersede', 'user', '{}', '{}')""",
                 (audit_id, confirmed_link),
+            )
+            connection.execute(
+                "UPDATE transaction_links SET status='confirmed', version=version+1 "
+                "WHERE transaction_link_id=?",
+                (replacement,),
             )
             connection.execute("COMMIT")
         except sqlite3.IntegrityError as error:
@@ -2445,6 +2670,210 @@ def verify_import_rollback(schema_path: Path) -> None:
         report(
             "IMP-06 erreur SQL au milieu du commit : fichier/transaction/source_rows tous annulés"
         )
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        connection.close()
+
+
+def verify_refund_parts_and_state(schema_path: Path) -> None:
+    connection = connect(schema_path)
+    try:
+        insert_account(connection, account_role="current")
+        seed_financial_categories(connection)
+        credit = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-05-01", 3000, "Avoir parts synthétique"),
+            occurrence_rank=1,
+        )
+        purchase = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-01", -3000, "Achat parts synthétique"),
+            occurrence_rank=1,
+        )
+        source = insert_allocation(
+            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=3000
+        )
+        target = insert_allocation(
+            connection, purchase, category_id="groceries", flow_kind="expense", amount_cents=-3000
+        )
+        try:
+            confirmed = insert_refund_link(
+                connection, credit, purchase, 1000, source_allocation_id=source
+            )
+        except sqlite3.IntegrityError as error:
+            raise VerificationError(
+                "MONEY-18 somme des parts égale au montant du lien confirmé: "
+                f"attribution valide rejetée ({error})"
+            ) from error
+        part = connection.execute(
+            "SELECT amount_cents FROM refund_link_allocation_parts "
+            "WHERE transaction_link_id=? AND allocation_id=?",
+            (confirmed, target),
+        ).fetchone()
+        total = connection.execute(
+            "SELECT sum(amount_cents) FROM refund_link_allocation_parts "
+            "WHERE transaction_link_id=?",
+            (confirmed,),
+        ).fetchone()[0]
+        if part != (1000,) or total != 1000:
+            raise VerificationError("MONEY-18 part matérialisée positive et somme égale au lien")
+        expect_integrity_error(
+            "MONEY-18 modification d'une part matérialisée interdite",
+            lambda: connection.execute(
+                "UPDATE refund_link_allocation_parts SET amount_cents=amount_cents+1 "
+                "WHERE transaction_link_id=? AND allocation_id=?",
+                (confirmed, target),
+            ),
+            "refund_link_part_immutable",
+        )
+        expect_integrity_error(
+            "MONEY-18 suppression d'une part matérialisée interdite",
+            lambda: connection.execute(
+                "DELETE FROM refund_link_allocation_parts "
+                "WHERE transaction_link_id=? AND allocation_id=?",
+                (confirmed, target),
+            ),
+            "refund_link_part_delete_forbidden",
+        )
+
+        second_credit = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-05-02", 1000, "Deuxième avoir parts synthétique"),
+            occurrence_rank=1,
+        )
+        second_source = insert_allocation(
+            connection,
+            second_credit,
+            category_id="income_refund",
+            flow_kind="refund",
+            amount_cents=1000,
+        )
+        proposed = insert_refund_link(
+            connection,
+            second_credit,
+            purchase,
+            100,
+            status="proposed",
+            source_allocation_id=second_source,
+        )
+        expect_integrity_error(
+            "MONEY-18 signe strictement positif des parts",
+            lambda: connection.execute(
+                "INSERT INTO refund_link_allocation_parts "
+                "(transaction_link_id, allocation_id, amount_cents) VALUES (?, ?, 0)",
+                (proposed, target),
+            ),
+            "CHECK constraint failed",
+        )
+        expect_integrity_error(
+            "MONEY-18 somme des parts égale au montant du lien confirmé",
+            lambda: connection.execute(
+                "UPDATE transaction_links SET status='confirmed', version=version+1 "
+                "WHERE transaction_link_id=?",
+                (proposed,),
+            ),
+            "refund_link_attribution_total_mismatch",
+        )
+
+        target_with_inactive = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-02", -1000, "Achat allocation inactive synthétique"),
+            occurrence_rank=1,
+        )
+        inactive = insert_allocation(
+            connection,
+            target_with_inactive,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-400,
+        )
+        active = insert_allocation(
+            connection,
+            target_with_inactive,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-600,
+        )
+        decision = insert_classification_decision(connection, target_with_inactive)
+        connection.execute(
+            """UPDATE allocations SET retracted_at_utc='2026-04-02T12:00:00.000Z',
+               retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+            (decision, inactive),
+        )
+        stale_target_link = insert_refund_link(
+            connection,
+            second_credit,
+            target_with_inactive,
+            100,
+            status="proposed",
+            source_allocation_id=second_source,
+        )
+        expect_integrity_error(
+            "MONEY-18 une part ne peut pas cibler une allocation inactive",
+            lambda: connection.execute(
+                "INSERT INTO refund_link_allocation_parts "
+                "(transaction_link_id, allocation_id, amount_cents) VALUES (?, ?, 1)",
+                (stale_target_link, inactive),
+            ),
+            "refund_link_part_target_invalid",
+        )
+        if active == inactive:
+            raise VerificationError("MONEY-18 fixture allocations actives/inactives distinctes")
+
+        rejected = insert_refund_link(
+            connection,
+            second_credit,
+            target_with_inactive,
+            100,
+            status="rejected",
+            source_allocation_id=second_source,
+            target_allocation_id=active,
+        )
+        def update_status(link_id: str, new_status: str) -> None:
+            connection.execute(
+                "UPDATE transaction_links SET status=?, version=version+1 "
+                "WHERE transaction_link_id=?",
+                (new_status, link_id),
+            )
+
+        for old_status, new_status in (
+            ("rejected", "confirmed"),
+            ("rejected", "proposed"),
+        ):
+            expect_integrity_error(
+                f"MONEY-19 transition {old_status} → {new_status} interdite",
+                partial(update_status, rejected, new_status),
+                "refund_link_status_transition_invalid",
+            )
+        for new_status in ("proposed", "rejected"):
+            expect_integrity_error(
+                f"MONEY-19 transition confirmed → {new_status} interdite",
+                partial(update_status, confirmed, new_status),
+                (
+                    "refund_link_status_transition_invalid",
+                    "confirmed_transaction_link_supersession_required",
+                ),
+            )
+        expect_integrity_error(
+            "MONEY-19 INSERT d'un refund directement confirmé interdit",
+            lambda: connection.execute(
+                """INSERT INTO transaction_links
+                   (transaction_link_id, source_transaction_id, target_transaction_id,
+                    link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
+                   VALUES (?, ?, ?, 'refund_of', 100, ?, ?, 'confirmed')""",
+                (
+                    new_id(),
+                    second_credit,
+                    target_with_inactive,
+                    second_source,
+                    active,
+                ),
+            ),
+            "refund_link_initial_status_invalid",
+        )
+        report("MONEY-18 gardes SQL de parts: somme, allocation active, signe et immutabilité")
+        report("MONEY-19 machine d'états SQL des liens refund")
     finally:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -2761,6 +3190,35 @@ def mutate_refund_target_active_filter(text: str) -> str:
     )
 
 
+def remove_refund_target_cap_guards(text: str) -> str:
+    for trigger_name in (
+        "trg_refund_links_target_cap_insert",
+        "trg_refund_links_target_cap_update",
+        "trg_refund_links_confirmed_allocation_caps_insert",
+        "trg_refund_links_confirmed_allocation_caps_update",
+    ):
+        text = remove_sql_object(text, "trigger", trigger_name)
+    return text
+
+
+def remove_refund_target_allocation_insert_guards(text: str) -> str:
+    for trigger_name in (
+        "trg_refund_links_target_allocation_cap_insert",
+        "trg_refund_links_confirmed_allocation_caps_insert",
+    ):
+        text = remove_sql_object(text, "trigger", trigger_name)
+    return text
+
+
+def remove_refund_target_allocation_update_guards(text: str) -> str:
+    for trigger_name in (
+        "trg_refund_links_target_allocation_cap_update",
+        "trg_refund_links_confirmed_allocation_caps_update",
+    ):
+        text = remove_sql_object(text, "trigger", trigger_name)
+    return text
+
+
 def mutate_transaction_amount_clause(text: str, old: str, new: str, label: str) -> str:
     start = text.index("CREATE TABLE transactions (")
     end = text.index("\n);", start)
@@ -3050,9 +3508,7 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
         ),
         (
             "allocation referenced by confirmed links immutable",
-            lambda s: remove_sql_object(
-                s, "trigger", "trg_allocations_referenced_links_immutable"
-            ),
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_referenced_links_immutable"),
             verify_refund_links,
             "ADR-027 une allocation liée ne peut pas être retirée",
         ),
@@ -3088,7 +3544,7 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
                 s, "trigger", "trg_refund_links_confirmed_direction_insert"
             ),
             verify_refund_links,
-            "MONEY-10 source sans allocation refund",
+            "contrainte absente ou non appliquée : MONEY-13 lien SQL inter-comptes refusé",
         ),
         (
             "refund direction update",
@@ -3111,44 +3567,121 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             "ADR-027 liens refusés vers une allocation expense retirée",
         ),
         (
-            "refund source cap",
-            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_insert"),
+            "refund source cap on confirmation",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_update"),
             verify_refund_links,
             "ADR-027 plafond de source par allocation refund",
         ),
         (
-            "refund source cap update",
-            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_update"),
-            verify_refund_links,
-            "ADR-027 plafond source par allocation lors de confirmation",
-        ),
-        (
             "refund target cap",
-            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_target_cap_insert"),
+            remove_refund_target_cap_guards,
             verify_refund_links,
-            "ADR-024.3 somme liée plafonnée par les allocations expense",
+            "MONEY-11 SQL lien prorata puis ciblé dépasse le plafond d'allocation",
         ),
         (
-            "refund target allocation cap",
+            "refund combined allocation caps",
             lambda s: remove_sql_object(
-                s, "trigger", "trg_refund_links_target_allocation_cap_insert"
+                remove_sql_object(
+                    s,
+                    "trigger",
+                    "trg_refund_links_confirmed_allocation_caps_insert",
+                ),
+                "trigger",
+                "trg_refund_links_confirmed_allocation_caps_update",
             ),
             verify_refund_links,
-            "ADR-024.3 plafond de l'allocation expense ciblée",
+            "MONEY-11 SQL lien prorata puis ciblé dépasse le plafond d'allocation",
+        ),
+        (
+            "refund cross-account scope",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_refund_links_confirmed_direction_insert",
+                "          AND s.account_id = t.account_id\n",
+                "",
+                "refund account scope guard",
+            ),
+            verify_refund_links,
+            "contrainte absente ou non appliquée : MONEY-13 lien SQL inter-comptes refusé",
         ),
         (
             "refund target allocation cap update",
-            lambda s: remove_sql_object(
-                s, "trigger", "trg_refund_links_target_allocation_cap_update"
-            ),
+            remove_refund_target_allocation_update_guards,
             verify_refund_links,
-            "ADR-027 plafond par allocation cible lors de confirmation",
+            "MONEY-11 SQL lien prorata puis ciblé dépasse le plafond d'allocation",
         ),
         (
             "confirmed refund link no delete",
             lambda s: remove_sql_object(s, "trigger", "trg_confirmed_transaction_links_no_delete"),
             verify_refund_links,
             "ADR-021 lien de remboursement confirmé non supprimable",
+        ),
+        (
+            "refund part exact sum",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_refund_links_confirmed_attribution_update",
+                "), 0) <> NEW.amount_cents",
+                "), 0) = NEW.amount_cents",
+                "refund attribution exact sum",
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 somme des parts égale au montant du lien confirmé",
+        ),
+        (
+            "refund part active target",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_refund_link_allocation_parts_insert_guard",
+                "          AND a.amount_cents < 0 "
+                "AND a.superseded_by_allocation_id IS NULL\n"
+                "          AND a.retracted_at_utc IS NULL",
+                "          AND a.amount_cents < 0",
+                "refund part active target filter",
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 une part ne peut pas cibler une allocation inactive",
+        ),
+        (
+            "refund part positive integer sign",
+            lambda s: mutate_table_clause(
+                s,
+                "refund_link_allocation_parts",
+                "amount_cents INTEGER NOT NULL CHECK "
+                "(typeof(amount_cents) = 'integer' AND amount_cents > 0),",
+                "amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer'),",
+                "refund part positive integer",
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 signe strictement positif des parts",
+        ),
+        (
+            "refund part update forbidden",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_link_allocation_parts_update_forbidden"
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 modification d'une part matérialisée interdite",
+        ),
+        (
+            "refund part delete forbidden",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_link_allocation_parts_delete_forbidden"
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 suppression d'une part matérialisée interdite",
+        ),
+        (
+            "refund state transitions",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_status_transition"),
+            verify_refund_parts_and_state,
+            "MONEY-19 transition rejected → confirmed interdite",
+        ),
+        (
+            "refund initial status",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_initial_status"),
+            verify_refund_parts_and_state,
+            "MONEY-19 INSERT d'un refund directement confirmé interdit",
         ),
         (
             "confirmed refund link supersession only",
@@ -3430,6 +3963,7 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
                 "--schema",
                 str(schema_path),
                 "--skip-mutation-proofs",
+                "--skip-migration-history",
             ],
             capture_output=True,
             text=True,
@@ -3446,7 +3980,9 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
         report("preuve /tmp : retrait du binder ADR-019.h détecté par le test strict-int")
 
 
-def verify_schema(schema_path: Path, *, prove_mutations: bool = True) -> None:
+def verify_schema(
+    schema_path: Path, *, prove_mutations: bool = True, verify_migrations: bool = True
+) -> None:
     # Charge seul le schéma avant les scénarios : une erreur de syntaxe est signalée sans ambiguïté.
     connection = connect(schema_path)
     connection.close()
@@ -3470,6 +4006,7 @@ def verify_schema(schema_path: Path, *, prove_mutations: bool = True) -> None:
         verify_transaction_flow_not_stored,
         verify_allocations,
         verify_refund_links,
+        verify_refund_parts_and_state,
         verify_insight_facts_and_idempotency,
         verify_backup_hmac_key_flag,
         verify_personal_mode_oracle,
@@ -3479,8 +4016,88 @@ def verify_schema(schema_path: Path, *, prove_mutations: bool = True) -> None:
     )
     for test in tests:
         test(schema_path)
+    if verify_migrations:
+        verify_migration_history_and_head_schema()
     if prove_mutations:
         verify_constraint_mutation_proofs(schema_path)
+
+
+def verify_migration_history_and_head_schema() -> None:
+    for relative_path, expected_digest in FROZEN_0001_HASHES.items():
+        actual = hashlib.sha256((ROOT / relative_path).read_bytes()).hexdigest()
+        if actual != expected_digest:
+            raise VerificationError(
+                f"MIG-FREEZE-01 migration gelée, créer 0003 : {relative_path} a changé"
+            )
+    report("MIG-FREEZE-01 les deux fichiers de 0001 sont gelés")
+
+    # Exercise the actual linear Alembic chain in a temporary database. The
+    # runner creates the required verified backup between 0001 and 0002.
+    sys.path.insert(0, str(ROOT / "backend"))
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        from app.core.config import Settings
+        from app.db.migrate import upgrade_to_head
+
+        with tempfile.TemporaryDirectory(prefix="verify-schema-migration-") as temp_dir:
+            base = Path(temp_dir)
+            database = base / "migration.sqlite"
+            settings = Settings(
+                database_url=f"sqlite:///{database}",
+                data_dir=base / "private-data",
+                _env_file=None,
+            )
+            config = Config(str(ROOT / "alembic.ini"))
+            config.attributes["settings"] = settings
+            config.attributes["operation"] = "upgrade"
+            command.upgrade(config, "0001_initial")
+            result = upgrade_to_head(settings)
+            if result.revision != "0002_t17_refund_safety" or result.backup is None:
+                raise VerificationError("MIG-0002 chaîne 0001 → 0002 ou sauvegarde absente")
+
+            expected = connect(DEFAULT_SCHEMA)
+            migrated = sqlite3.connect(database)
+            try:
+                def normalized_objects(
+                    connection: sqlite3.Connection,
+                ) -> tuple[tuple[str, str, str, str | None], ...]:
+                    rows = connection.execute(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                        "WHERE type IN ('table','index','trigger') "
+                        "AND name NOT LIKE 'sqlite_%' AND name <> 'alembic_version'"
+                    ).fetchall()
+                    return tuple(
+                        sorted(
+                            (
+                                kind,
+                                name,
+                                table,
+                                None if sql is None else re.sub(r"\s+", " ", sql).strip(),
+                            )
+                            for kind, name, table, sql in rows
+                        )
+                    )
+
+                if normalized_objects(migrated) != normalized_objects(expected):
+                    raise VerificationError(
+                        "MIG-0002 sqlite_master après 0001 → 0002 diverge de schema.sql"
+                    )
+                integrity = migrated.execute("PRAGMA integrity_check").fetchone()
+                foreign_keys = migrated.execute("PRAGMA foreign_key_check").fetchall()
+                if integrity != ("ok",) or foreign_keys:
+                    raise VerificationError(
+                        "MIG-0002 migrated database integrity_check/foreign_key_check invalide"
+                    )
+            finally:
+                expected.close()
+                migrated.close()
+    except VerificationError:
+        raise
+    except Exception as error:
+        raise VerificationError(f"MIG-0002 échec de migration temporaire : {error}") from error
+    report("MIG-0002 la chaîne 0001 → 0002 égale docs/examples/schema.sql")
 
 
 def main() -> int:
@@ -3496,9 +4113,18 @@ def main() -> int:
         action="store_true",
         help="réservé à l'exécution rapide d'une copie mutante par un outil externe",
     )
+    parser.add_argument(
+        "--skip-migration-history",
+        action="store_true",
+        help="réservé à l'exécution d'un script mutant copié hors du dépôt",
+    )
     args = parser.parse_args()
     try:
-        verify_schema(args.schema, prove_mutations=not args.skip_mutation_proofs)
+        verify_schema(
+            args.schema,
+            prove_mutations=not args.skip_mutation_proofs,
+            verify_migrations=not args.skip_migration_history,
+        )
     except (OSError, sqlite3.Error, VerificationError) as error:
         print(f"ÉCHEC verify_schema: {error}", file=sys.stderr)
         return 1

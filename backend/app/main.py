@@ -14,7 +14,7 @@ from app.api.v1.transactions import router as transactions_router
 from app.core.config import Settings, get_settings
 from app.core.errors import InternalErrorBoundary, install_error_handlers
 from app.core.logging import configure_logging
-from app.core.security import LocalTrustedHostMiddleware
+from app.core.security import LocalSecurityMiddleware
 from app.db.migrate import database_state
 from app.db.session import create_sqlite_engine
 from app.domain.taxonomy import load_taxonomy
@@ -52,8 +52,10 @@ def create_app(
     )
     application.add_middleware(InternalErrorBoundary)
     application.add_middleware(
-        LocalTrustedHostMiddleware,
-        allowed_hosts=["127.0.0.1", "localhost"],
+        LocalSecurityMiddleware,
+        allowed_origins=active_settings.cors_allowed_origins,
+        bind_host=active_settings.app_host,
+        bind_port=active_settings.app_port,
     )
     install_error_handlers(application)
     application.include_router(health_router, prefix="/api/v1")

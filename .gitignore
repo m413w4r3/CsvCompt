@@ -8,6 +8,10 @@ data/
 *.db
 *.zip
 tmp.zip
+*.cfbackup
+*.cfbackup.*.tmp
+exports/
+.staging/
 backend/tests/fixtures/private/
 
 # --- Secrets ---

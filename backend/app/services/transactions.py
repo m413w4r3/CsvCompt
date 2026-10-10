@@ -2,14 +2,192 @@
 
 from __future__ import annotations
 
+import threading
+import time
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any, cast
 
 from sqlalchemy import case, func, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.core.errors import AppError
 from app.db.models import Account, Allocation, ImportFile, SourceRow, Transaction
 from app.importers.normalize import search_label
+
+MAX_SAFE_FRONTEND_INTEGER = 2**53 - 1
+
+
+class SnapshotUnavailable(Exception):
+    """The process-local read snapshot expired or was already released."""
+
+
+def sanitize_api_cents[Sanitized](value: Sanitized) -> Sanitized:
+    """Null unsafe cent integers recursively and mark the object that contained them."""
+
+    if isinstance(value, list):
+        return cast(Sanitized, [sanitize_api_cents(item) for item in value])
+    if isinstance(value, tuple):
+        return cast(Sanitized, [sanitize_api_cents(item) for item in value])
+    if not isinstance(value, Mapping):
+        return value
+
+    sanitized: dict[str, Any] = {}
+    unsafe_here = False
+    for key, item in value.items():
+        if (
+            isinstance(key, str)
+            and key.endswith("_cents")
+            and type(item) is int
+            and abs(item) > MAX_SAFE_FRONTEND_INTEGER
+        ):
+            sanitized[key] = None
+            unsafe_here = True
+            continue
+        sanitized[key] = sanitize_api_cents(item)
+    if unsafe_here:
+        sanitized["total_out_of_range"] = True
+    return cast(Sanitized, sanitized)
+
+
+class TransactionSnapshotStore:
+    """Keep short-lived SQLite read snapshots pinned across transaction pages."""
+
+    def __init__(self, *, ttl_seconds: int = 300, max_snapshots: int = 32) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_snapshots = max_snapshots
+        self._entries: dict[str, _TransactionSnapshot] = {}
+        self._guard = threading.RLock()
+
+    def create(self, engine: Engine, snapshot_at: str) -> tuple[str, Session]:
+        self._expire()
+        with self._guard:
+            if len(self._entries) >= self._max_snapshots:
+                available = [
+                    key for key, entry in self._entries.items() if not entry.lock.locked()
+                ]
+                if not available:
+                    raise AppError(
+                        "DATABASE_BUSY", 503, "La pagination locale est momentanément occupée."
+                    )
+                oldest = min(available, key=lambda key: self._entries[key].created_at)
+                self._discard_locked(oldest)
+            connection = engine.connect()
+            session: Session | None = None
+            try:
+                connection.exec_driver_sql("PRAGMA query_only=ON")
+                connection.commit()
+                session = Session(
+                    bind=connection,
+                    expire_on_commit=False,
+                    join_transaction_mode="rollback_only",
+                )
+                session.begin()
+                # The first read fixes SQLite's WAL snapshot at commit visibility.
+                session.execute(select(Transaction.transaction_id).limit(1)).first()
+            except BaseException:
+                try:
+                    if session is not None:
+                        session.rollback()
+                        session.close()
+                    if connection.in_transaction():
+                        connection.rollback()
+                    connection.exec_driver_sql("PRAGMA query_only=OFF")
+                    connection.commit()
+                except Exception:
+                    connection.invalidate()
+                finally:
+                    connection.close()
+                raise
+            assert session is not None
+            snapshot_id = uuid.uuid4().hex
+            self._entries[snapshot_id] = _TransactionSnapshot(
+                session=session,
+                connection=connection,
+                created_at=time.monotonic_ns(),
+                snapshot_at=snapshot_at,
+            )
+            return snapshot_id, session
+
+    @contextmanager
+    def use(self, snapshot_id: str) -> Iterator[tuple[Session, str]]:
+        with self._guard:
+            self._expire_locked()
+            entry = self._entries.get(snapshot_id)
+            if entry is None:
+                raise SnapshotUnavailable(snapshot_id)
+        entry.lock.acquire()
+        try:
+            with self._guard:
+                if self._entries.get(snapshot_id) is not entry:
+                    raise SnapshotUnavailable(snapshot_id)
+            yield entry.session, entry.snapshot_at
+        finally:
+            entry.lock.release()
+
+    def discard(self, snapshot_id: str) -> None:
+        with self._guard:
+            entry = self._entries.get(snapshot_id)
+        if entry is None:
+            return
+        with entry.lock, self._guard:
+            if self._entries.get(snapshot_id) is entry:
+                self._discard_locked(snapshot_id)
+
+    def close_all(self) -> None:
+        with self._guard:
+            snapshot_ids = list(self._entries)
+        for snapshot_id in snapshot_ids:
+            self.discard(snapshot_id)
+
+    def _expire(self) -> None:
+        with self._guard:
+            self._expire_locked()
+
+    def _expire_locked(self) -> None:
+        now = time.monotonic_ns()
+        expired = [
+            snapshot_id
+            for snapshot_id, entry in self._entries.items()
+            if now - entry.created_at >= self._ttl_seconds * 1_000_000_000
+            and not entry.lock.locked()
+        ]
+        for snapshot_id in expired:
+            self._discard_locked(snapshot_id)
+
+    def _discard_locked(self, snapshot_id: str) -> None:
+        entry = self._entries.pop(snapshot_id, None)
+        if entry is None:
+            return
+        try:
+            entry.session.rollback()
+            entry.session.close()
+            entry.connection.exec_driver_sql("PRAGMA query_only=OFF")
+            entry.connection.commit()
+        except Exception:
+            entry.connection.invalidate()
+            raise
+        finally:
+            entry.connection.close()
+
+
+class _TransactionSnapshot:
+    def __init__(
+        self,
+        *,
+        session: Session,
+        connection: Any,
+        created_at: int,
+        snapshot_at: str,
+    ) -> None:
+        self.session = session
+        self.connection = connection
+        self.created_at = created_at
+        self.snapshot_at = snapshot_at
+        self.lock = threading.Lock()
 
 
 def canonical_search(value: str | None) -> str | None:

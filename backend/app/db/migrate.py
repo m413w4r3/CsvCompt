@@ -240,22 +240,21 @@ def create_verified_backup(
         stem = f"pre-upgrade-{stamp}-{uuid.uuid4()}"
         final_path = backup_directory / f"{stem}.sqlite"
         temp_path = backup_directory / f".{stem}.tmp.sqlite"
-        descriptor = os.open(temp_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-        os.close(descriptor)
 
-        source = _readonly_connection(database_path)
         try:
-            destination = sqlite3.connect(temp_path, timeout=5)
-            try:
-                destination.execute("PRAGMA foreign_keys=ON")
-                destination.execute("PRAGMA recursive_triggers=ON")
-                source.backup(destination, pages=256, sleep=0.05)
-                destination.commit()
-                integrity = destination.execute("PRAGMA integrity_check").fetchone()
-            finally:
-                destination.close()
-        finally:
-            source.close()
+            # Share the killable one-pass snapshot so migrations have the same
+            # progress guarantee and configurable deadline as user backups.
+            from app.services.backups import _snapshot_database
+
+            _snapshot_database(database_path, temp_path)
+        except Exception as error:
+            if getattr(error, "code", None) == "BACKUP_TIMEOUT":
+                raise BackupError(
+                    "BACKUP_TIMEOUT : la sauvegarde pré-migration a dépassé son délai."
+                ) from error
+            raise BackupError("La capture pré-migration SQLite a échoué") from error
+        with closing(_readonly_connection(temp_path)) as destination:
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()
         if integrity != ("ok",):
             raise BackupError("La vérification integrity_check de la sauvegarde a échoué")
 

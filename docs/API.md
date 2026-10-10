@@ -26,7 +26,7 @@ Le front synchronise ces filtres dans l'URL sur les pages Transactions, Overview
 
 ### Pagination et cohérence
 
-Les listes serveur utilisent une pagination par curseur opaque `cursor` et `limit` (défaut 50, maximum 100), pas un offset. Transactions : ordre déterministe `booked_on DESC, transaction_id DESC`. Le curseur signé lie la dernière paire, les filtres canoniques et une borne de snapshot `created_at_utc`; une importation concurrente n'insère donc pas de lignes au milieu d'une navigation existante. File de revue : curseur signé lié au filtre et à la révision de file, avec ordre `priority DESC, latest_booked_on DESC, review_group_id ASC`; si une décision a changé la file, l'API renvoie `CURSOR_STALE` et l'interface repart de la première page. `next_cursor=null` termine la liste.
+Les listes serveur utilisent une pagination par curseur opaque `cursor` et `limit` (défaut 50, maximum 100), pas un offset. Transactions : ordre déterministe `booked_on DESC, transaction_id DESC`. Le curseur signé lie la dernière paire, les filtres canoniques et un identifiant opaque de snapshot. La première page épingle une lecture SQLite WAL à la visibilité observée lors de cette page ; les pages suivantes réutilisent cette lecture, même si un import est committé entre-temps. Le snapshot est conservé en mémoire jusqu'à cinq minutes (maximum 32 navigations inachevées par processus) ; après expiration ou redémarrage, l'API renvoie `CURSOR_STALE`. La valeur de recherche `q` n'est jamais sérialisée en clair dans le curseur : les filtres sont vérifiés par HMAC. File de revue : curseur signé lié au filtre et à la révision de file, avec ordre `priority DESC, latest_booked_on DESC, review_group_id ASC`; si une décision a changé la file, l'API renvoie `CURSOR_STALE` et l'interface repart de la première page. `next_cursor=null` termine la liste.
 
 Forme commune :
 
@@ -48,11 +48,11 @@ Forme commune :
 {"error":{"code":"VERSION_CONFLICT","message":"Cette ressource a changé.","details":{"current_version":3}}}
 ```
 
-Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `INVALID_HOST` (400), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (400), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
+Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `INVALID_HOST` (400), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `TOO_MANY_OPERATIONS` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `ACCOUNT_ALIAS_CONFLICT` (409), `ACCOUNT_FINGERPRINT_CONFLICT` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_COMMIT_IN_PROGRESS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (422), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
 
 ### Enveloppe analytique
 
-Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées. `coverage` calcule les jours complets comme l'union des intervalles de section `[coverage_from, complete_through]`, avec `complete_day_count`, `missing_days` ou les plages de jours manquants et `status:"complete"|"partial"|"unknown"`. Les jours `provisional` restent dans les sommes brutes, mais ne valident jamais une couverture complète ; un contrôle de solde `mismatch` rend `month_completeness=unknown`. Une réponse métier d'import n'emploie jamais `partial`.
+Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metric_definition_id`, `raw_cents` et `unit`. Les listes/séries ajoutent `items` ou `series`; une mesure non monétaire emploie `raw_basis_points` ou `raw_count` et met `raw_cents:null`. Les détails de chaque métrique comprennent leur propre `metric_definition_id`. Les formules, règles de nullabilité, arrondis en basis points et unités suivent sans divergence `METRICS.md`. Drilldown conserve les mêmes filtres et donne les IDs exacts des opérations utilisées. `coverage` calcule les jours complets comme l'union des intervalles de section `[coverage_from, complete_through]`, avec `complete_day_count`, `missing_days` ou les plages de jours manquants et `status:"complete"|"partial"|"unknown"|"not_started"`. `period.completeness` admet aussi `not_started` : une période antérieure à la première couverture n'est pas une alerte de trou et s'affiche de façon neutre (« avant le premier import »). Les jours `provisional` restent dans les sommes brutes, mais ne valident jamais une couverture complète ; un contrôle de solde `mismatch` rend `month_completeness=unknown`. Une réponse métier d'import n'emploie jamais `partial`.
 
 ```json
 {
@@ -90,7 +90,7 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 
 | Méthode et chemin | Requête / réponse |
 |---|---|
-| `POST /api/v1/imports/preview` | Un unique champ `multipart/form-data file`; crée un aperçu temporaire sans ligne métier SQLite, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` des octets reçus, `generated_on`, `generation_date_source`, `sections[]`, `warnings[]`, `rejections[]`, `anomaly_counts`, `already_imported`, `import_file_id`, `can_commit`, `expires_at_utc`, `reconciliation:null`. Les aperçus sont privés et expirent. Les numéros, empreintes et libellés ne sont jamais renvoyés. |
+| `POST /api/v1/imports/preview` | Un unique champ `multipart/form-data file`; crée un aperçu temporaire sans ligne métier SQLite, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` des octets reçus, `generated_on`, `generation_date_source`, `sections[]`, `warnings[]`, `rejections[]`, `out_of_period_candidates[]`, `anomaly_counts`, `already_imported`, `import_file_id`, `can_commit`, `expires_at_utc`, `reconciliation:null`. Maximum 4 000 opérations par fichier. Un total de section supérieur à `2^53 - 1` centimes vaut `null` et `total_out_of_range:true`. Les aperçus sont privés et expirent. Les numéros, empreintes et libellés ne sont jamais renvoyés. |
 | `GET /api/v1/imports/preview/{preview_id}` | Renvoie l'état courant et sa `version`; un aperçu expiré ou supprimé répond `410 IMPORT_PREVIEW_EXPIRED`. |
 | `DELETE /api/v1/imports/preview/{preview_id}` | Supprime immédiatement l'aperçu privé et ses octets (204). |
 | `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/account-mapping` | Résolution versionnée `{expected_version, account_id}` ou `{expected_version, new_account:{alias,account_role}}`; une section `known` est verrouillée. Le nouveau compte et son alias sont seulement mémorisés, jamais créés ici. |
@@ -99,8 +99,13 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 | `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `{expected_version}` après résolution de toutes les sections/lignes. Commit atomique du fichier entier. Réponse uniquement `committed` ou `no_op`, avec compteurs et plages de couverture ; aucun état `partial`. Une occurrence `no_op` est un nouveau registre final, conserve hash/taille/référence au commit d'origine, supprime le preview temporaire et répond `archive_retained:false` (`archive_relpath` reste `NULL`). |
 | `GET /api/v1/imports` | filtres `status`, `period_start`, `period_end`, curseur ; liste `ImportSummary[]` paginée. |
 | `GET /api/v1/imports/{import_file_id}` | détail statut, hash, alias de sections, bornes, soldes source, références aux `balance_checks`, compteurs, candidats ambigus et diagnostic rédigé. Jamais d'archive ou de numéro. |
-| `GET /api/v1/imports/{import_file_id}/rejections` | curseur ; `logical_row_idx`, `code`, `field`, `message` non privé. Aucun dump du libellé. |
+| `GET /api/v1/imports/{import_file_id}/rejections` | curseur ; `logical_row_idx`, `code`, `field`, `message`, `resolution_status` non privé; une décision appliquée vaut `resolved`. Aucun dump du libellé. |
 | `GET /api/v1/accounts/{account_id}/balance-checks` | `period_start`, `period_end`, curseur ; résultats `match`, `mismatch`, `not_comparable`, date et références aux sections, cents de recalcul/delta, `input_snapshot_sha256`, `version`. Les valeurs sont calculées à partir de toutes les sections commitées par date de solde, non dans l'ordre d'import ; seules les dates `balance_as_of <= complete_through` sont comparables. |
+
+Tout champ de centimes dont la valeur absolue dépasse `2^53 - 1` est sérialisé
+à `null`; l'objet qui contenait ce champ porte
+`total_out_of_range: true`. Cela couvre les sommes et soldes d'import, les
+contrôles de solde et les montants, résidus et allocations des opérations.
 
 Types principaux :
 
@@ -108,13 +113,17 @@ Types principaux :
 ImportSectionPreview = {section_index: integer, account_mapping: {status: "known"|"unknown"|"ambiguous",
   account_id: UUID|null, alias: string|null, new_account?: {alias: string, account_role: string}}, period_from: date|null, period_to: date|null,
   coverage_from: date|null, coverage_through: date|null, complete_through: date|null,
-  balance_as_of: date|null, header_balance_cents: integer|null, min_date: date|null, max_date: date|null,
+  balance_as_of: date|null, header_balance_cents: integer|null, total_out_of_range: boolean,
+  min_date: date|null, max_date: date|null,
   account_resolution: "known"|"unknown"|"ambiguous", account_id: UUID|null, account_alias: string|null,
-  operation_count: integer, debit_total_cents: integer, credit_total_cents: integer, net_cents: integer,
+  operation_count: integer, debit_total_cents: integer|null, credit_total_cents: integer|null,
+  net_cents: integer|null, total_out_of_range: boolean,
   provisional_days: date[], anomaly_counts: {code: integer}}
 ImportPreview = {preview_id: UUIDv4, version: integer, status: "previewed", encoding: string,
   file_sha256: string, generated_on: date, generation_date_source: string, sections: ImportSectionPreview[],
   warnings: PreviewFinding[], rejections: PreviewFinding[], anomaly_counts: {code: integer}, anomaly_summary: object,
+  out_of_period_candidates: {section_index: integer, logical_row_idx: integer,
+    candidates: {transaction_id: UUID, occurrence_rank: integer, imported_at_utc: datetime}[]}[],
   already_imported: boolean,
   import_file_id: UUID|null, can_commit: boolean, expires_at_utc: datetime, reconciliation: null}
 PreviewFinding = {code: string, detail_code?: string|null, severity: string, section: integer|null,
@@ -127,8 +136,10 @@ ImportResolution = {resolution_id: UUID, section_index: integer|null, logical_ro
   code: "ACCOUNT_MAPPING_REQUIRED"|"SECTION_RANGE_REQUIRED"|"DUPLICATE_ACCOUNT_SECTION"|"OUT_OF_PERIOD"|"MULTIPLICITY_AMBIGUOUS",
   status: "pending"|"resolved", resolution_action: string|null, resolved_by: string|null}
 BalanceCheck = {balance_check_id: UUID, account_id: UUID, status: "match"|"mismatch"|"not_comparable",
-  start_balance_as_of: date|null, end_balance_as_of: date|null, recalculated_balance_cents: integer|null,
-  delta_cents: integer|null, input_snapshot_sha256: string, version: integer}
+  start_balance_as_of: date|null, end_balance_as_of: date|null,
+  start_balance_cents: integer|null, end_balance_cents: integer|null,
+  recalculated_balance_cents: integer|null, delta_cents: integer|null,
+  total_out_of_range: boolean, input_snapshot_sha256: string, version: integer}
 ```
 
 `can_commit` est faux tant qu'une anomalie bloquante, un mapping requis, une plage requise, une ligne `OUT_OF_PERIOD` ou un compte de section dupliqué n'est pas résolu. Une section sans numéro canonique émet `MISSING_ACCOUNT_NUMBER` et ne peut pas être résolue par un mapping. Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir une décision auditée; `link_existing` identifie la transaction par `transaction_id`, et une ambiguïté de ligne exige `section_index`. Un fichier associant deux sections au même compte reste bloqué avec `DUPLICATE_ACCOUNT_SECTION`. `ZERO_AMOUNT`, `AMOUNT_OUT_OF_RANGE`, `MISSING_ACCOUNT_NUMBER`, `GENERATION_DATE_INCONSISTENT`, `FUTURE_DATED_ROW`, `DATE_IMPLAUSIBLE` et `LABEL_TOO_LONG` sont bloquants. `ACCOUNT_MAPPING_REQUIRED` figure dans `rejections` tant qu'un mapping manque. `FILE_TOO_LARGE` est une réponse 413 avant l'analyse. Les statuts d'import ne comprennent jamais `partial`.

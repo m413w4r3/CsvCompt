@@ -367,12 +367,12 @@ def test_approved_rule_only_applies_to_a_virgin_transaction_and_stale_version_co
 
 
 @pytest.mark.integration
-def test_clear_allocations_reports_schema_limit_without_mutating_active_rows(
+def test_MONEY_12_clear_retracts_audited_and_can_restore_the_prior_allocation(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
     try:
-        _account_id, transaction_id = _transaction(engine, -10_000)
+        account_id, transaction_id = _transaction(engine, -10_000)
         state = allocate(
             engine,
             transaction_id,
@@ -382,17 +382,104 @@ def test_clear_allocations_reports_schema_limit_without_mutating_active_rows(
             actor="reviewer",
             expected_version=1,
         )
-        with pytest.raises(AppError) as error:
+        old = state.allocations[0]
+        cleared = clear_allocations(
+            engine,
+            transaction_id,
+            actor="reviewer-clear",
+            expected_version=state.version,
+        )
+        assert cleared.state == "unclassified"
+        assert cleared.allocations == ()
+        assert cleared.residual_cents == -10_000
+        assert cleared.version == state.version + 1
+
+        with session_scope(engine) as session:
+            retracted = session.get(Allocation, old.allocation_id)
+            decision = session.scalar(
+                select(ClassificationDecision).where(
+                    ClassificationDecision.transaction_id == transaction_id,
+                    ClassificationDecision.action == "clear",
+                )
+            )
+            audit = session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.target_type == "transaction",
+                    AuditEvent.target_id == transaction_id,
+                    AuditEvent.action == "allocation.retracted",
+                )
+            )
+            transaction = session.get(Transaction, transaction_id)
+            assert retracted is not None and retracted.retracted_at_utc is not None
+            assert (
+                decision is not None and retracted.retracted_by_decision_id == decision.decision_id
+            )
+            assert audit is not None and audit.before_json == decision.before_json
+            assert audit.after_json == "[]" and decision.after_json == "[]"
+            snapshot = json.loads(decision.before_json or "null")
+            assert snapshot[0]["allocation_id"] == old.allocation_id
+            assert transaction is not None
+            assert (transaction.account_id, transaction.amount_cents, transaction.raw_label) == (
+                account_id,
+                -10_000,
+                "Opération synthétique",
+            )
+
+        repeated = clear_allocations(
+            engine,
+            transaction_id,
+            actor="reviewer-clear",
+            expected_version=cleared.version,
+        )
+        assert repeated.version == cleared.version
+        with session_scope(engine) as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ClassificationDecision)
+                    .where(ClassificationDecision.transaction_id == transaction_id)
+                )
+                == 2
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == "allocation.retracted")
+                )
+                == 1
+            )
+        with pytest.raises(VersionConflictError):
             clear_allocations(
                 engine,
                 transaction_id,
-                actor="reviewer",
+                actor="reviewer-clear",
                 expected_version=state.version,
             )
-        assert error.value.code == "ALLOCATION_CLEAR_UNSUPPORTED_SCHEMA"
-        unchanged = get_allocation_state(engine, transaction_id)
-        assert unchanged.version == state.version
-        assert unchanged.allocations == state.allocations
+
+        restored = allocate(
+            engine,
+            transaction_id,
+            [
+                AllocationPart(
+                    snapshot[0]["flow_kind"],
+                    snapshot[0]["category_id"],
+                    snapshot[0]["amount_cents"],
+                    snapshot[0]["beneficiary"],
+                    snapshot[0]["cadence"],
+                    snapshot[0]["flexibility"],
+                    snapshot[0]["acquisition"],
+                )
+            ],
+            mode="complete",
+            origin="manual",
+            actor="reviewer-undo",
+            expected_version=cleared.version,
+        )
+        assert restored.state == "complete"
+        assert restored.allocations[0].category_id == old.category_id
+        assert restored.allocations[0].amount_cents == old.amount_cents
+        assert restored.version == cleared.version + 1
     finally:
         engine.dispose()
 

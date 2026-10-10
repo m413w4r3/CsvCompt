@@ -27,6 +27,7 @@ from app.services.balance_checks import (
 )
 from app.services.categories import require_database_ready
 from app.services.idempotency import sign_cursor, verify_cursor
+from app.services.transactions import sanitize_api_cents
 
 router = APIRouter()
 
@@ -80,7 +81,7 @@ class PeriodResponse(BaseModel):
     start: date
     end: date
     kind: Literal["calendar_month", "custom"]
-    completeness: Literal["complete", "partial", "unknown"]
+    completeness: Literal["complete", "partial", "unknown", "not_started"]
     as_of: date
 
 
@@ -104,6 +105,7 @@ class BalanceCheckResponse(BaseModel):
     end_balance_cents: int | None
     recalculated_balance_cents: int | None
     delta_cents: int | None
+    total_out_of_range: bool = False
     start_section_id: str | None
     end_section_id: str | None
     reason: str | None
@@ -218,21 +220,23 @@ def get_account_coverage(
     calendar_month = _month_bounds(period_start, period_end)
     as_of = request.app.state.clock().date()
     completeness = (
-        month_completeness(
-            account_key,
-            period_start.year,
-            period_start.month,
-            sections,
-            checks,
-            as_of=as_of,
+        "not_started"
+        if summary["status"] == "not_started"
+        else (
+            month_completeness(
+                account_key,
+                period_start.year,
+                period_start.month,
+                sections,
+                checks,
+                as_of=as_of,
+            )
+            if calendar_month
+            else summary["status"]
         )
-        if calendar_month
-        else summary["status"]
     )
     if completeness == "partial" and summary["status"] == "complete":
         summary["status"] = "partial"
-    if completeness == "not_started":
-        completeness = "partial"
     return {
         "period": {
             "start": period_start,
@@ -326,10 +330,12 @@ def get_balance_checks(
             },
             key,
         )
-    return {
-        "items": [check.as_dict() for check in page_items],
-        "page": {"limit": limit, "next_cursor": next_cursor},
-    }
+    return sanitize_api_cents(
+        {
+            "items": [check.as_dict() for check in page_items],
+            "page": {"limit": limit, "next_cursor": next_cursor},
+        }
+    )
 
 
 __all__ = ["router"]

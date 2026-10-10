@@ -58,10 +58,10 @@ def test_T06_IMP_06_upgrade_is_idempotent_and_migration_revision_is_stable(
     second = upgrade_to_head(settings)
     snapshot_after_second = _schema_snapshot(database)
 
-    assert first.revision == second.revision == "0001_initial"
+    assert first.revision == second.revision == "0002_t17_refund_safety"
     assert first.backup is None and second.backup is None
     assert snapshot_after_first == snapshot_after_second
-    assert migrate.current_revision(settings.database_url) == "0001_initial"
+    assert migrate.current_revision(settings.database_url) == "0002_t17_refund_safety"
 
 
 @pytest.mark.integration
@@ -137,7 +137,7 @@ def test_M06_data_loss_flag_never_disables_foreign_keys_during_upgrade(
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     database = tmp_path / "upgrade-with-downgrade-flag.sqlite"
     result = upgrade_to_head(_settings(database, tmp_path / "data"))
-    assert result.revision == "0001_initial"
+    assert result.revision == "0002_t17_refund_safety"
 
 
 @pytest.mark.integration
@@ -241,10 +241,13 @@ def test_T06_downgrade_refuses_business_data_without_explicit_backup(
 
     monkeypatch.delenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", raising=False)
     monkeypatch.delenv("COMPTES_DOWNGRADE_BACKUP", raising=False)
-    with pytest.raises(RuntimeError, match="downgrade refusé.*données métier"):
+    with pytest.raises(
+        RuntimeError,
+        match="downgrade 0002 refusé.*COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1.*sauvegarde vérifiée",
+    ):
         command.downgrade(_alembic_config(settings, operation="downgrade"), "base")
 
-    assert migrate.current_revision(settings.database_url) == "0001_initial"
+    assert migrate.current_revision(settings.database_url) == "0002_t17_refund_safety"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM accounts").fetchone() == (1,)
 
@@ -271,21 +274,47 @@ def test_T06_downgrade_succeeds_only_with_explicit_verified_backup(
         engine.dispose()
 
     backup = create_verified_backup(
-        database, settings.data_dir / "backups", source_revision="0001_initial"
+        database, settings.data_dir / "backups", source_revision="0002_t17_refund_safety"
     )
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup.database_path))
-    command.downgrade(_alembic_config(settings, operation="downgrade"), "base")
+    command.downgrade(
+        _alembic_config(settings, operation="downgrade"), "0001_initial"
+    )
 
     with sqlite3.connect(database) as connection:
-        app_tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%' AND name <> 'alembic_version'"
-        ).fetchall()
-        assert app_tables == [("local_extension",)]
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0001_initial",
+        )
+        assert connection.execute("SELECT count(*) FROM accounts").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='refund_link_allocation_parts'"
+        ).fetchone() is None
         assert connection.execute("SELECT value FROM local_extension").fetchone() == (
             "preserve-on-downgrade",
         )
+        downgraded_objects = tuple(
+            sorted(
+                connection.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE name NOT LIKE 'sqlite_%' "
+                    "AND name NOT IN ('alembic_version', 'local_extension')"
+                ).fetchall()
+            )
+        )
+    frozen_schema = Path(__file__).resolve().parents[2] / "app/db/migrations/sql/0001_initial.sql"
+    with sqlite3.connect(":memory:") as expected:
+        expected.executescript(frozen_schema.read_text(encoding="utf-8"))
+        frozen_objects = tuple(
+            sorted(
+                expected.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            )
+        )
+    assert downgraded_objects == frozen_objects
     with sqlite3.connect(backup.database_path) as copied:
         assert copied.execute("SELECT count(*) FROM accounts").fetchone() == (1,)
         assert copied.execute("SELECT count(*) FROM local_extension").fetchone() == (1,)
@@ -318,7 +347,7 @@ def test_T06_health_reports_initialization_schema_age_and_revision(tmp_path: Pat
     assert current["api_version"] == "1"
     assert current["storage_status"] == "ok"
     assert current["llm_enabled"] is False
-    assert current["database"] == {"status": "ok", "revision": "0001_initial"}
+    assert current["database"] == {"status": "ok", "revision": "0002_t17_refund_safety"}
 
 
 @pytest.mark.integration

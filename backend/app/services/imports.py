@@ -8,7 +8,7 @@ import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -21,11 +21,13 @@ from app.importers.normalize import normalize_label
 from app.importers.types import ParsedSection
 from app.services.app_secrets import ensure_hmac_key
 from app.services.import_preview_store import ImportPreviewStore
+from app.services.transactions import sanitize_api_cents
 
 _ACCOUNT_ROLES = {"current", "savings", "pea", "personal", "cash", "other"}
 _IBAN_LIKE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$", re.IGNORECASE)
 _SCRIPT_TAG = re.compile(r"<\s*/?\s*script\b", re.IGNORECASE)
 _INSTRUCTION_PATTERN = re.compile(r"\b(ignore|disregard|follow)\b", re.IGNORECASE)
+MAX_IMPORT_OPERATION_COUNT = 4_000
 
 
 def _d(value: date | None) -> str | None:
@@ -89,6 +91,98 @@ def _section_response(
     }
 
 
+def _link_candidates(
+    preview: dict[str, Any], parsed_sections: list[ParsedSection], engine: Engine
+) -> list[dict[str, Any]]:
+    """Return strict same-identity targets without exposing transaction labels."""
+
+    resolutions = preview.get("_resolutions", {}).get("account_mapping", {})
+    section_views = {item["section_index"]: item for item in preview.get("sections", [])}
+    out_of_period = {
+        (item["section"], item["row"])
+        for item in preview.get("_out_of_period_rows", [])
+        if isinstance(item.get("section"), int) and isinstance(item.get("row"), int)
+    }
+    requested: dict[tuple[str, date, int, str], list[tuple[int, int]]] = {}
+    for section in parsed_sections:
+        view = section_views.get(section.ordinal, {})
+        mapping = resolutions.get(str(section.ordinal), view.get("account_mapping", {}))
+        account_id = mapping.get("account_id") if isinstance(mapping, dict) else None
+        if not isinstance(account_id, str):
+            continue
+        for row in section.rows:
+            source_key = (section.ordinal, row.logical_row_idx)
+            if source_key not in out_of_period:
+                continue
+            identity = (
+                account_id,
+                row.booked_on,
+                row.amount_cents,
+                normalize_label(row.raw_label).identity_label.value,
+            )
+            requested.setdefault(identity, []).append(source_key)
+
+    candidates_by_identity: dict[tuple[str, date, int, str], list[dict[str, Any]]] = {
+        identity: [] for identity in requested
+    }
+    identities = list(requested)
+    # Keep each OR clause below SQLite's traditional 999-bind-variable limit.
+    with session_scope(engine) as session:
+        for offset in range(0, len(identities), 200):
+            chunk = identities[offset : offset + 200]
+            statement = select(Transaction).where(
+                or_(
+                    *(
+                        and_(
+                            Transaction.account_id == account_id,
+                            Transaction.booked_on == booked_on,
+                            Transaction.amount_cents == amount_cents,
+                            Transaction.identity_label == identity_label,
+                        )
+                        for account_id, booked_on, amount_cents, identity_label in chunk
+                    )
+                )
+            )
+            for transaction in session.scalars(statement):
+                identity = (
+                    transaction.account_id,
+                    transaction.booked_on,
+                    transaction.amount_cents,
+                    transaction.identity_label,
+                )
+                imported_at = transaction.imported_at_utc
+                if imported_at.tzinfo is None:
+                    imported_at = imported_at.replace(tzinfo=UTC)
+                candidates_by_identity[identity].append(
+                    {
+                        "transaction_id": transaction.transaction_id,
+                        "occurrence_rank": transaction.occurrence_rank,
+                        "imported_at_utc": imported_at.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+    for candidates in candidates_by_identity.values():
+        candidates.sort(key=lambda item: (item["occurrence_rank"], item["imported_at_utc"]))
+
+    return [
+        {
+            "section_index": section_index,
+            "logical_row_idx": logical_row_idx,
+            "candidates": list(candidates_by_identity[identity]),
+        }
+        for identity, source_keys in requested.items()
+        for section_index, logical_row_idx in source_keys
+    ]
+
+
+def refresh_link_candidates(
+    preview: dict[str, Any], raw_bytes: bytes, engine: Engine
+) -> None:
+    """Recompute available OUT_OF_PERIOD targets after a mapping change."""
+
+    parsed = parse_export(raw_bytes)
+    preview["_out_of_period_candidates"] = _link_candidates(preview, parsed.sections, engine)
+
+
 def _rejection_code(code: str) -> str:
     if code == "MISSING_PERIOD":
         return "SECTION_RANGE_REQUIRED"
@@ -122,6 +216,12 @@ def build_preview(
         raise AppError("FILE_TOO_LARGE", 413, "Le fichier dépasse la taille maximale autorisée.")
     key = ensure_hmac_key(engine)
     parsed = parse_export(raw_bytes, max_bytes=max_upload_bytes)
+    if parsed.operation_count > MAX_IMPORT_OPERATION_COUNT:
+        raise AppError(
+            "TOO_MANY_OPERATIONS",
+            413,
+            f"Le fichier dépasse le plafond de {MAX_IMPORT_OPERATION_COUNT} opérations par import.",
+        )
     file_hash = hashlib.sha256(raw_bytes).hexdigest()
     with session_scope(engine) as session:
         if (
@@ -338,6 +438,7 @@ def build_preview(
             for row in section.rows
         ],
         "_out_of_period_rows": list(out_of_period_rows),
+        "_out_of_period_candidates": [],
         "_out_of_period_omitted": len(all_out_of_period_rows) - len(out_of_period_rows),
         "_unresolvable_blocking_count": sum(
             1
@@ -351,6 +452,7 @@ def build_preview(
             a.code.value == "DUPLICATE_ACCOUNT_SECTION" for a in parsed.anomalies
         ),
     }
+    payload["_out_of_period_candidates"] = _link_candidates(payload, parsed.sections, engine)
     _recalculate(payload)
     return store.create(payload, raw_bytes)
 
@@ -370,6 +472,13 @@ def _recalculate(preview: dict[str, Any]) -> None:
         f"{item['section']}:{item['row']}" not in resolved_multiplicity
         for item in preview["_out_of_period_rows"]
     )
+    link_targets = [
+        resolved_multiplicity[f"{item['section']}:{item['row']}"].get("transaction_id")
+        for item in preview["_out_of_period_rows"]
+        if resolved_multiplicity.get(f"{item['section']}:{item['row']}", {}).get("action")
+        == "link_existing"
+    ]
+    duplicate_link_targets = len(link_targets) != len(set(link_targets))
     # Rebuild resolution-dependent rejections before reading their blocking state.
     preview["rejections"] = [
         rejection
@@ -379,6 +488,9 @@ def _recalculate(preview: dict[str, Any]) -> None:
             "ACCOUNT_MAPPING_REQUIRED",
             "DUPLICATE_ACCOUNT_SECTION",
             "DUPLICATE_ACCOUNT_ALIAS",
+            "MULTIPLICITY_RESOLUTION_INVALID",
+            "ACCOUNT_ALIAS_CONFLICT",
+            "ACCOUNT_FINGERPRINT_CONFLICT",
         }
     ]
     duplicate_mapped_accounts = False
@@ -447,6 +559,18 @@ def _recalculate(preview: dict[str, Any]) -> None:
                 "message": "Deux sections utilisent le même alias de compte.",
             }
         )
+    if duplicate_link_targets:
+        preview["rejections"].append(
+            {
+                "code": "MULTIPLICITY_RESOLUTION_INVALID",
+                "detail_code": None,
+                "severity": "blocking",
+                "section": None,
+                "logical_row_idx": None,
+                "field": "multiplicity",
+                "message": "Deux lignes hors période ciblent la même opération.",
+            }
+        )
     pending_blocking = (
         any(item["severity"] == "blocking" for item in preview["rejections"])
         or preview.get("_unresolvable_blocking_count", 0) > 0
@@ -458,6 +582,7 @@ def _recalculate(preview: dict[str, Any]) -> None:
             pending_range,
             pending_out_of_period,
             pending_blocking,
+            duplicate_link_targets,
             duplicate_mapped_accounts,
             preview["_structural_rejection"],
         )
@@ -756,8 +881,34 @@ def validate_link_existing_preview(
 
 def public_preview(preview: dict[str, Any]) -> dict[str, Any]:
     """Strip private resolution and identity metadata before producing the API response."""
-    return {
+    public = {
         key: value
         for key, value in preview.items()
         if not key.startswith("_") and key not in {"file_size_bytes", "created_at_utc"}
     }
+    safe_integer = 2**53 - 1
+    public_sections: list[dict[str, Any]] = []
+    for section in public.get("sections", []):
+        section = dict(section)
+        out_of_range = False
+        for field in ("debit_total_cents", "credit_total_cents", "net_cents"):
+            value = section.get(field)
+            if type(value) is int and abs(value) > safe_integer:
+                section[field] = None
+                out_of_range = True
+        section["total_out_of_range"] = out_of_range
+        public_sections.append(section)
+    public["sections"] = public_sections
+
+    resolutions = preview.get("_resolutions", {}).get("multiplicity", {})
+    unresolved = {
+        (item["section"], item["row"])
+        for item in preview.get("_out_of_period_rows", [])
+        if f"{item['section']}:{item['row']}" not in resolutions
+    }
+    public["out_of_period_candidates"] = [
+        item
+        for item in preview.get("_out_of_period_candidates", [])
+        if (item["section_index"], item["logical_row_idx"]) in unresolved
+    ]
+    return sanitize_api_cents(public)

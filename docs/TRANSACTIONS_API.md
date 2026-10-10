@@ -8,13 +8,21 @@ résumé calculé sur l'ensemble du filtre. Les filtres acceptés sont les
 `credit`), `amount_min_cents` et `amount_max_cents` (valeurs absolues), `q`,
 `import_file_id`, `classification` (`all` ou `unclassified`), `flow_kind`,
 `cursor` et `limit` (50 par défaut, 100 maximum). Les bornes de date sont
-inclusives. Une recherche de plus de 200 caractères, un enum inconnu, une plage
+inclusives. Les bornes de montant vont de zéro à `2^53 - 1` centimes; cette
+limite garde également les filtres signés dans une représentation exacte côté
+client. Une recherche de plus de 200 caractères, un enum inconnu, une plage
 inversée ou une limite invalide reçoit l'enveloppe d'erreur contractuelle.
 
 L'ordre est toujours `booked_on DESC, transaction_id DESC`. Le curseur HMAC lie
-les filtres canoniques, la dernière paire et le `snapshot_at` UTC. Les lignes
-créées après ce snapshot ne sont pas injectées dans une navigation en cours.
-Un curseur mal formé ou modifié répond `CURSOR_INVALID`.
+les filtres canoniques, la dernière paire, un identifiant opaque de snapshot et
+le `snapshot_at` UTC. Le snapshot est une lecture SQLite WAL épinglée à la
+visibilité observée lors de la première page; une écriture non committée est
+invisible sur toutes ses pages, même si elle est committée entre deux appels.
+Le snapshot reste en mémoire au plus cinq minutes et jusqu'à 32 navigations
+inachevées par processus; un redémarrage ou son expiration répond
+`CURSOR_STALE` et impose de relancer la liste. La valeur de recherche `q` n'est
+jamais sérialisée en clair dans le curseur. Un curseur mal formé ou modifié
+répond `CURSOR_INVALID` (422).
 
 ```json
 {
@@ -36,23 +44,34 @@ Un curseur mal formé ou modifié répond `CURSOR_INVALID`.
     "count": 1,
     "debit_total_cents": -1234,
     "credit_total_cents": 0,
-    "net_cents": -1234
+    "net_cents": -1234,
+    "total_out_of_range": false
   },
   "snapshot_at": "2026-10-10T12:00:00.000Z"
 }
 ```
 
 `summary` et `total_count` couvrent tout le filtre et non la page. Le total est
-exact, jamais estimé. Les sommes sont des additions d'entiers en centimes et
-peuvent être rapprochées des lignes avec une égalité exacte. La prévisualisation
+exact, jamais estimé. Les sommes sont des additions d'entiers en centimes. Si
+un total dépasse `2^53 - 1`, les totaux monétaires du résumé valent `null` et
+`total_out_of_range` vaut `true`; aucun entier monétaire non sûr n'atteint le
+client. La même règle s'applique aux champs de centimes des lignes, détails,
+résidus, allocations et contrôles de solde : la valeur non sûre devient `null`
+et l'objet concerné porte l'indicateur. La prévisualisation
 du libellé est coupée à 200 caractères; le serveur ne renvoie ni identité,
 empreinte, numéro de compte, chemin d'archive ni libellé dans les erreurs.
 
-`q` est borné à 200 caractères et comparé à la représentation `search_label`
-du parseur (casefold, décomposition des accents et normalisation des
-ponctuations/espaces). La recherche est une sous-chaîne et ne construit pas de
-motif SQL `LIKE`, donc `%`, `_`, guillemets et caractères Unicode restent
-littéraux. Les libellés recherchés ne devraient pas être copiés dans l'URL.
+`q` est borné à 200 caractères. Le serveur normalise d'abord la requête et
+chaque libellé avec `search_label` : casefold, décomposition Unicode NFKD,
+suppression des marques d'accent, puis ponctuations, caractères de contrôle et
+espaces ramenés à un séparateur espace unique, avec suppression des espaces
+aux extrémités. La recherche est une sous-chaîne de cette forme canonique.
+Ainsi `%`, `_` et les guillemets n'ont pas de sens spécial de motif SQL et ne
+restent pas littéraux : ils sont traités comme des séparateurs (`operation%`
+est équivalent à `operation`). Une requête composée uniquement de séparateurs
+se normalise en chaîne vide et n'ajoute donc aucun filtre `q`. Les lettres
+Unicode sont recherchées après casefold et suppression des marques d'accent.
+Les libellés recherchés ne devraient pas être copiés dans l'URL.
 
 `flow_kind` est calculé à partir des allocations actives; `unknown` sélectionne
 un résidu signé non nul. Sans ventilation, le résidu est le montant entier et

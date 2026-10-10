@@ -6,6 +6,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine
 
 from app.core.config import Settings, get_settings
@@ -48,20 +49,36 @@ def run_migrations_online() -> None:
         with engine.connect() as connection:
             operation = _operation()
             dbapi_connection = connection.connection.driver_connection
+            foreign_keys_disabled = False
             if (
                 operation == "downgrade"
                 and os.environ.get("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE") == "1"
             ):
-                # PRAGMA foreign_keys ne peut être modifié après BEGIN. Il n'est
-                # désactivé que pour un downgrade explicitement destructif.
+                # Les reconstructions SQLite des migrations exigent cette bascule
+                # avant BEGIN. La migration valide ensuite foreign_key_check.
                 assert dbapi_connection is not None
                 dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+                foreign_keys_disabled = True
             elif dbapi_connection is not None:
                 fk_enabled = dbapi_connection.execute("PRAGMA foreign_keys").fetchone()
                 if fk_enabled != (1,):
                     raise RuntimeError("foreign_keys doit rester actif hors downgrade destructif")
             if operation == "upgrade":
                 assert dbapi_connection is not None
+                head_revision = ScriptDirectory.from_config(config).get_current_head()
+                version_table_exists = (
+                    dbapi_connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='alembic_version'"
+                    ).fetchone()
+                    is not None
+                )
+                current_revision = (
+                    dbapi_connection.execute("SELECT version_num FROM alembic_version").fetchone()
+                    if version_table_exists
+                    else None
+                )
+                needs_migration = current_revision != (head_revision,)
                 has_schema = (
                     dbapi_connection.execute(
                         "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
@@ -73,6 +90,11 @@ def run_migrations_online() -> None:
                         "upgrade direct refusé sur une base non vide; utilisez "
                         "uv run python -m app.db.migrate upgrade pour la sauvegarde vérifiée"
                     )
+                # Les reconstructions SQLite exigent cette bascule avant BEGIN.
+                # Un upgrade déjà à la tête reste strictement en lecture seule.
+                if needs_migration:
+                    dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+                    foreign_keys_disabled = True
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
@@ -80,8 +102,28 @@ def run_migrations_online() -> None:
                 transactional_ddl=True,
                 transaction_per_migration=True,
             )
-            with context.begin_transaction():
-                context.run_migrations()
+            try:
+                with context.begin_transaction():
+                    context.run_migrations()
+                    assert dbapi_connection is not None
+                    integrity = dbapi_connection.execute("PRAGMA integrity_check").fetchone()
+                    violations = dbapi_connection.execute("PRAGMA foreign_key_check").fetchmany(10)
+                    if integrity != ("ok",):
+                        raise RuntimeError(
+                            f"migration SQLite refusée : integrity_check={integrity!r}"
+                        )
+                    if violations:
+                        raise RuntimeError(
+                            "migration SQLite refusée : foreign_key_check signale "
+                            f"{len(violations)} violation(s)"
+                        )
+            finally:
+                if foreign_keys_disabled and dbapi_connection is not None:
+                    if dbapi_connection.in_transaction:
+                        dbapi_connection.execute("ROLLBACK")
+                    dbapi_connection.execute("PRAGMA foreign_keys=ON")
+                    if dbapi_connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
+                        raise RuntimeError("foreign_keys n'a pas été réactivé après migration")
     finally:
         engine.dispose()
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+from typing import Any
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -7,6 +10,7 @@ from hypothesis import strategies as st
 from app.domain.money_split import (
     MoneySplitError,
     prorate_link,
+    prorate_link_bounded,
     split_by_amounts,
     split_by_basis_points,
 )
@@ -86,6 +90,76 @@ def test_ADR_024_3_prorates_refund_by_category_with_exact_remainder() -> None:
     }
 
 
+def test_MONEY_15_bounded_largest_remainder_handles_tiny_and_four_category_links() -> None:
+    allocations = [
+        ("groceries", -2_500),
+        ("restaurants", -2_500),
+        ("health", -2_500),
+        ("housing", -2_500),
+    ]
+    assert prorate_link(2, allocations) == {
+        "groceries": 1,
+        "health": 1,
+        "housing": 0,
+        "restaurants": 0,
+    }
+    assert prorate_link(4, [(f"category-{index}", -1) for index in range(4)]) == {
+        "category-0": 1,
+        "category-1": 1,
+        "category-2": 1,
+        "category-3": 1,
+    }
+
+
+@st.composite
+def _bounded_prorata_cases(draw: Any) -> tuple[list[tuple[str, int]], dict[str, int], int]:
+    count = draw(st.integers(min_value=1, max_value=8))
+    weights = [draw(st.integers(min_value=1, max_value=10**15)) for _ in range(count)]
+    capacities = [draw(st.integers(min_value=1, max_value=weight)) for weight in weights]
+    total_capacity = sum(capacities)
+    amount = draw(
+        st.one_of(
+            st.integers(min_value=1, max_value=min(20, total_capacity)),
+            st.integers(min_value=1, max_value=total_capacity),
+            st.just(total_capacity),
+            st.integers(min_value=total_capacity + 1, max_value=total_capacity + 10**15),
+        )
+    )
+    allocations = [(f"category-{index:02d}", -weight) for index, weight in enumerate(weights)]
+    caps = {f"category-{index:02d}": capacity for index, capacity in enumerate(capacities)}
+    return allocations, caps, amount
+
+
+@st.composite
+def _bounded_link_sequences(
+    draw: Any,
+) -> tuple[list[tuple[str, int]], dict[str, int], list[int]]:
+    count = draw(st.integers(min_value=1, max_value=8))
+    weights = [draw(st.integers(min_value=1, max_value=10**15)) for _ in range(count)]
+    capacities = [draw(st.integers(min_value=1, max_value=weight)) for weight in weights]
+    total_capacity = sum(capacities)
+    linked_total = draw(st.integers(min_value=1, max_value=total_capacity))
+    link_count = draw(st.integers(min_value=1, max_value=min(6, linked_total)))
+    if link_count == 1:
+        amounts = [linked_total]
+    else:
+        boundaries = sorted(
+            draw(
+                st.lists(
+                    st.integers(min_value=1, max_value=linked_total - 1),
+                    min_size=link_count - 1,
+                    max_size=link_count - 1,
+                    unique=True,
+                )
+            )
+        )
+        points = [0, *boundaries, linked_total]
+        amounts = [right - left for left, right in zip(points, points[1:], strict=False)]
+    allocations = [(f"category-{index:02d}", -weight) for index, weight in enumerate(weights)]
+    caps = {f"category-{index:02d}": capacity for index, capacity in enumerate(capacities)}
+    return allocations, caps, amounts
+
+
 @given(
     amount=st.integers(min_value=4, max_value=10**9),
     first_weight=st.integers(min_value=2_500, max_value=7_500),
@@ -103,17 +177,54 @@ def test_MONEY_01_properties_conserve_sign_and_ignore_input_order(
     assert all(value != 0 and (value > 0) == (signed_amount > 0) for value in forward.values())
 
 
-@given(
-    amount=st.integers(min_value=1, max_value=10**9),
-    first_weight=st.integers(min_value=1, max_value=10**9),
-    second_weight=st.integers(min_value=1, max_value=10**9),
-)
-def test_MONEY_10_prorata_properties_total_and_input_order(
-    amount: int, first_weight: int, second_weight: int
+@given(case=_bounded_prorata_cases())
+def test_MONEY_15_prorata_is_bounded_exact_deterministic_and_conservative(
+    case: tuple[list[tuple[str, int]], dict[str, int], int],
 ) -> None:
-    allocations = [("groceries", -first_weight), ("restaurants", -second_weight)]
-    forward = prorate_link(amount, allocations)
-    backward = prorate_link(amount, list(reversed(allocations)))
+    allocations, capacities, amount = case
+    total_capacity = sum(capacities.values())
+    if amount > total_capacity:
+        with pytest.raises(MoneySplitError, match="REFUND_PRORATA_INFEASIBLE"):
+            prorate_link_bounded(amount, allocations, capacities)
+        return
+
+    forward = prorate_link_bounded(amount, allocations, capacities)
+    backward = prorate_link_bounded(amount, list(reversed(allocations)), capacities)
     assert forward == backward
     assert sum(forward.values()) == amount
-    assert all(value >= 0 for value in forward.values())
+    assert set(forward) == set(capacities)
+    assert all(0 <= value <= capacities[category] for category, value in forward.items())
+
+
+def test_MONEY_15_prorata_refuses_when_remaining_capacity_is_insufficient() -> None:
+    with pytest.raises(MoneySplitError, match="REFUND_PRORATA_INFEASIBLE"):
+        prorate_link_bounded(
+            3,
+            [("groceries", -5), ("restaurants", -5)],
+            {"groceries": 1, "restaurants": 1},
+        )
+
+
+@given(case=_bounded_link_sequences())
+def test_MONEY_15_varied_link_orders_never_exceed_category_capacity(
+    case: tuple[list[tuple[str, int]], dict[str, int], list[int]],
+) -> None:
+    allocations, initial_capacities, amounts = case
+    orders: Iterable[list[int]] = (
+        amounts,
+        list(reversed(amounts)),
+        sorted(amounts),
+        sorted(amounts, reverse=True),
+        amounts[1:] + amounts[:1],
+    )
+    for order in {tuple(candidate) for candidate in orders}:
+        remaining = dict(initial_capacities)
+        for amount in order:
+            parts = prorate_link_bounded(amount, allocations, remaining)
+            assert sum(parts.values()) == amount
+            assert all(0 <= part <= remaining[category] for category, part in parts.items())
+            remaining = {
+                category: remaining[category] - parts[category] for category in remaining
+            }
+        assert all(capacity >= 0 for capacity in remaining.values())
+        assert sum(initial_capacities.values()) - sum(remaining.values()) == sum(order)

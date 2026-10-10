@@ -4,6 +4,8 @@
 # Échoue (code 1) si les fichiers suivis (git ls-files) contiennent :
 #   - un fichier *.csv hors backend/tests/fixtures/
 #   - un fichier *.sqlite* (sqlite, sqlite3, sqlite-wal, sqlite-shm...)
+#   - une sauvegarde *.cfbackup (suivie, non suivie ou ignorée)
+#   - un export application family-export-*.json ou family-export-*.csv
 #   - un fichier .env (ou .env.*), sauf .env.example
 #   - tmp.zip
 #   - un chemin sous csv_references/
@@ -47,6 +49,21 @@ list_files() {
   if [ "$with_untracked" -eq 1 ]; then
     git ls-files -z --others --exclude-standard
   fi
+  git ls-files -z --others --exclude-standard -- \
+    ':(icase,glob)family-export-*.json' \
+    ':(icase,glob)**/family-export-*.json' \
+    ':(icase,glob)family-export-*.csv' \
+    ':(icase,glob)**/family-export-*.csv'
+  # Sauvegardes et exports restent interdits même si leurs motifs sont ignorés par Git.
+  git ls-files -z --others --ignored --exclude-standard -- \
+    ':(icase,glob)*.cfbackup' \
+    ':(icase,glob)**/*.cfbackup' \
+    ':(icase,glob)*.cfbackup.*.tmp' \
+    ':(icase,glob)**/*.cfbackup.*.tmp' \
+    ':(icase,glob)family-export-*.json' \
+    ':(icase,glob)**/family-export-*.json' \
+    ':(icase,glob)family-export-*.csv' \
+    ':(icase,glob)**/family-export-*.csv'
 }
 
 checked=0
@@ -77,6 +94,16 @@ while IFS= read -r -d '' f; do
     .env|.env.*) report "fichier d'environnement suivi : $f" ;;
   esac
   [ "$base" = "tmp.zip" ] && report "archive tmp.zip suivie : $f"
+  case "$base" in
+    *.cfbackup|*.cfbackup.*.tmp)
+      report "archive .cfbackup détectée (nom masqué)"
+      continue
+      ;;
+    family-export-*.json|family-export-*.csv)
+      report "export applicatif détecté (nom masqué)"
+      continue
+      ;;
+  esac
 
   # --- Contrôles sur le contenu (fichiers texte uniquement ; -I ignore les binaires) ---
   [ "$f" = "scripts/check_no_private_data.sh" ] && continue

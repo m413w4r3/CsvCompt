@@ -12,7 +12,6 @@ from app.db.models import Base
 
 ROOT = Path(__file__).resolve().parents[3]
 REFERENCE_SQL = ROOT / "docs" / "examples" / "schema.sql"
-EMBEDDED_SQL = ROOT / "backend" / "app" / "db" / "migrations" / "sql" / "0001_initial.sql"
 
 
 def _normalized_sql(sql: str | None) -> str | None:
@@ -45,10 +44,9 @@ def _sqlite_affinity(declared_type: str) -> str:
 
 
 @pytest.mark.integration
-def test_T06_schema_reference_bytes_and_sqlite_master_objects_match_migration(
+def test_T06_schema_reference_sqlite_master_objects_match_migration(
     tmp_path: Path,
 ) -> None:
-    assert EMBEDDED_SQL.read_bytes() == REFERENCE_SQL.read_bytes()
     reference_db = tmp_path / "reference.sqlite"
     migrated_db = tmp_path / "migrated.sqlite"
     with sqlite3.connect(reference_db) as connection:
@@ -63,9 +61,9 @@ def test_T06_schema_reference_bytes_and_sqlite_master_objects_match_migration(
     reference_objects = _objects(reference_db)
     migrated_objects = _objects(migrated_db)
     assert migrated_objects == reference_objects
-    assert sum(item[0] == "table" for item in migrated_objects) == 28
-    assert sum(item[0] == "index" for item in migrated_objects) == 33
-    assert sum(item[0] == "trigger" for item in migrated_objects) == 65
+    assert sum(item[0] == "table" for item in migrated_objects) == 29
+    assert sum(item[0] == "index" for item in migrated_objects) == 34
+    assert sum(item[0] == "trigger" for item in migrated_objects) == 75
 
 
 @pytest.mark.integration
