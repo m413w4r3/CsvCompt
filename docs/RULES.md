@@ -15,6 +15,9 @@ Pour une transaction, le moteur ordonne les candidats dans cet ordre :
    décision d'acceptation humaine (y compris une décision explicite de vider ou
    rejeter), ou allocation `history`/`llm` acceptée. Cette décision bloque les
    règles et suggestions. L'allocation présente est rendue comme état confirmé.
+   Une décision `clear` reste un verrou même si son état `before` contenait une
+   allocation d'origine `rule` : ce snapshot décrit ce qui a été retiré, tandis
+   que `clear` matérialise le choix humain de revenir à « non ventilée ».
 2. **Règle déterministe approuvée** : priorité numérique croissante (0 est la
    plus haute), puis ID de règle pour rendre l'ordre stable. Si plusieurs règles
    de priorité minimale proposent des actions différentes, il n'y a pas de
@@ -98,30 +101,31 @@ simulation inclut aussi sa durée de balayage en nanosecondes.
 
 `apply_rule()` exige une règle approuvée, sa version attendue et un acteur. Il
 refait la simulation, ignore les décisions humaines, transactions déjà
-classées, exceptions et conflits, puis appelle `allocations.allocate()` avec
-`origin='rule'`, `mode='complete'` et la version de transaction du précontrôle.
-Un rejeu ne touche pas une transaction déjà exécutée. Chaque application
-allant jusqu'à l'écriture de sa trace reçoit une ligne `rule_executions` et un
-`audit_event`; ces deux lignes incluent la version de règle dans leurs
-snapshots avant/après. La séparation entre écriture de l'allocation et écriture
-de la trace est une limite connue, détaillée ci-dessous.
+classées, exceptions et conflits. Pour chaque opération, il ouvre une
+transaction d'écriture, revalide sous le verrou SQLite la version et
+l'approbation de la règle, puis appelle
+`allocations.allocate_in_session()` avec `origin='rule'`, `mode='complete'` et
+la version de transaction du précontrôle.
+Une transaction explicitement vidée par une personne est rapportée parmi les
+opérations ignorées comme décisions humaines, même si la ventilation retirée
+avait été appliquée par une règle antérieure.
+L'allocation, sa décision/audit et les lignes `rule_executions` et
+`audit_event` sont validés dans la même transaction. Les snapshots de trace
+contiennent la version de règle. Si la trace échoue, l'allocation est annulée;
+un rejeu après succès retrouve l'exécution et ne touche pas l'allocation.
 
-### Limite transactionnelle à arbitrer (proposition ADR-029)
+### Limite transactionnelle du lot (proposition ADR-029)
 
-Le service v1 `allocate(engine, ...)` ouvre et valide sa propre transaction
-SQLite pour **une** transaction. T19 ne peut donc pas, sans changer cette API,
-inclure un lot de transactions, leurs allocations et leurs `rule_executions` /
-`audit_events` dans un unique commit. L'implémentation prévalide le lot, puis
-chaque allocation est atomique et optimiste, avec sa trace écrite ensuite dans
-une transaction append-only. Une panne ou une concurrence sur un élément tardif
-peut laisser les éléments précédents déjà appliqués. T19 ne prétend pas que le
-lot est atomique.
+Chaque opération traitée et sa trace forment une unité atomique, mais une
+application portant sur plusieurs transactions n'est pas un commit unique. Si
+une opération tardive échoue, les opérations précédentes restent appliquées et
+tracées; un rejeu les saute de manière idempotente et poursuit les autres.
+Cette limite conserve le résultat vérifiable et ne laisse pas d'allocation
+sans trace, mais ne fournit pas l'annulation atomique du lot.
 
-**Proposition d'arbitrage** : T20 ajoute un cœur `allocate_in_session(session,
-...)` tout en gardant `allocate(engine, ...)` comme façade compatible ; T19/T20
-utilisent ce cœur sous un unique `write_transaction()`. Ajouter un identifiant
-de lot et `rule_version` dans `rule_executions` avec une migration propre après
-gel de `0001` :
+**Proposition d'arbitrage** : T20 peut ajouter un identifiant de lot et une
+colonne `rule_version` structurée à `rule_executions` avec une migration propre
+après gel de `0001` :
 
 ```sql
 ALTER TABLE rule_executions ADD COLUMN batch_id TEXT;
@@ -129,19 +133,9 @@ ALTER TABLE rule_executions ADD COLUMN rule_version INTEGER;
 CREATE INDEX ix_rule_executions_batch_id ON rule_executions(batch_id);
 ```
 
-Cela permet l'atomicité des allocations, audits et exécutions, le rollback
-complet et la reprise idempotente du lot. Aucune
-signature existante ni migration n'est changée par T19.
+Cela permettrait d'annuler ou reprendre un lot entier et de filtrer ses
+exécutions. T19 conserve la version dans les snapshots avant/après et ne change
+pas le schéma.
 
-Deux fenêtres de panne supplémentaires découlent de cette séparation : si
-l'allocation réussit et l'écriture ultérieure de `rule_executions`/`audit_events`
-échoue, le rejeu voit une transaction déjà classée et ne répare pas la trace ;
-et la relecture de version/statut approuvé n'est pas verrouillée avec
-`allocate()`, donc une modification concurrente peut survenir entre ce contrôle
-et l'allocation. Le même cœur transactionnel doit verrouiller/revalider la règle
-et écrire son allocation et ses traces sous le même commit. Ces fenêtres sont
-connues et ne sont pas masquées par les tests actuels.
-
-Cette limite empêche de déclarer satisfait le critère « jamais d'écriture
-partielle » pour une application multi-transaction jusqu'à l'arbitrage et au
-travail T20.
+Si une règle est modifiée ou désactivée depuis la simulation, sa nouvelle
+version est détectée sous le verrou et l’opération échoue sans allocation.

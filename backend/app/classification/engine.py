@@ -35,13 +35,14 @@ from app.db.models import (
     ClassificationDecision,
     ClassificationSuggestion,
     Payee,
+    Rule,
     RuleExecution,
     Transaction,
 )
 from app.db.session import session_scope, write_transaction
 from app.domain.types import FlowKind
 from app.importers.normalize import search_label
-from app.services.allocations import AllocationState, allocate
+from app.services.allocations import AllocationState, allocate_in_session
 
 MAX_SIMULATION_TRANSACTIONS = 10_000
 MAX_PAGE_SIZE = 1_000
@@ -207,7 +208,14 @@ def _json_allocations(rows: list[Allocation]) -> tuple[dict[str, str | int], ...
 
 
 def _decision_has_rule_origin(decision: ClassificationDecision) -> bool:
-    """Rule writes encode their origin in the allocation snapshots."""
+    """Rule writes encode their origin in snapshots; a human clear has none.
+
+    A clear decision can have a rule-origin allocation in its ``before_json``.
+    That describes what was removed, not who made the clear, so it must not
+    make the explicit human decision look like another rule execution.
+    """
+    if decision.action == "clear":
+        return False
     for serialized in (decision.before_json, decision.after_json):
         if not serialized:
             continue
@@ -760,7 +768,7 @@ def _simulate_all_pages(
 
 
 def _trace_execution(
-    engine: Engine,
+    session: Session,
     *,
     rule: RuleRecord,
     transaction_id: str,
@@ -783,43 +791,50 @@ def _trace_execution(
         before_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     after_json = json.dumps(after_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    with write_transaction(engine) as session:
-        existing = session.scalar(
-            select(RuleExecution.rule_execution_id)
-            .where(
-                RuleExecution.rule_id == rule.rule_id,
-                RuleExecution.transaction_id == transaction_id,
-                RuleExecution.outcome.in_(("applied", "skipped_manual", "skipped_scope")),
-                RuleExecution.dry_run == 0,
-            )
-            .limit(1)
+    existing = session.scalar(
+        select(RuleExecution.rule_execution_id)
+        .where(
+            RuleExecution.rule_id == rule.rule_id,
+            RuleExecution.transaction_id == transaction_id,
+            RuleExecution.outcome.in_(("applied", "skipped_manual", "skipped_scope")),
+            RuleExecution.dry_run == 0,
         )
-        if existing is not None:
-            return
-        session.add(
-            AuditEvent(
-                audit_event_id=event_id,
-                target_type="transaction",
-                target_id=transaction_id,
-                action=f"rule.{outcome}",
-                actor=actor,
-                before_json=before_json,
-                after_json=after_json,
-            )
+        .limit(1)
+    )
+    if existing is not None:
+        return
+    session.add(
+        AuditEvent(
+            audit_event_id=event_id,
+            target_type="transaction",
+            target_id=transaction_id,
+            action=f"rule.{outcome}",
+            actor=actor,
+            before_json=before_json,
+            after_json=after_json,
         )
-        session.flush()
-        session.add(
-            RuleExecution(
-                rule_execution_id=str(uuid.uuid4()),
-                rule_id=rule.rule_id,
-                transaction_id=transaction_id,
-                outcome=outcome,
-                before_json=before_json,
-                after_json=after_json,
-                dry_run=0,
-                audit_event_id=event_id,
-            )
+    )
+    session.flush()
+    session.add(
+        RuleExecution(
+            rule_execution_id=str(uuid.uuid4()),
+            rule_id=rule.rule_id,
+            transaction_id=transaction_id,
+            outcome=outcome,
+            before_json=before_json,
+            after_json=after_json,
+            dry_run=0,
+            audit_event_id=event_id,
         )
+    )
+
+
+def _revalidate_rule_for_write(session: Session, rule_id: str, expected_version: int) -> None:
+    current_rule = session.get(Rule, rule_id)
+    if current_rule is None or current_rule.version != expected_version:
+        raise VersionConflictError()
+    if current_rule.is_approved != 1 or current_rule.is_active != 1:
+        raise _fail("RULE_NOT_APPROVED", "Seule une règle approuvée peut être appliquée.", 409)
 
 
 def apply_rule(
@@ -833,9 +848,10 @@ def apply_rule(
 ) -> RuleApplication:
     """Explicitly apply an approved rule to selected/current existing transactions.
 
-    Each allocation is committed by the canonical allocation service. The
-    corresponding rule-execution/audit record follows in its own write unit;
-    see docs/RULES.md for this pre-T20 schema/service transaction boundary.
+    Each transaction's allocation, decision audit, and rule-execution trace
+    commit together through the canonical allocation service. A multi-
+    transaction application can commit earlier transactions before a later
+    one fails.
     """
     started = time.perf_counter_ns()
     if type(expected_version) is not int:
@@ -908,15 +924,17 @@ def apply_rule(
     for transaction_id in target_ids:
         if transaction_id in manual_ids:
             skipped_manual.append(transaction_id)
-            _trace_execution(
-                engine,
-                rule=rule,
-                transaction_id=transaction_id,
-                actor=actor.strip(),
-                outcome="skipped_manual",
-                before=None,
-                after=None,
-            )
+            with write_transaction(engine) as session:
+                _revalidate_rule_for_write(session, rule_id, expected_version)
+                _trace_execution(
+                    session,
+                    rule=rule,
+                    transaction_id=transaction_id,
+                    actor=actor.strip(),
+                    outcome="skipped_manual",
+                    before=None,
+                    after=None,
+                )
             continue
         if transaction_id in conflict_ids:
             continue
@@ -926,44 +944,57 @@ def apply_rule(
                 skipped_classified.append(transaction_id)
             continue
 
-        # Recheck rule version before delegating each transaction's optimistic
-        # write to the single-allocation service.
-        current_rule = get_rule(engine, rule_id)
-        if current_rule.version != expected_version or current_rule.status != "approved":
-            raise VersionConflictError()
-        state = allocate(
-            engine,
-            transaction_id,
-            action_parts(rule.action, row.amount_cents),
-            mode="complete",
-            origin="rule",
-            actor=actor.strip(),
-            expected_version=row.transaction_version,
-        )
+        # Rule version, allocation and trace share one write transaction. A
+        # failed trace rolls back the classification instead of leaving an
+        # untraceable applied allocation behind.
+        with write_transaction(engine) as session:
+            _revalidate_rule_for_write(session, rule_id, expected_version)
+            prior_execution = session.scalar(
+                select(RuleExecution.rule_execution_id)
+                .where(
+                    RuleExecution.rule_id == rule_id,
+                    RuleExecution.transaction_id == transaction_id,
+                    RuleExecution.outcome == "applied",
+                    RuleExecution.dry_run == 0,
+                )
+                .limit(1)
+            )
+            if prior_execution is not None:
+                skipped_classified.append(transaction_id)
+                continue
+            state = allocate_in_session(
+                session,
+                transaction_id,
+                action_parts(rule.action, row.amount_cents),
+                mode="complete",
+                origin="rule",
+                actor=actor.strip(),
+                expected_version=row.transaction_version,
+            )
+            after: list[dict[str, str | int]] = [
+                {
+                    "category_id": item.category_id,
+                    "flow_kind": item.flow_kind,
+                    "amount_cents": item.amount_cents,
+                    "origin": item.origin,
+                    "beneficiary": item.beneficiary,
+                    "cadence": item.cadence,
+                    "flexibility": item.flexibility,
+                    "acquisition": item.acquisition,
+                }
+                for item in state.allocations
+            ]
+            _trace_execution(
+                session,
+                rule=rule,
+                transaction_id=transaction_id,
+                actor=actor.strip(),
+                outcome="applied",
+                before=[],
+                after=after,
+            )
         allocations.append(state)
         applied_ids.append(transaction_id)
-        after: list[dict[str, str | int]] = [
-            {
-                "category_id": item.category_id,
-                "flow_kind": item.flow_kind,
-                "amount_cents": item.amount_cents,
-                "origin": item.origin,
-                "beneficiary": item.beneficiary,
-                "cadence": item.cadence,
-                "flexibility": item.flexibility,
-                "acquisition": item.acquisition,
-            }
-            for item in state.allocations
-        ]
-        _trace_execution(
-            engine,
-            rule=rule,
-            transaction_id=transaction_id,
-            actor=actor.strip(),
-            outcome="applied",
-            before=[],
-            after=after,
-        )
 
     return RuleApplication(
         rule_id=rule_id,

@@ -288,6 +288,34 @@ def _record(row: Allocation) -> AllocationRecord:
     )
 
 
+def _state_in_session(
+    session: Session, transaction: Transaction, rows: Sequence[Allocation] | None = None
+) -> AllocationState:
+    active = (
+        list(rows) if rows is not None else _active_allocations(session, transaction.transaction_id)
+    )
+    records = tuple(_record(row) for row in active)
+    residual = transaction.amount_cents - sum(row.amount_cents for row in active)
+    if not active:
+        state: Literal["unclassified", "partial", "complete"] = "unclassified"
+    elif residual == 0:
+        state = "complete"
+    else:
+        state = "partial"
+    flows = {row.flow_kind for row in active}
+    if not active or residual != 0:
+        flows.add(FlowKind.UNKNOWN.value)
+    return AllocationState(
+        transaction_id=transaction.transaction_id,
+        transaction_amount_cents=transaction.amount_cents,
+        version=transaction.version,
+        allocations=records,
+        residual_cents=residual,
+        state=state,
+        derived_flow_kinds=tuple(sorted(flows)),
+    )
+
+
 def _active_allocations(session: Session, transaction_id: str) -> list[Allocation]:
     return list(
         session.scalars(
@@ -458,6 +486,128 @@ def _write_decision_and_audit(
 
 
 @_translate_integrity_errors
+def allocate_in_session(
+    session: Session,
+    transaction_id: str,
+    parts: Sequence[AllocationPart | Mapping[str, object]],
+    *,
+    mode: AllocationMode,
+    origin: AllocationOrigin | Origin | str,
+    actor: str,
+    expected_version: int,
+) -> AllocationState:
+    """Confirm allocations within the caller's transaction.
+
+    The caller owns commit/rollback. ``expected_version`` refers to the
+    transaction's aggregate version; callers that combine this write with
+    related records can keep the whole operation in one SQLite transaction.
+    """
+    actor_value = _actor_value(actor)
+    origin_value = _origin_value(origin)
+    expected = _strict_int(expected_version, "expected_version")
+    audit_event_id = str(uuid.uuid4())
+
+    transaction = session.get(Transaction, transaction_id)
+    if transaction is None:
+        raise _fail("TRANSACTION_NOT_FOUND", 404, "Transaction introuvable.")
+    if transaction.version != expected:
+        raise VersionConflictError()
+
+    normalized_parts = _normalize_parts(
+        parts,
+        transaction_amount_cents=transaction.amount_cents,
+        mode=mode,
+    )
+    current = _active_allocations(session, transaction_id)
+    if _same_allocation_content(current, normalized_parts):
+        return _state_in_session(session, transaction, current)
+
+    if (
+        any(row.origin == Origin.MANUAL.value for row in current)
+        and origin_value is not Origin.MANUAL
+    ):
+        raise _fail(
+            "HUMAN_DECISION_PROTECTED",
+            409,
+            "Une allocation confirmée manuellement ne peut être remplacée que "
+            "par une action manuelle.",
+        )
+    if origin_value is Origin.RULE and (current or _has_any_decision(session, transaction_id)):
+        raise _fail(
+            "RULE_REQUIRES_UNCLASSIFIED_TRANSACTION",
+            409,
+            "Une règle ne peut classer qu'une transaction sans décision préalable.",
+        )
+    if origin_value in (Origin.HISTORY, Origin.LLM) and current:
+        raise _fail(
+            "SUGGESTION_REQUIRES_REVIEW",
+            409,
+            "Une proposition historique ou LLM ne remplace pas une allocation confirmée.",
+        )
+    if current and _active_link_exists(session, transaction_id):
+        raise _fail(
+            "ALLOCATION_HAS_CONFIRMED_REFUND_LINK",
+            409,
+            "Cette transaction participe à un remboursement confirmé; revoyez d'abord le lien.",
+        )
+
+    if current:
+        _reject_proposed_links_after_allocation_change(session, transaction_id, actor_value)
+
+    new_allocation_ids = [str(uuid.uuid4()) for _ in normalized_parts]
+    after_json_value = _requested_json(normalized_parts, new_allocation_ids, origin_value.value)
+    before_json_value = _allocation_json(current)
+    action = "confirm" if not current else ("split" if len(normalized_parts) > 1 else "edit")
+    audit_action = "allocation.confirmed" if not current else "allocation.superseded"
+    _write_decision_and_audit(
+        session,
+        transaction_id=transaction_id,
+        actor=actor_value,
+        action=action,
+        audit_action=audit_action,
+        before=before_json_value or None,
+        after=after_json_value,
+        audit_event_id=audit_event_id,
+    )
+    session.flush()
+
+    if current:
+        replacement_id = new_allocation_ids[0]
+        for old in current:
+            old.superseded_by_allocation_id = replacement_id
+            old.superseded_by_audit_event_id = audit_event_id
+            old.version += 1
+        # n-11: make the old rows inactive before inserting their replacements.
+        # Both supersession foreign keys are DEFERRABLE INITIALLY DEFERRED.
+        session.flush()
+
+    new_rows = [
+        Allocation(
+            allocation_id=allocation_id,
+            transaction_id=transaction_id,
+            category_id=part.category_id,
+            flow_kind=part.flow_kind.value,
+            amount_cents=part.amount_cents,
+            origin=origin_value.value,
+            decision="confirmed",
+            beneficiary=part.beneficiary.value,
+            cadence=part.cadence.value,
+            flexibility=part.flexibility.value,
+            acquisition=part.acquisition.value,
+        )
+        for allocation_id, part in zip(new_allocation_ids, normalized_parts, strict=True)
+    ]
+    session.add_all(new_rows)
+    session.flush()
+
+    # The row's bank-source columns remain untouched; its version is the
+    # transaction-wide optimistic token shared with classification writes.
+    transaction.version += 1
+    session.flush()
+    return _state_in_session(session, transaction, new_rows)
+
+
+@_translate_integrity_errors
 def allocate(
     engine: Engine,
     transaction_id: str,
@@ -474,111 +624,17 @@ def allocate(
     ``BEGIN IMMEDIATE`` serializes competing writers before this value and all
     active allocations are read.
     """
-    actor_value = _actor_value(actor)
-    origin_value = _origin_value(origin)
-    expected = _strict_int(expected_version, "expected_version")
-    audit_event_id = str(uuid.uuid4())
-
     with write_transaction(engine) as session:
-        transaction = session.get(Transaction, transaction_id)
-        if transaction is None:
-            raise _fail("TRANSACTION_NOT_FOUND", 404, "Transaction introuvable.")
-        if transaction.version != expected:
-            raise VersionConflictError()
-
-        normalized_parts = _normalize_parts(
-            parts,
-            transaction_amount_cents=transaction.amount_cents,
-            mode=mode,
-        )
-        current = _active_allocations(session, transaction_id)
-        if _same_allocation_content(current, normalized_parts):
-            return get_allocation_state(engine, transaction_id)
-
-        if (
-            any(row.origin == Origin.MANUAL.value for row in current)
-            and origin_value is not Origin.MANUAL
-        ):
-            raise _fail(
-                "HUMAN_DECISION_PROTECTED",
-                409,
-                "Une allocation confirmée manuellement ne peut être remplacée que "
-                "par une action manuelle.",
-            )
-        if origin_value is Origin.RULE and (current or _has_any_decision(session, transaction_id)):
-            raise _fail(
-                "RULE_REQUIRES_UNCLASSIFIED_TRANSACTION",
-                409,
-                "Une règle ne peut classer qu'une transaction sans décision préalable.",
-            )
-        if origin_value in (Origin.HISTORY, Origin.LLM) and current:
-            raise _fail(
-                "SUGGESTION_REQUIRES_REVIEW",
-                409,
-                "Une proposition historique ou LLM ne remplace pas une allocation confirmée.",
-            )
-        if current and _active_link_exists(session, transaction_id):
-            raise _fail(
-                "ALLOCATION_HAS_CONFIRMED_REFUND_LINK",
-                409,
-                "Cette transaction participe à un remboursement confirmé; revoyez d'abord le lien.",
-            )
-
-        if current:
-            _reject_proposed_links_after_allocation_change(session, transaction_id, actor_value)
-
-        new_allocation_ids = [str(uuid.uuid4()) for _ in normalized_parts]
-        after_json_value = _requested_json(normalized_parts, new_allocation_ids, origin_value.value)
-        before_json_value = _allocation_json(current)
-        action = "confirm" if not current else ("split" if len(normalized_parts) > 1 else "edit")
-        audit_action = "allocation.confirmed" if not current else "allocation.superseded"
-        _write_decision_and_audit(
+        state = allocate_in_session(
             session,
-            transaction_id=transaction_id,
-            actor=actor_value,
-            action=action,
-            audit_action=audit_action,
-            before=before_json_value or None,
-            after=after_json_value,
-            audit_event_id=audit_event_id,
+            transaction_id,
+            parts,
+            mode=mode,
+            origin=origin,
+            actor=actor,
+            expected_version=expected_version,
         )
-        session.flush()
-
-        if current:
-            replacement_id = new_allocation_ids[0]
-            for old in current:
-                old.superseded_by_allocation_id = replacement_id
-                old.superseded_by_audit_event_id = audit_event_id
-                old.version += 1
-            # n-11: make the old rows inactive before inserting their replacements.
-            # Both supersession foreign keys are DEFERRABLE INITIALLY DEFERRED.
-            session.flush()
-
-        new_rows = [
-            Allocation(
-                allocation_id=allocation_id,
-                transaction_id=transaction_id,
-                category_id=part.category_id,
-                flow_kind=part.flow_kind.value,
-                amount_cents=part.amount_cents,
-                origin=origin_value.value,
-                decision="confirmed",
-                beneficiary=part.beneficiary.value,
-                cadence=part.cadence.value,
-                flexibility=part.flexibility.value,
-                acquisition=part.acquisition.value,
-            )
-            for allocation_id, part in zip(new_allocation_ids, normalized_parts, strict=True)
-        ]
-        session.add_all(new_rows)
-        session.flush()
-
-        # The row's bank-source columns remain untouched; its version is the
-        # transaction-wide optimistic token shared with classification writes.
-        transaction.version += 1
-        session.flush()
-
-    return get_allocation_state(engine, transaction_id)
+    return state
 
 
 @_translate_integrity_errors
@@ -641,25 +697,4 @@ def get_allocation_state(engine: Engine, transaction_id: str) -> AllocationState
         transaction = session.get(Transaction, transaction_id)
         if transaction is None:
             raise _fail("TRANSACTION_NOT_FOUND", 404, "Transaction introuvable.")
-        rows = _active_allocations(session, transaction_id)
-        records = tuple(_record(row) for row in rows)
-        allocated_cents = sum(row.amount_cents for row in rows)
-        residual = transaction.amount_cents - allocated_cents
-        if not rows:
-            state: Literal["unclassified", "partial", "complete"] = "unclassified"
-        elif residual == 0:
-            state = "complete"
-        else:
-            state = "partial"
-        flows = {row.flow_kind for row in rows}
-        if not rows or residual != 0:
-            flows.add(FlowKind.UNKNOWN.value)
-        return AllocationState(
-            transaction_id=transaction_id,
-            transaction_amount_cents=transaction.amount_cents,
-            version=transaction.version,
-            allocations=records,
-            residual_cents=residual,
-            state=state,
-            derived_flow_kinds=tuple(sorted(flows)),
-        )
+        return _state_in_session(session, transaction)

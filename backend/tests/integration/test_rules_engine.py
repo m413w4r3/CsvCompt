@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from app.classification import engine as rules_engine
 from app.classification import rule_store
 from app.classification.engine import (
     SimulationScope,
@@ -51,7 +52,12 @@ from app.db.models import (
 from app.db.session import create_sqlite_engine, session_scope, write_transaction
 from app.domain.taxonomy import load_taxonomy
 from app.importers.normalize import identity_label
-from app.services.allocations import AllocationPart, allocate, get_allocation_state
+from app.services.allocations import (
+    AllocationPart,
+    allocate,
+    clear_allocations,
+    get_allocation_state,
+)
 from app.services.categories import sync_taxonomy
 from app.services.payees import create_payee_for_transaction
 
@@ -340,6 +346,61 @@ def test_RULE_01_human_decision_precedes_a_later_approved_rule(tmp_path: Path) -
 
 
 @pytest.mark.integration
+def test_RULE_01_human_clear_of_rule_allocation_stays_protected(tmp_path: Path) -> None:
+    engine = _database(tmp_path)
+    try:
+        _account_id, ids = _insert_transactions(engine, [-2_400])
+        first_rule = _approved_rule(
+            engine, _draft(scope="existing_and_future", category="groceries")
+        )
+        first_application = apply_rule(
+            engine,
+            first_rule.rule_id,
+            scope="selection",
+            selection=ids,
+            expected_version=first_rule.version,
+            actor="reviewer",
+        )
+        assert first_application.applied_ids == tuple(ids)
+
+        cleared = clear_allocations(
+            engine,
+            ids[0],
+            actor="reviewer",
+            expected_version=get_allocation_state(engine, ids[0]).version,
+        )
+        assert cleared.state == "unclassified"
+        disabled = disable_rule(
+            engine,
+            first_rule.rule_id,
+            expected_version=first_rule.version,
+            actor="reviewer",
+        )
+        next_rule = _approved_rule(
+            engine, _draft(scope="existing_and_future", category="restaurants")
+        )
+
+        evaluation = evaluate_transaction(engine, ids[0])
+        assert evaluation.human_decision_protected
+        assert evaluation.winner is not None and evaluation.winner.source == "human"
+
+        result = apply_rule(
+            engine,
+            next_rule.rule_id,
+            scope="selection",
+            selection=ids,
+            expected_version=next_rule.version,
+            actor="reviewer",
+        )
+        assert result.applied_ids == ()
+        assert result.skipped_manual_ids == tuple(ids)
+        assert get_allocation_state(engine, ids[0]).state == "unclassified"
+        assert disabled.status == "disabled"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_RULE_02_unapproved_future_rule_has_no_propagation(tmp_path: Path) -> None:
     engine = _database(tmp_path)
     try:
@@ -414,7 +475,7 @@ def test_RULE_11_priority_conflicts_human_and_suggestion_order(tmp_path: Path) -
             engine, _draft(scope="existing_and_future", category="restaurants", priority=50)
         )
         conflict = evaluate_transaction(engine, ids[0])
-        assert set(conflict.conflict_rule_ids) == {low_a.rule_id, low_b.rule_id}
+        assert conflict.conflict_rule_ids == tuple(sorted((low_a.rule_id, low_b.rule_id)))
         assert conflict.winner is None
 
         manual = allocate(
@@ -443,6 +504,19 @@ def test_RULE_11_priority_conflicts_human_and_suggestion_order(tmp_path: Path) -
         assert ordered.winner.rule_id == high.rule_id
         assert ordered.winner.rule_priority == 5
         assert middle.rule_id != high.rule_id
+
+        equal_a = _approved_rule(
+            engine,
+            _draft(scope="existing_and_future", category="clothing", priority=0),
+        )
+        equal_b = _approved_rule(
+            engine,
+            _draft(scope="existing_and_future", category="clothing", priority=0),
+        )
+        equivalent = evaluate_transaction(engine, ids[1])
+        assert equivalent.conflict_rule_ids == ()
+        assert equivalent.winner is not None
+        assert equivalent.winner.rule_id == min(equal_a.rule_id, equal_b.rule_id)
 
         with write_transaction(engine) as session:
             target = session.get(Transaction, ids[2])
@@ -741,6 +815,89 @@ def test_RULE_13_apply_is_idempotent_and_preserves_manual_decisions_and_import_s
                     )
                 )
                 is not None
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_13_allocation_rolls_back_when_execution_trace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _database(tmp_path)
+    try:
+        _account_id, ids = _insert_transactions(engine, [-1_700])
+        rule = _approved_rule(engine, _draft(scope="selection"))
+        before = _snapshot_all_tables(engine)
+
+        def fail_trace(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("synthetic rule trace failure")
+
+        monkeypatch.setattr(rules_engine, "_trace_execution", fail_trace)
+        with pytest.raises(RuntimeError, match="synthetic rule trace failure"):
+            apply_rule(
+                engine,
+                rule.rule_id,
+                scope="selection",
+                selection=ids,
+                expected_version=rule.version,
+                actor="reviewer",
+            )
+
+        assert before == _snapshot_all_tables(engine)
+        assert get_allocation_state(engine, ids[0]).state == "unclassified"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_13_stale_rule_does_not_write_manual_skip_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _database(tmp_path)
+    try:
+        _account_id, ids = _insert_transactions(engine, [-1_700])
+        allocate(
+            engine,
+            ids[0],
+            [AllocationPart(flow_kind="expense", category_id="clothing", amount_cents=-1_700)],
+            mode="complete",
+            origin="manual",
+            actor="reviewer",
+            expected_version=1,
+        )
+        rule = _approved_rule(engine, _draft(scope="existing_and_future"))
+        simulate_all = rules_engine._simulate_all_pages
+
+        def simulate_then_disable(db_engine, selected_rule, scope):
+            result = simulate_all(db_engine, selected_rule, scope)
+            disable_rule(
+                db_engine,
+                selected_rule.rule_id,
+                expected_version=selected_rule.version,
+                actor="reviewer",
+            )
+            return result
+
+        monkeypatch.setattr(rules_engine, "_simulate_all_pages", simulate_then_disable)
+        with pytest.raises(VersionConflictError):
+            apply_rule(
+                engine,
+                rule.rule_id,
+                scope="existing_and_future",
+                expected_version=rule.version,
+                actor="reviewer",
+            )
+
+        with session_scope(engine) as session:
+            assert (
+                session.scalar(
+                    select(RuleExecution.rule_execution_id).where(
+                        RuleExecution.rule_id == rule.rule_id,
+                        RuleExecution.transaction_id == ids[0],
+                    )
+                )
+                is None
             )
     finally:
         engine.dispose()
