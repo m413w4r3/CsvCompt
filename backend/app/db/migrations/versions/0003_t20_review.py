@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import uuid
 from pathlib import Path
+from typing import cast
 
 from alembic import op
 from sqlalchemy.engine import Connection
@@ -37,7 +38,7 @@ def _decode_snapshot(raw: object) -> object | None:
     if not isinstance(raw, str):
         return None
     try:
-        return json.loads(raw)
+        return cast(object, json.loads(raw))
     except json.JSONDecodeError:
         return None
 

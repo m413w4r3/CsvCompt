@@ -651,7 +651,7 @@ def undo_rule_application(
             transactions = [session.get(Transaction, row.transaction_id) for row in applied]
             if any(row is None for row in transactions):
                 raise _fail("UNDO_SNAPSHOT_INVALID", "Une transaction du lot est absente.", 500)
-            states = tuple(
+            current_states = tuple(
                 _state_in_session(session, row) for row in transactions if row is not None
             )
             return UndoBatchResult(
@@ -660,7 +660,7 @@ def undo_rule_application(
                 undo_decision_ids=tuple(
                     row.undone_by_decision_id for row in applied if row.undone_by_decision_id
                 ),
-                states=states,
+                states=current_states,
                 idempotent=True,
                 human_override_ids=(),
             )
