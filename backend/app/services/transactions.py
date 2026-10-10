@@ -64,6 +64,7 @@ def transaction_statement(
     active_allocations = select(Allocation).where(
         Allocation.transaction_id == Transaction.transaction_id,
         Allocation.superseded_by_allocation_id.is_(None),
+        Allocation.retracted_at_utc.is_(None),
     )
     if classification == "unclassified":
         statement = statement.where(~active_allocations.exists())
@@ -73,6 +74,7 @@ def transaction_statement(
             .where(
                 Allocation.transaction_id == Transaction.transaction_id,
                 Allocation.superseded_by_allocation_id.is_(None),
+                Allocation.retracted_at_utc.is_(None),
             )
             .scalar_subquery()
         )
@@ -83,6 +85,7 @@ def transaction_statement(
             .where(
                 Allocation.transaction_id == Transaction.transaction_id,
                 Allocation.superseded_by_allocation_id.is_(None),
+                Allocation.retracted_at_utc.is_(None),
                 Allocation.flow_kind == flow_kind,
             )
             .exists()
@@ -178,6 +181,7 @@ def _active_allocations(session: Session, transaction_id: str) -> list[Allocatio
             select(Allocation).where(
                 Allocation.transaction_id == transaction_id,
                 Allocation.superseded_by_allocation_id.is_(None),
+                Allocation.retracted_at_utc.is_(None),
             )
         )
     )
@@ -236,6 +240,7 @@ def transaction_rows(session: Session, rows: list[tuple[Transaction, str]]) -> l
             .where(
                 Allocation.transaction_id.in_(ids),
                 Allocation.superseded_by_allocation_id.is_(None),
+                Allocation.retracted_at_utc.is_(None),
             )
             .group_by(Allocation.transaction_id)
         )

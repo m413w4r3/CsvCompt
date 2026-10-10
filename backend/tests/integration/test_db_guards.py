@@ -57,3 +57,7 @@ def test_IMP_06_IMP_07_and_SEC_06_schema_contracts_replay_on_migrated_database(
     assert "m-12 version inchangée refusée par trigger" in output
     assert "allocation confirmée au-delà du montant rejetée" in output
     assert "plafonds source/cible" in output
+    assert "retrait audité, immuable et exclu du plafond/somme actifs" in output
+    assert "allocation liée ne peut pas être retirée" in output
+    assert "plafond de source par allocation refund" in output
+    assert "lien rejected conservé sans bloquer une proposition active" in output

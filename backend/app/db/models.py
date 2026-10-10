@@ -379,6 +379,10 @@ class Allocation(VersionedMixin, CreatedAtMixin, Base):
             initially="DEFERRED",
         ),
     )
+    retracted_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTimeText())
+    retracted_by_decision_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("classification_decisions.decision_id", ondelete="RESTRICT")
+    )
 
     transaction: Mapped[Transaction] = relationship(back_populates="allocations")
 
@@ -513,9 +517,14 @@ class TransactionLink(VersionedMixin, CreatedAtMixin, Base):
     )
     link_kind: Mapped[str] = mapped_column(Text, nullable=False)
     amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_allocation_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("allocations.allocation_id", ondelete="RESTRICT")
+    )
     target_allocation_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("allocations.allocation_id", ondelete="RESTRICT")
     )
+    source_allocation: Mapped[Allocation | None] = relationship(foreign_keys=[source_allocation_id])
+    target_allocation: Mapped[Allocation | None] = relationship(foreign_keys=[target_allocation_id])
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="proposed", server_default=text("'proposed'")
     )

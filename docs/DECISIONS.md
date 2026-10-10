@@ -196,3 +196,13 @@
   9. **Hygiène (m-01, m-03, m-10, m-11)** : `can_commit` recalculé après retrait des rejets ; endpoints d'import synchrones (`def`, thread pool) avec contrôle de `Content-Length` en amont et plafond du nombre d'anomalies ; `repr=False` sur `raw_label`, `identity_label`, `search_label` ; `merchant_raw_hint` masqué s'il ressemble à un IBAN/numéro long avant exposition.
 - **Conséquences** : nouveaux codes ajoutés à la table d'anomalies (docs/IMPORT_PARSER.md, docs/API.md) ; nouveaux tests IMP-15..IMP-19 ; ces corrections sont une condition de G2 et d'entrée de la validation G3.
 
+## ADR-027 — Schéma des allocations : retrait auditable et liens de remboursement par allocation
+
+- **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, retour T17)
+- **Contexte** : T17 constate que (a) une allocation confirmée ne peut être que remplacée, jamais retirée de façon auditable (retour à « non ventilée » impossible, donc annulation T20 impossible) ; (b) `transaction_links` ne référence pas l'allocation source `refund`, donc un seul remboursement actif par crédit ; (c) l'index d'unicité des liens actifs inclut les liens rejetés non supersédés.
+- **Décision** (migration `0001` toujours amendable en place : aucune base utilisateur réelle n'existe, ADR-025.2 ; gel à la première base réelle) :
+  1. **Retrait** : une allocation peut être *retirée* par une action humaine auditée : colonnes `retracted_at_utc` et `retracted_by_decision_id` (NULL = active) ; une allocation est **active** si `superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL` ; les triggers de signe/plafond/somme et toutes les lectures (métriques, résidu, liens) ne considèrent que les allocations actives ; une allocation retirée ou supersédée est immuable (aucune autre modification) ; le retrait ne peut être posé qu'avec une décision existante de la même transaction ; jamais de DELETE.
+  2. **Liens par allocation** : `transaction_links` porte `source_allocation_id` (allocation `refund` active du crédit) et `target_allocation_id` ; plafonds : Σ liens `confirmed` par allocation source ≤ montant de cette allocation, Σ par allocation cible ≤ |montant de cette allocation| ; plusieurs remboursements actifs par crédit autorisés (une ventilation `refund` + `income_other` + plusieurs achats liés).
+  3. **Unicité** : l'index d'unicité des liens actifs ne porte que sur les liens `proposed|confirmed` non supersédés (les `rejected` sont conservés comme historique et n'empêchent pas une nouvelle proposition).
+- **Conséquences** : mise à jour de `docs/examples/schema.sql`, de `0001_initial.sql`, des modèles, de `verify_schema.py` et des tests ; T17 adapte `clear_allocations` et les liens ; T18/T19/T24 ne lisent que les allocations actives.
+

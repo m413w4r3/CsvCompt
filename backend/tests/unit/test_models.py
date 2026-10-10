@@ -109,6 +109,17 @@ def test_T06_ORM_04_versioned_rows_enable_optimistic_locking() -> None:
         assert model.__mapper__.version_id_col is model.__table__.c.version
 
 
+def test_ADR_027_allocations_and_refund_links_use_allocation_identity() -> None:
+    allocation_columns = Allocation.__table__.c
+    assert isinstance(allocation_columns.retracted_at_utc.type, UTCDateTimeText)
+    assert allocation_columns.retracted_by_decision_id.foreign_keys
+    link_columns = TransactionLink.__table__.c
+    assert link_columns.source_allocation_id.foreign_keys
+    assert link_columns.target_allocation_id.foreign_keys
+    assert TransactionLink.__mapper__.relationships.source_allocation.mapper.class_ is Allocation
+    assert TransactionLink.__mapper__.relationships.target_allocation.mapper.class_ is Allocation
+
+
 def test_T06_ORM_05_all_reference_tables_have_a_typed_model() -> None:
     assert len(Base.metadata.tables) == 28
     assert "flow_kind" not in Transaction.__table__.columns

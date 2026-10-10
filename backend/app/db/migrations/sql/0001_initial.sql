@@ -495,6 +495,11 @@ CREATE TABLE allocations (
         DEFERRABLE INITIALLY DEFERRED,
     superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)
         DEFERRABLE INITIALLY DEFERRED,
+    retracted_at_utc TEXT
+        CHECK (retracted_at_utc IS NULL OR
+            (strftime('%Y-%m-%dT%H:%M:%fZ', retracted_at_utc) IS NOT NULL
+             AND strftime('%Y-%m-%dT%H:%M:%fZ', retracted_at_utc) = retracted_at_utc)),
+    retracted_by_decision_id TEXT REFERENCES classification_decisions(decision_id) ON DELETE RESTRICT,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
@@ -508,7 +513,10 @@ CREATE TABLE allocations (
     ),
     CHECK ((superseded_by_allocation_id IS NULL AND superseded_by_audit_event_id IS NULL)
         OR (superseded_by_allocation_id IS NOT NULL AND superseded_by_audit_event_id IS NOT NULL
-            AND superseded_by_allocation_id <> allocation_id))
+            AND superseded_by_allocation_id <> allocation_id)),
+    CHECK ((retracted_at_utc IS NULL AND retracted_by_decision_id IS NULL)
+        OR (retracted_at_utc IS NOT NULL AND retracted_by_decision_id IS NOT NULL
+            AND superseded_by_allocation_id IS NULL AND superseded_by_audit_event_id IS NULL))
 );
 
 CREATE TRIGGER trg_allocations_version_increment
@@ -521,7 +529,7 @@ END;
 CREATE INDEX ix_allocations_transaction ON allocations(transaction_id, decision);
 CREATE INDEX ix_allocations_review ON allocations(decision, origin, transaction_id);
 CREATE INDEX ix_allocations_active_transaction ON allocations(transaction_id)
-    WHERE superseded_by_allocation_id IS NULL;
+    WHERE superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL;
 
 CREATE TABLE classification_suggestions (
     suggestion_id TEXT NOT NULL PRIMARY KEY CHECK (length(suggestion_id) = 36 AND suggestion_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
@@ -639,6 +647,7 @@ CREATE TABLE transaction_links (
     target_transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     link_kind TEXT NOT NULL CHECK (link_kind IN ('refund_of', 'transfer_pair', 'related')),
     amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents > 0),
+    source_allocation_id TEXT REFERENCES allocations(allocation_id) ON DELETE RESTRICT,
     target_allocation_id TEXT REFERENCES allocations(allocation_id) ON DELETE RESTRICT,
     status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'confirmed', 'rejected')),
     superseded_by_transaction_link_id TEXT REFERENCES transaction_links(transaction_link_id)
@@ -649,6 +658,7 @@ CREATE TABLE transaction_links (
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     CHECK (source_transaction_id <> target_transaction_id),
+    CHECK (link_kind <> 'refund_of' OR source_allocation_id IS NOT NULL),
     CHECK ((superseded_by_transaction_link_id IS NULL AND superseded_by_audit_event_id IS NULL)
         OR (superseded_by_transaction_link_id IS NOT NULL AND superseded_by_audit_event_id IS NOT NULL)),
     CHECK (superseded_by_transaction_link_id IS NULL
@@ -663,73 +673,78 @@ BEGIN
 END;
 
 CREATE UNIQUE INDEX uq_transaction_links_active
-    ON transaction_links(source_transaction_id, target_transaction_id, link_kind,
+    ON transaction_links(source_transaction_id, source_allocation_id, target_transaction_id, link_kind,
                          COALESCE(target_allocation_id, ''))
-    WHERE superseded_by_transaction_link_id IS NULL;
+    WHERE status IN ('proposed', 'confirmed') AND superseded_by_transaction_link_id IS NULL;
 CREATE INDEX ix_transaction_links_source ON transaction_links(source_transaction_id, status, link_kind);
 CREATE INDEX ix_transaction_links_target ON transaction_links(target_transaction_id, status, link_kind);
 
 CREATE TRIGGER trg_refund_links_confirmed_direction_insert
 BEFORE INSERT ON transaction_links
-WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+WHEN NEW.link_kind = 'refund_of'
 BEGIN
     SELECT CASE WHEN NOT EXISTS (
         SELECT 1 FROM transactions s
         JOIN transactions t ON t.transaction_id = NEW.target_transaction_id
+        JOIN allocations src ON src.allocation_id = NEW.source_allocation_id
         WHERE s.transaction_id = NEW.source_transaction_id
           AND s.amount_cents > 0 AND t.amount_cents < 0
-          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = s.transaction_id
-                      AND a.flow_kind = 'refund' AND a.amount_cents > 0
-                      AND a.superseded_by_allocation_id IS NULL)
+          AND src.transaction_id = s.transaction_id AND src.flow_kind = 'refund'
+          AND src.amount_cents > 0 AND src.superseded_by_allocation_id IS NULL
+          AND src.retracted_at_utc IS NULL
           AND (NEW.target_allocation_id IS NULL OR EXISTS (
               SELECT 1 FROM allocations a WHERE a.allocation_id = NEW.target_allocation_id
                 AND a.transaction_id = t.transaction_id AND a.flow_kind = 'expense'
                 AND a.amount_cents < 0 AND a.superseded_by_allocation_id IS NULL
+                AND a.retracted_at_utc IS NULL
           ))
           AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = t.transaction_id
                       AND a.flow_kind = 'expense' AND a.amount_cents < 0
-                      AND a.superseded_by_allocation_id IS NULL)
+                      AND a.superseded_by_allocation_id IS NULL AND a.retracted_at_utc IS NULL)
     ) THEN RAISE(ABORT, 'refund_link_direction_invalid') END;
 END;
 
 CREATE TRIGGER trg_refund_links_confirmed_direction_update
 BEFORE UPDATE ON transaction_links
-WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
+WHEN NEW.link_kind = 'refund_of'
 BEGIN
     SELECT CASE WHEN NOT EXISTS (
         SELECT 1 FROM transactions s
         JOIN transactions t ON t.transaction_id = NEW.target_transaction_id
+        JOIN allocations src ON src.allocation_id = NEW.source_allocation_id
         WHERE s.transaction_id = NEW.source_transaction_id
           AND s.amount_cents > 0 AND t.amount_cents < 0
-          AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = s.transaction_id
-                      AND a.flow_kind = 'refund' AND a.amount_cents > 0
-                      AND a.superseded_by_allocation_id IS NULL)
+          AND src.transaction_id = s.transaction_id AND src.flow_kind = 'refund'
+          AND src.amount_cents > 0 AND src.superseded_by_allocation_id IS NULL
+          AND src.retracted_at_utc IS NULL
           AND (NEW.target_allocation_id IS NULL OR EXISTS (
               SELECT 1 FROM allocations a WHERE a.allocation_id = NEW.target_allocation_id
                 AND a.transaction_id = t.transaction_id AND a.flow_kind = 'expense'
                 AND a.amount_cents < 0 AND a.superseded_by_allocation_id IS NULL
+                AND a.retracted_at_utc IS NULL
           ))
           AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = t.transaction_id
                       AND a.flow_kind = 'expense' AND a.amount_cents < 0
-                      AND a.superseded_by_allocation_id IS NULL)
+                      AND a.superseded_by_allocation_id IS NULL AND a.retracted_at_utc IS NULL)
     ) THEN RAISE(ABORT, 'refund_link_direction_invalid') END;
 END;
 
 CREATE TRIGGER trg_refund_links_source_cap_insert
 BEFORE INSERT ON transaction_links
 WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
- AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = NEW.source_transaction_id
-             AND a.flow_kind = 'refund' AND a.superseded_by_allocation_id IS NULL)
+ AND EXISTS (SELECT 1 FROM allocations a WHERE a.allocation_id = NEW.source_allocation_id
+             AND a.flow_kind = 'refund' AND a.superseded_by_allocation_id IS NULL
+             AND a.retracted_at_utc IS NULL)
 BEGIN
     SELECT CASE WHEN COALESCE((
         SELECT sum(amount_cents) FROM transaction_links
-        WHERE source_transaction_id = NEW.source_transaction_id
+        WHERE source_allocation_id = NEW.source_allocation_id
           AND link_kind = 'refund_of' AND status = 'confirmed'
           AND superseded_by_transaction_link_id IS NULL
     ), 0) + NEW.amount_cents > COALESCE((
-        SELECT sum(amount_cents) FROM allocations
-        WHERE transaction_id = NEW.source_transaction_id AND flow_kind = 'refund'
-          AND superseded_by_allocation_id IS NULL
+        SELECT amount_cents FROM allocations
+        WHERE allocation_id = NEW.source_allocation_id AND flow_kind = 'refund'
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ), 0
     ) THEN RAISE(ABORT, 'refund_link_source_cap_exceeded') END;
 END;
@@ -737,19 +752,20 @@ END;
 CREATE TRIGGER trg_refund_links_source_cap_update
 BEFORE UPDATE ON transaction_links
 WHEN NEW.link_kind = 'refund_of' AND NEW.status = 'confirmed'
- AND EXISTS (SELECT 1 FROM allocations a WHERE a.transaction_id = NEW.source_transaction_id
-             AND a.flow_kind = 'refund' AND a.superseded_by_allocation_id IS NULL)
+ AND EXISTS (SELECT 1 FROM allocations a WHERE a.allocation_id = NEW.source_allocation_id
+             AND a.flow_kind = 'refund' AND a.superseded_by_allocation_id IS NULL
+             AND a.retracted_at_utc IS NULL)
 BEGIN
     SELECT CASE WHEN COALESCE((
         SELECT sum(amount_cents) FROM transaction_links
-        WHERE source_transaction_id = NEW.source_transaction_id
+        WHERE source_allocation_id = NEW.source_allocation_id
           AND link_kind = 'refund_of' AND status = 'confirmed'
           AND transaction_link_id <> OLD.transaction_link_id
           AND superseded_by_transaction_link_id IS NULL
     ), 0) + NEW.amount_cents > COALESCE((
-        SELECT sum(amount_cents) FROM allocations
-        WHERE transaction_id = NEW.source_transaction_id AND flow_kind = 'refund'
-          AND superseded_by_allocation_id IS NULL
+        SELECT amount_cents FROM allocations
+        WHERE allocation_id = NEW.source_allocation_id AND flow_kind = 'refund'
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ), 0
     ) THEN RAISE(ABORT, 'refund_link_source_cap_exceeded') END;
 END;
@@ -766,7 +782,7 @@ BEGIN
     ), 0) + NEW.amount_cents > COALESCE((
         SELECT -sum(amount_cents) FROM allocations
         WHERE transaction_id = NEW.target_transaction_id AND flow_kind = 'expense'
-          AND superseded_by_allocation_id IS NULL
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ), 0) THEN RAISE(ABORT, 'refund_link_target_cap_exceeded') END;
 END;
 
@@ -781,6 +797,7 @@ BEGIN
           AND superseded_by_transaction_link_id IS NULL
     ), 0) + NEW.amount_cents > (
         SELECT -amount_cents FROM allocations WHERE allocation_id = NEW.target_allocation_id
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ) THEN RAISE(ABORT, 'refund_link_target_allocation_cap_exceeded') END;
 END;
 
@@ -797,7 +814,7 @@ BEGIN
     ), 0) + NEW.amount_cents > COALESCE((
         SELECT -sum(amount_cents) FROM allocations
         WHERE transaction_id = NEW.target_transaction_id AND flow_kind = 'expense'
-          AND superseded_by_allocation_id IS NULL
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ), 0) THEN RAISE(ABORT, 'refund_link_target_cap_exceeded') END;
 END;
 
@@ -813,6 +830,7 @@ BEGIN
           AND superseded_by_transaction_link_id IS NULL
     ), 0) + NEW.amount_cents > (
         SELECT -amount_cents FROM allocations WHERE allocation_id = NEW.target_allocation_id
+          AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
     ) THEN RAISE(ABORT, 'refund_link_target_allocation_cap_exceeded') END;
 END;
 
@@ -825,6 +843,7 @@ WHEN OLD.status = 'confirmed'
     NEW.transaction_link_id IS OLD.transaction_link_id
     AND NEW.source_transaction_id IS OLD.source_transaction_id
     AND NEW.target_transaction_id IS OLD.target_transaction_id
+    AND NEW.source_allocation_id IS OLD.source_allocation_id
     AND NEW.target_allocation_id IS OLD.target_allocation_id
     AND NEW.link_kind IS OLD.link_kind
     AND NEW.amount_cents IS OLD.amount_cents
@@ -846,6 +865,7 @@ WHEN EXISTS (
     WHERE old.superseded_by_transaction_link_id = NEW.transaction_link_id
       AND (old.status <> 'confirmed' OR NEW.status <> 'confirmed'
            OR old.source_transaction_id <> NEW.source_transaction_id
+           OR old.source_allocation_id <> NEW.source_allocation_id
            OR old.link_kind <> NEW.link_kind)
 )
 BEGIN
@@ -1240,12 +1260,21 @@ BEGIN
           AND ((t.amount_cents < 0 AND
                 COALESCE((SELECT sum(a.amount_cents) FROM allocations a
                           WHERE a.transaction_id = t.transaction_id
-                            AND a.superseded_by_allocation_id IS NULL), 0) + NEW.amount_cents < t.amount_cents)
+                            AND a.superseded_by_allocation_id IS NULL
+                            AND a.retracted_at_utc IS NULL), 0) + NEW.amount_cents < t.amount_cents)
             OR (t.amount_cents > 0 AND
                 COALESCE((SELECT sum(a.amount_cents) FROM allocations a
                           WHERE a.transaction_id = t.transaction_id
-                            AND a.superseded_by_allocation_id IS NULL), 0) + NEW.amount_cents > t.amount_cents))
+                            AND a.superseded_by_allocation_id IS NULL
+                            AND a.retracted_at_utc IS NULL), 0) + NEW.amount_cents > t.amount_cents))
     ) THEN RAISE(ABORT, 'allocation_total_exceeds_transaction') END;
+END;
+
+CREATE TRIGGER trg_allocations_insert_active_only
+BEFORE INSERT ON allocations
+WHEN NEW.retracted_at_utc IS NOT NULL OR NEW.retracted_by_decision_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_retraction_requires_update');
 END;
 
 CREATE TRIGGER trg_allocations_category_direction_insert
@@ -1274,11 +1303,46 @@ BEGIN
     SELECT RAISE(ABORT, 'allocation_supersession_transaction_mismatch');
 END;
 
+CREATE TRIGGER trg_allocations_supersession_existing_target_match
+BEFORE UPDATE ON allocations
+WHEN NEW.superseded_by_allocation_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM allocations replacement
+    WHERE replacement.allocation_id = NEW.superseded_by_allocation_id
+      AND replacement.transaction_id <> NEW.transaction_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_supersession_transaction_mismatch');
+END;
+
+CREATE TRIGGER trg_allocations_retraction_decision_same_transaction
+BEFORE UPDATE ON allocations
+WHEN NEW.retracted_at_utc IS NOT NULL
+ AND NEW.retracted_at_utc IS NOT OLD.retracted_at_utc
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM classification_decisions d
+        WHERE d.decision_id = NEW.retracted_by_decision_id
+          AND d.transaction_id = NEW.transaction_id
+    ) THEN RAISE(ABORT, 'allocation_retraction_decision_transaction_mismatch') END;
+END;
+
+CREATE TRIGGER trg_allocations_referenced_links_immutable
+BEFORE UPDATE ON allocations
+WHEN OLD.superseded_by_allocation_id IS NULL AND OLD.retracted_at_utc IS NULL
+ AND (NEW.superseded_by_allocation_id IS NOT NULL OR NEW.retracted_at_utc IS NOT NULL)
+ AND EXISTS (
+    SELECT 1 FROM transaction_links l
+    WHERE l.status = 'confirmed' AND l.superseded_by_transaction_link_id IS NULL
+      AND (l.source_allocation_id = OLD.allocation_id OR l.target_allocation_id = OLD.allocation_id)
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'allocation_referenced_by_confirmed_refund_link');
+END;
+
 CREATE TRIGGER trg_allocations_update_only_supersede
 BEFORE UPDATE ON allocations
 WHEN OLD.superseded_by_allocation_id IS NOT NULL
-  OR NEW.superseded_by_allocation_id IS NULL
-  OR NEW.superseded_by_audit_event_id IS NULL
+  OR OLD.retracted_at_utc IS NOT NULL
   OR NEW.version <> OLD.version + 1
   OR NEW.allocation_id IS NOT OLD.allocation_id
   OR NEW.transaction_id IS NOT OLD.transaction_id
@@ -1292,6 +1356,17 @@ WHEN OLD.superseded_by_allocation_id IS NOT NULL
   OR NEW.flexibility IS NOT OLD.flexibility
   OR NEW.acquisition IS NOT OLD.acquisition
   OR NEW.created_at_utc IS NOT OLD.created_at_utc
+  OR NOT (
+      (NEW.superseded_by_allocation_id IS NOT NULL
+       AND NEW.superseded_by_audit_event_id IS NOT NULL
+       AND NEW.retracted_at_utc IS NULL
+       AND NEW.retracted_by_decision_id IS NULL)
+      OR
+      (NEW.superseded_by_allocation_id IS NULL
+       AND NEW.superseded_by_audit_event_id IS NULL
+       AND NEW.retracted_at_utc IS NOT NULL
+       AND NEW.retracted_by_decision_id IS NOT NULL)
+  )
 BEGIN
     SELECT RAISE(ABORT, 'allocation_update_requires_audited_supersession');
 END;

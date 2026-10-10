@@ -127,7 +127,9 @@ def test_neighboring_key_stays_unresolved_and_alias_add_remove_is_audited(
         assert payee is not None
 
         near = _transaction(
-            session, account.account_id, "Paiement par carte\nX2222 LUNE PLUS 02/03 - Lune Plus"
+            session,
+            account.account_id,
+            "Paiement par carte" + chr(10) + "X2222 LUNE PLUS 02/03 - Lune Plus",
         )
         assert ensure_payee_for_transaction(session, near) is None
         assert near.payee_id is None

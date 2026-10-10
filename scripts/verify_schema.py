@@ -388,6 +388,19 @@ def insert_allocation(
     return allocation_id
 
 
+def insert_classification_decision(
+    connection: sqlite3.Connection, transaction_id: str, decision_id: str | None = None
+) -> str:
+    decision_id = decision_id or new_id()
+    connection.execute(
+        """INSERT INTO classification_decisions
+           (decision_id, transaction_id, action, actor, before_json, after_json)
+           VALUES (?, ?, 'undo', 'verify_schema', '{}', '{}')""",
+        (decision_id, transaction_id),
+    )
+    return decision_id
+
+
 def insert_refund_link(
     connection: sqlite3.Connection,
     source_id: str,
@@ -396,16 +409,26 @@ def insert_refund_link(
     *,
     status: str = "confirmed",
     link_id: str | None = None,
+    source_allocation_id: str | None = None,
     target_allocation_id: str | None = None,
 ) -> str:
     amount = require_cents(amount_cents)
     link_id = link_id or new_id()
+    if source_allocation_id is None:
+        row = connection.execute(
+            """SELECT allocation_id FROM allocations
+               WHERE transaction_id=? AND flow_kind='refund'
+                 AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL
+               ORDER BY allocation_id LIMIT 1""",
+            (source_id,),
+        ).fetchone()
+        source_allocation_id = None if row is None else str(row[0])
     connection.execute(
         """INSERT INTO transaction_links
            (transaction_link_id, source_transaction_id, target_transaction_id,
-            link_kind, amount_cents, target_allocation_id, status)
-           VALUES (?, ?, ?, 'refund_of', ?, ?, ?)""",
-        (link_id, source_id, target_id, amount, target_allocation_id, status),
+            link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
+           VALUES (?, ?, ?, 'refund_of', ?, ?, ?, ?)""",
+        (link_id, source_id, target_id, amount, source_allocation_id, target_allocation_id, status),
     )
     return link_id
 
@@ -1636,13 +1659,89 @@ def verify_allocations(schema_path: Path) -> None:
             ),
             "allocation_category_direction_invalid",
         )
-        income_id = insert_allocation(
+        insert_allocation(
             connection,
             credit,
             category_id="income_salary_a",
             flow_kind="income_recurring",
             amount_cents=900,
         )
+        retract_transaction = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-14", -1000, "Débit à retirer synthétique"),
+            occurrence_rank=1,
+        )
+        retractable = insert_allocation(
+            connection,
+            retract_transaction,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-700,
+        )
+        wrong_transaction_decision = insert_classification_decision(connection, credit)
+        expect_integrity_error(
+            "ADR-027 retrait d'allocation exige une décision de la même transaction",
+            lambda: connection.execute(
+                """UPDATE allocations SET retracted_at_utc='2026-03-14T12:00:00.000Z',
+                   retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+                (wrong_transaction_decision, retractable),
+            ),
+            "allocation_retraction_decision_transaction_mismatch",
+        )
+        same_transaction_decision = insert_classification_decision(connection, retract_transaction)
+        connection.execute(
+            """UPDATE allocations SET retracted_at_utc='2026-03-14T12:00:00.000Z',
+               retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+            (same_transaction_decision, retractable),
+        )
+        expect_integrity_error(
+            "ADR-027 décision de retrait référencée non supprimable",
+            lambda: connection.execute(
+                "DELETE FROM classification_decisions WHERE decision_id=?",
+                (same_transaction_decision,),
+            ),
+            "FOREIGN KEY constraint failed",
+        )
+        expect_integrity_error(
+            "ADR-027 allocation retirée immuable",
+            lambda: connection.execute(
+                "UPDATE allocations SET amount_cents=-600, version=version+1 WHERE allocation_id=?",
+                (retractable,),
+            ),
+            "allocation_update_requires_audited_supersession",
+        )
+        expect_integrity_error(
+            "ADR-027 retrait initial direct interdit",
+            lambda: connection.execute(
+                """INSERT INTO allocations
+                   (allocation_id, transaction_id, category_id, flow_kind, amount_cents, origin,
+                    retracted_at_utc, retracted_by_decision_id)
+                   VALUES (?, ?, 'groceries', 'expense', -1, 'manual',
+                           '2026-03-14T12:00:00.000Z', ?)""",
+                (new_id(), retract_transaction, same_transaction_decision),
+            ),
+            "allocation_retraction_requires_update",
+        )
+        try:
+            insert_allocation(
+                connection,
+                retract_transaction,
+                category_id="groceries",
+                flow_kind="expense",
+                amount_cents=-1000,
+            )
+        except sqlite3.IntegrityError as error:
+            raise VerificationError(
+                "ADR-027 retrait audité, immuable et exclu du plafond/somme actifs"
+            ) from error
+        active_after_retraction = connection.execute(
+            """SELECT sum(amount_cents) FROM allocations WHERE transaction_id=?
+               AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL""",
+            (retract_transaction,),
+        ).fetchone()[0]
+        if active_after_retraction != -1000:
+            raise VerificationError("ADR-027 allocation retirée encore comprise dans la somme active")
+        report("ADR-027 retrait audité, immuable et exclu du plafond/somme actifs")
         expect_integrity_error(
             "ADR-019.b allocation amount_cents REAL rejeté",
             lambda: connection.execute(
@@ -1656,8 +1755,8 @@ def verify_allocations(schema_path: Path) -> None:
         expect_integrity_error(
             "ADR-019.e UPDATE en place d'allocation confirmée rejeté",
             lambda: connection.execute(
-                "UPDATE allocations SET amount_cents=-700, version=version+1 WHERE allocation_id=?",
-                (income_id,),
+                "UPDATE allocations SET origin='rule', version=version+1 WHERE allocation_id=?",
+                (old,),
             ),
             "allocation_update_requires_audited_supersession",
         )
@@ -1678,6 +1777,21 @@ def verify_allocations(schema_path: Path) -> None:
         )
         replacement_id = new_id()
         audit_id = new_id()
+        mismatched_supersession_audit = new_id()
+        connection.execute(
+            """INSERT INTO audit_events(audit_event_id, target_type, target_id, action, actor, before_json, after_json)
+               VALUES (?, 'allocation', ?, 'allocation.supersede', 'verify_schema', '{}', '{}')""",
+            (mismatched_supersession_audit, old),
+        )
+        expect_integrity_error(
+            "ADR-027 supersession d'allocation exige la même transaction",
+            lambda: connection.execute(
+                """UPDATE allocations SET superseded_by_allocation_id=?,
+                   superseded_by_audit_event_id=?, version=version+1 WHERE allocation_id=?""",
+                (retractable, mismatched_supersession_audit, old),
+            ),
+            "allocation_supersession_transaction_mismatch",
+        )
         connection.execute(
             """INSERT INTO audit_events(audit_event_id, target_type, target_id, action, actor, before_json, after_json)
                VALUES (?, 'allocation', ?, 'allocation.supersede', 'verify_schema', '{}', '{}')""",
@@ -1699,7 +1813,8 @@ def verify_allocations(schema_path: Path) -> None:
         )
         connection.execute("COMMIT")
         active = connection.execute(
-            "SELECT sum(amount_cents) FROM allocations WHERE transaction_id=? AND superseded_by_allocation_id IS NULL",
+            """SELECT sum(amount_cents) FROM allocations WHERE transaction_id=?
+               AND superseded_by_allocation_id IS NULL AND retracted_at_utc IS NULL""",
             (debit,),
         ).fetchone()[0]
         if active != -900:
@@ -1707,6 +1822,14 @@ def verify_allocations(schema_path: Path) -> None:
                 "ADR-019.e supersession auditée ne remplace pas l'allocation active"
             )
         report("ADR-019.e supersession versionnée/auditée ; allocation active correcte")
+        expect_integrity_error(
+            "ADR-027 allocation supersédée immuable",
+            lambda: connection.execute(
+                "UPDATE allocations SET amount_cents=-701, version=version+1 WHERE allocation_id=?",
+                (old,),
+            ),
+            "allocation_update_requires_audited_supersession",
+        )
     finally:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -1734,8 +1857,11 @@ def verify_refund_links(schema_path: Path) -> None:
             identity=(ACCOUNT_B_ID, "2026-02-20", -5000, "Achat synthétique B"),
             occurrence_rank=1,
         )
-        insert_allocation(
-            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=15000
+        source_allocation = insert_allocation(
+            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=10000
+        )
+        second_source_allocation = insert_allocation(
+            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=5000
         )
         insert_allocation(
             connection,
@@ -1763,9 +1889,41 @@ def verify_refund_links(schema_path: Path) -> None:
             connection, purchase_b, category_id="groceries", flow_kind="expense", amount_cents=-5000
         )
         confirmed_link = insert_refund_link(
-            connection, credit, purchase_a, 10000, target_allocation_id=grocery_allocation
+            connection,
+            credit,
+            purchase_a,
+            10000,
+            source_allocation_id=source_allocation,
+            target_allocation_id=grocery_allocation,
         )
-        insert_refund_link(connection, credit, purchase_b, 5000)
+        try:
+            insert_refund_link(
+                connection,
+                credit,
+                purchase_a,
+                1,
+                status="proposed",
+                source_allocation_id=second_source_allocation,
+                target_allocation_id=grocery_allocation,
+            )
+        except sqlite3.IntegrityError as error:
+            raise VerificationError("UNIQUE active link identity per allocation") from error
+        insert_refund_link(
+            connection,
+            credit,
+            purchase_b,
+            5000,
+            source_allocation_id=second_source_allocation,
+        )
+        expect_integrity_error(
+            "ADR-027 une allocation liée ne peut pas être retirée",
+            lambda: connection.execute(
+                """UPDATE allocations SET retracted_at_utc='2026-04-02T12:00:00.000Z',
+                   retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+                (insert_classification_decision(connection, credit), source_allocation),
+            ),
+            "allocation_referenced_by_confirmed_refund_link",
+        )
         target_c = insert_transaction(
             connection,
             identity=(ACCOUNT_B_ID, "2026-01-10", -5000, "Achat synthétique C"),
@@ -1775,14 +1933,20 @@ def verify_refund_links(schema_path: Path) -> None:
             connection, target_c, category_id="groceries", flow_kind="expense", amount_cents=-5000
         )
         expect_integrity_error(
-            "n-04 plafond par allocation refund, distinct du montant brut du crédit",
-            lambda: insert_refund_link(connection, credit, target_c, 1),
+            "ADR-027 plafond de source par allocation refund",
+            lambda: insert_refund_link(
+                connection,
+                credit,
+                target_c,
+                1,
+                source_allocation_id=source_allocation,
+            ),
             "refund_link_source_cap_exceeded",
         )
         second_credit = insert_transaction(
             connection, identity=(ACCOUNT_ID, "2026-04-03", 10000, "Autre avoir"), occurrence_rank=1
         )
-        insert_allocation(
+        second_credit_source = insert_allocation(
             connection,
             second_credit,
             category_id="income_refund",
@@ -1796,6 +1960,23 @@ def verify_refund_links(schema_path: Path) -> None:
             ),
             "refund_link_target_allocation_cap_exceeded",
         )
+        proposed_target_overflow = insert_refund_link(
+            connection,
+            second_credit,
+            purchase_a,
+            4000,
+            status="proposed",
+            source_allocation_id=second_credit_source,
+            target_allocation_id=grocery_allocation,
+        )
+        expect_integrity_error(
+            "ADR-027 plafond par allocation cible lors de confirmation",
+            lambda: connection.execute(
+                "UPDATE transaction_links SET status='confirmed', version=version+1 WHERE transaction_link_id=?",
+                (proposed_target_overflow,),
+            ),
+            "refund_link_target_allocation_cap_exceeded",
+        )
         expect_integrity_error(
             "ADR-024.3 somme liée plafonnée par les allocations expense, distincte du débit brut",
             lambda: insert_refund_link(connection, second_credit, purchase_a, 5001),
@@ -1806,7 +1987,7 @@ def verify_refund_links(schema_path: Path) -> None:
             identity=(ACCOUNT_ID, "2026-04-04", 100, "Crédit non avoir"),
             occurrence_rank=1,
         )
-        insert_allocation(
+        not_refund_allocation = insert_allocation(
             connection,
             not_refund,
             category_id="income_other_test",
@@ -1827,27 +2008,163 @@ def verify_refund_links(schema_path: Path) -> None:
         )
         expect_integrity_error(
             "MONEY-10 source sans allocation refund rejetée",
-            lambda: insert_refund_link(connection, not_refund, direction_target, 1),
+            lambda: insert_refund_link(
+                connection,
+                not_refund,
+                direction_target,
+                1,
+                source_allocation_id=not_refund_allocation,
+            ),
             "refund_link_direction_invalid",
         )
-        # Un lien non confirmé n'est pas imputé aux plafonds analytiques.
-        proposed = insert_refund_link(connection, second_credit, target_c, 5000, status="proposed")
-        if (
-            connection.execute(
-                "SELECT status FROM transaction_links WHERE transaction_link_id=?", (proposed,)
-            ).fetchone()[0]
-            != "proposed"
-        ):
-            raise VerificationError("MONEY-10 lien proposed compté comme confirmé")
-        expect_integrity_error(
-            "ADR-024.3 FK de target_allocation_id",
-            lambda: insert_refund_link(
+        rejected = insert_refund_link(
+            connection,
+            second_credit,
+            target_c,
+            1000,
+            status="rejected",
+            source_allocation_id=second_credit_source,
+        )
+        try:
+            proposed = insert_refund_link(
                 connection,
                 second_credit,
                 target_c,
+                1000,
+                status="proposed",
+                source_allocation_id=second_credit_source,
+            )
+        except sqlite3.IntegrityError as error:
+            raise VerificationError("ADR-027 le lien rejected bloque une nouvelle proposition") from error
+        statuses = connection.execute(
+            """SELECT status FROM transaction_links WHERE transaction_link_id IN (?, ?)
+               ORDER BY status""",
+            (rejected, proposed),
+        ).fetchall()
+        if statuses != [("proposed",), ("rejected",)]:
+            raise VerificationError("ADR-027 le lien rejeté bloque une nouvelle proposition")
+        report("ADR-027 lien rejected conservé sans bloquer une proposition active")
+        proposed_source_overflow = insert_refund_link(
+            connection,
+            credit,
+            target_c,
+            1,
+            status="proposed",
+            source_allocation_id=second_source_allocation,
+        )
+        expect_integrity_error(
+            "ADR-027 plafond source par allocation lors de confirmation",
+            lambda: connection.execute(
+                "UPDATE transaction_links SET status='confirmed', version=version+1 WHERE transaction_link_id=?",
+                (proposed_source_overflow,),
+            ),
+            "refund_link_source_cap_exceeded",
+        )
+        proposed_wrong_source = insert_refund_link(
+            connection,
+            second_credit,
+            purchase_b,
+            1,
+            status="proposed",
+            source_allocation_id=second_credit_source,
+        )
+        expect_integrity_error(
+            "ADR-027 UPDATE d'un lien exige son allocation refund active",
+            lambda: connection.execute(
+                "UPDATE transaction_links SET source_allocation_id=?, version=version+1 WHERE transaction_link_id=?",
+                (not_refund_allocation, proposed_wrong_source),
+            ),
+            "refund_link_direction_invalid",
+        )
+        inactive_source_credit = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-05", 1000, "Avoir retiré synthétique"),
+            occurrence_rank=1,
+        )
+        inactive_source_allocation = insert_allocation(
+            connection,
+            inactive_source_credit,
+            category_id="income_refund",
+            flow_kind="refund",
+            amount_cents=1000,
+        )
+        inactive_source_decision = insert_classification_decision(
+            connection, inactive_source_credit
+        )
+        connection.execute(
+            """UPDATE allocations SET retracted_at_utc='2026-04-05T12:00:00.000Z',
+               retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+            (inactive_source_decision, inactive_source_allocation),
+        )
+        expect_integrity_error(
+            "ADR-027 liens refusés vers une allocation refund retirée",
+            lambda: insert_refund_link(
+                connection,
+                inactive_source_credit,
+                target_c,
                 1,
                 status="proposed",
-                target_allocation_id="missing-allocation",
+                source_allocation_id=inactive_source_allocation,
+            ),
+            "refund_link_direction_invalid",
+        )
+        target_d = insert_transaction(
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-01-12", -1000, "Achat avec part retirée"),
+            occurrence_rank=1,
+        )
+        inactive_target_allocation = insert_allocation(
+            connection,
+            target_d,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-400,
+        )
+        insert_allocation(
+            connection,
+            target_d,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-600,
+        )
+        inactive_target_decision = insert_classification_decision(connection, target_d)
+        connection.execute(
+            """UPDATE allocations SET retracted_at_utc='2026-01-12T12:00:00.000Z',
+               retracted_by_decision_id=?, version=version+1 WHERE allocation_id=?""",
+            (inactive_target_decision, inactive_target_allocation),
+        )
+        expect_integrity_error(
+            "ADR-027 liens refusés vers une allocation expense retirée",
+            lambda: insert_refund_link(
+                connection,
+                second_credit,
+                target_d,
+                1,
+                status="proposed",
+                source_allocation_id=second_credit_source,
+                target_allocation_id=inactive_target_allocation,
+            ),
+            "refund_link_direction_invalid",
+        )
+        expect_integrity_error(
+            "ADR-027 FK de source_allocation_id",
+            lambda: connection.execute(
+                """INSERT INTO transaction_links
+                   (transaction_link_id, source_transaction_id, target_transaction_id,
+                    link_kind, amount_cents, source_allocation_id, status)
+                   VALUES (?, ?, ?, 'related', 1, 'missing-source-allocation', 'proposed')""",
+                (new_id(), second_credit, target_c),
+            ),
+            "FOREIGN KEY constraint failed",
+        )
+        expect_integrity_error(
+            "ADR-024.3 FK de target_allocation_id",
+            lambda: connection.execute(
+                """INSERT INTO transaction_links
+                   (transaction_link_id, source_transaction_id, target_transaction_id,
+                    link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
+                   VALUES (?, ?, ?, 'related', 1, ?, 'missing-allocation', 'proposed')""",
+                (new_id(), second_credit, target_c, second_credit_source),
             ),
             "FOREIGN KEY constraint failed",
         )
@@ -1882,9 +2199,9 @@ def verify_refund_links(schema_path: Path) -> None:
             connection.execute(
                 """INSERT INTO transaction_links
                    (transaction_link_id, source_transaction_id, target_transaction_id, link_kind,
-                    amount_cents, target_allocation_id, status)
-                   VALUES (?, ?, ?, 'refund_of', 9000, ?, 'confirmed')""",
-                (replacement, credit, purchase_a, grocery_allocation),
+                    amount_cents, source_allocation_id, target_allocation_id, status)
+                   VALUES (?, ?, ?, 'refund_of', 9000, ?, ?, 'confirmed')""",
+                (replacement, credit, purchase_a, source_allocation, grocery_allocation),
             )
             connection.execute(
                 """INSERT INTO audit_events
@@ -1928,9 +2245,10 @@ def verify_refund_links(schema_path: Path) -> None:
             "SEC-06 REPLACE d'un lien de remboursement confirmé rejeté",
             lambda: connection.execute(
                 """INSERT OR REPLACE INTO transaction_links
-                   (transaction_link_id, source_transaction_id, target_transaction_id, link_kind, amount_cents, status)
-                   VALUES (?, ?, ?, 'refund_of', 1, 'proposed')""",
-                (confirmed_link, credit, purchase_a),
+                   (transaction_link_id, source_transaction_id, target_transaction_id, link_kind,
+                    amount_cents, source_allocation_id, status)
+                   VALUES (?, ?, ?, 'refund_of', 1, ?, 'proposed')""",
+                (confirmed_link, credit, purchase_a, source_allocation),
             ),
             "confirmed_transaction_link_immutable",
         )
@@ -2406,6 +2724,43 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def mutate_trigger_clause(text: str, trigger_name: str, old: str, new: str, label: str) -> str:
+    start = text.index(f"CREATE TRIGGER {trigger_name}")
+    end = text.index("\nEND;", start) + len("\nEND;")
+    prefix, trigger, suffix = text[:start], text[start:end], text[end:]
+    return prefix + replace_once(trigger, old, new, label) + suffix
+
+
+def mutate_active_allocation_total_filter(text: str) -> str:
+    old = "AND a.superseded_by_allocation_id IS NULL\n                            AND a.retracted_at_utc IS NULL"
+    start = text.index("CREATE TRIGGER trg_allocations_total_cap")
+    end = text.index("\nEND;", start) + len("\nEND;")
+    prefix, trigger, suffix = text[:start], text[start:end], text[end:]
+    if trigger.count(old) != 2:
+        raise VerificationError("preuve temporaire : filtre actif allocation cap ambigu")
+    return prefix + trigger.replace(old, "AND a.superseded_by_allocation_id IS NULL") + suffix
+
+
+def mutate_refund_source_active_filter(text: str) -> str:
+    return mutate_trigger_clause(
+        text,
+        "trg_refund_links_confirmed_direction_insert",
+        "AND src.retracted_at_utc IS NULL",
+        "",
+        "active refund source filter",
+    )
+
+
+def mutate_refund_target_active_filter(text: str) -> str:
+    return mutate_trigger_clause(
+        text,
+        "trg_refund_links_confirmed_direction_insert",
+        "AND a.superseded_by_allocation_id IS NULL\n                AND a.retracted_at_utc IS NULL",
+        "AND a.superseded_by_allocation_id IS NULL",
+        "active refund target filter",
+    )
+
+
 def mutate_transaction_amount_clause(text: str, old: str, new: str, label: str) -> str:
     start = text.index("CREATE TABLE transactions (")
     end = text.index("\n);", start)
@@ -2662,16 +3017,64 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             "ADR-019.e allocation confirmée au-delà",
         ),
         (
+            "retracted allocations excluded from cap",
+            mutate_active_allocation_total_filter,
+            verify_allocations,
+            "ADR-027 retrait audité, immuable et exclu du plafond/somme actifs",
+        ),
+        (
+            "allocation inserted active only",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_insert_active_only"),
+            verify_allocations,
+            "ADR-027 retrait initial direct interdit",
+        ),
+        (
+            "allocation retraction decision transaction",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_allocations_retraction_decision_same_transaction"
+            ),
+            verify_allocations,
+            "ADR-027 retrait d'allocation exige une décision de la même transaction",
+        ),
+        (
+            "allocation retraction decision foreign key",
+            lambda s: mutate_table_clause(
+                s,
+                "allocations",
+                "retracted_by_decision_id TEXT REFERENCES classification_decisions(decision_id) ON DELETE RESTRICT,",
+                "retracted_by_decision_id TEXT,",
+                "allocation retraction decision foreign key",
+            ),
+            verify_allocations,
+            "ADR-027 décision de retrait référencée non supprimable",
+        ),
+        (
+            "allocation referenced by confirmed links immutable",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_allocations_referenced_links_immutable"
+            ),
+            verify_refund_links,
+            "ADR-027 une allocation liée ne peut pas être retirée",
+        ),
+        (
             "category direction",
             lambda s: remove_sql_object(s, "trigger", "trg_allocations_category_direction_insert"),
             verify_allocations,
             "ADR-019.e catégorie flow_savings_out",
         ),
         (
+            "allocation supersession existing target transaction",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_allocations_supersession_existing_target_match"
+            ),
+            verify_allocations,
+            "ADR-027 supersession d'allocation exige la même transaction",
+        ),
+        (
             "allocation update immutability",
             lambda s: remove_sql_object(s, "trigger", "trg_allocations_update_only_supersede"),
             verify_allocations,
-            "ADR-019.e UPDATE en place",
+            "ADR-027 allocation retirée immuable",
         ),
         (
             "allocation no delete",
@@ -2688,10 +3091,36 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             "MONEY-10 source sans allocation refund",
         ),
         (
+            "refund direction update",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_confirmed_direction_update"
+            ),
+            verify_refund_links,
+            "ADR-027 UPDATE d'un lien exige son allocation refund active",
+        ),
+        (
+            "refund source active",
+            mutate_refund_source_active_filter,
+            verify_refund_links,
+            "ADR-027 liens refusés vers une allocation refund retirée",
+        ),
+        (
+            "refund target active",
+            mutate_refund_target_active_filter,
+            verify_refund_links,
+            "ADR-027 liens refusés vers une allocation expense retirée",
+        ),
+        (
             "refund source cap",
             lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_insert"),
             verify_refund_links,
-            "n-04 plafond par allocation refund",
+            "ADR-027 plafond de source par allocation refund",
+        ),
+        (
+            "refund source cap update",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_update"),
+            verify_refund_links,
+            "ADR-027 plafond source par allocation lors de confirmation",
         ),
         (
             "refund target cap",
@@ -2706,6 +3135,14 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             ),
             verify_refund_links,
             "ADR-024.3 plafond de l'allocation expense ciblée",
+        ),
+        (
+            "refund target allocation cap update",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_target_allocation_cap_update"
+            ),
+            verify_refund_links,
+            "ADR-027 plafond par allocation cible lors de confirmation",
         ),
         (
             "confirmed refund link no delete",
@@ -2732,6 +3169,40 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             ),
             verify_refund_links,
             "ADR-024.3 FK de target_allocation_id",
+        ),
+        (
+            "refund source allocation FK",
+            lambda s: mutate_table_clause(
+                s,
+                "transaction_links",
+                "source_allocation_id TEXT REFERENCES allocations(allocation_id) ON DELETE RESTRICT,",
+                "source_allocation_id TEXT,",
+                "source allocation foreign key",
+            ),
+            verify_refund_links,
+            "ADR-027 FK de source_allocation_id",
+        ),
+        (
+            "refund active index excludes rejected rows",
+            lambda s: replace_once(
+                s,
+                "WHERE status IN ('proposed', 'confirmed') AND superseded_by_transaction_link_id IS NULL;",
+                "WHERE superseded_by_transaction_link_id IS NULL;",
+                "active link status filter",
+            ),
+            verify_refund_links,
+            "ADR-027 le lien rejected bloque une nouvelle proposition",
+        ),
+        (
+            "refund active index distinguishes source allocations",
+            lambda s: replace_once(
+                s,
+                "ON transaction_links(source_transaction_id, source_allocation_id, target_transaction_id, link_kind,",
+                "ON transaction_links(source_transaction_id, target_transaction_id, link_kind,",
+                "active link source allocation index key",
+            ),
+            verify_refund_links,
+            "UNIQUE active link identity per allocation",
         ),
         (
             "link supersession deferred FK",

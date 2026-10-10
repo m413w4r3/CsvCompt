@@ -95,6 +95,7 @@ def history_candidates(
             Transaction.transaction_id == transaction.transaction_id,
             Allocation.decision == "confirmed",
             Allocation.superseded_by_allocation_id.is_(None),
+            Allocation.retracted_at_utc.is_(None),
             Allocation.origin.in_((Origin.MANUAL.value, Origin.RULE.value)),
         )
         .limit(1)
@@ -204,6 +205,7 @@ def persist_suggestions(
             Allocation.origin.in_((Origin.MANUAL.value, Origin.RULE.value)),
             Allocation.decision == "confirmed",
             Allocation.superseded_by_allocation_id.is_(None),
+            Allocation.retracted_at_utc.is_(None),
         )
         .limit(1)
     )
@@ -275,6 +277,7 @@ def _manual_history(
             Allocation.origin == Origin.MANUAL.value,
             Allocation.decision == "confirmed",
             Allocation.superseded_by_allocation_id.is_(None),
+            Allocation.retracted_at_utc.is_(None),
         )
         .order_by(Transaction.transaction_id, Allocation.allocation_id)
     )

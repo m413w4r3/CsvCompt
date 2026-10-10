@@ -240,6 +240,7 @@ def get_transaction(transaction_id: UUID, request: Request, session: DbSession) 
             select(Allocation).where(
                 Allocation.transaction_id == transaction.transaction_id,
                 Allocation.superseded_by_allocation_id.is_(None),
+                Allocation.retracted_at_utc.is_(None),
             )
         )
     )
