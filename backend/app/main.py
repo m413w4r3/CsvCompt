@@ -6,13 +6,17 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
+from app.api.v1.categories import router as categories_router
 from app.api.v1.health import router as health_router
 from app.api.v1.imports import router as imports_router
 from app.core.config import Settings, get_settings
 from app.core.errors import InternalErrorBoundary, install_error_handlers
 from app.core.logging import configure_logging
 from app.core.security import LocalTrustedHostMiddleware
+from app.db.migrate import database_state
 from app.db.session import create_sqlite_engine
+from app.domain.taxonomy import load_taxonomy
+from app.services.categories import sync_taxonomy
 from app.services.import_preview_store import ImportPreviewStore
 
 
@@ -28,6 +32,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.import_preview_store.purge_expired()
+        state, _revision = database_state(active_settings)
+        if state == "ok":
+            sync_taxonomy(application.state.db_engine, load_taxonomy())
         yield
         application.state.db_engine.dispose()
 
@@ -49,6 +56,7 @@ def create_app(
     install_error_handlers(application)
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(imports_router, prefix="/api/v1")
+    application.include_router(categories_router, prefix="/api/v1")
 
     # Point d'extension documenté pour servir ultérieurement le build frontend statique.
     return application
