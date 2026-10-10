@@ -284,3 +284,30 @@
   oracles MONEY-15/MONEY-20 vérifient la conservation, les plafonds, l'ordre
   déterministe et le refus conservateur. Cette proposition accompagne la
   migration `0002_t17_refund_safety` sans modifier la migration 0001 gelée.
+
+## ADR-034 — Lots de règles et annulation versionnée T20
+
+- **Date** : 2026-10-11 · **Statut** : décision d'implémentation du ticket T20.
+- **Contexte** : `rule_executions` conserve les allocations avant/après et la
+  version de règle dans son JSON, mais ne distingue pas les lots d'application,
+  ne relie pas l'exécution à la décision d'allocation créée et ne mémorise pas
+  la version transactionnelle produite. Une annulation en masse ne peut donc
+  ni retrouver ses bornes exactes ni détecter sûrement une modification
+  ultérieure. La migration 0001 est gelée (ADR-031).
+- **Décision** : ajouter en `0003_t20_review` des colonnes additives
+  `batch_id`, `rule_version`, `batch_scope_sha256`,
+  `classification_decision_id` et `undone_by_decision_id` à
+  `rule_executions`, ainsi que `transaction_version` à
+  `classification_decisions`; ajouter des gardes SQL d'immuabilité,
+  d'unicité, d'appartenance au lot et de lien vers une décision `undo`. Les
+  anciennes traces reçoivent chacune un lot singleton et gardent leurs
+  snapshots ; la migration ne devine pas les limites de lots historiques. Les
+  annulations créent des lignes d'allocation nouvelles dans `BEGIN IMMEDIATE`,
+  préservent les centimes et dimensions antérieurs, avancent la version de
+  transaction et marquent les décisions/exécutions annulées sans supprimer
+  l'historique.
+- **Conséquences** : la parité `schema.sql` / modèles / migration 0003, la
+  migration sur base synthétique déjà en 0002, les gardes SQL et leur preuve
+  par mutation dans `scripts/verify_schema.py` sont obligatoires. Aucun
+  libellé bancaire ou motif de règle n'est ajouté aux snapshots T20. Les
+  routes REST et leur contrat HTTP restent au ticket T21.

@@ -1,4 +1,4 @@
-# Règles de classification — contrat T19
+# Règles de classification — contrat T19–T20
 
 Les règles sont des propositions déterministes, bornées et réversibles. Leur
 stockage utilise les colonnes v1 existantes de `rules` : `scope_json` contient
@@ -123,19 +123,29 @@ tracées; un rejeu les saute de manière idempotente et poursuit les autres.
 Cette limite conserve le résultat vérifiable et ne laisse pas d'allocation
 sans trace, mais ne fournit pas l'annulation atomique du lot.
 
-**Proposition d'arbitrage** : T20 peut ajouter un identifiant de lot et une
-colonne `rule_version` structurée à `rule_executions` avec une migration propre
-après gel de `0001` :
+T20 ajoute `batch_id`, `rule_version`, l'empreinte de portée et le lien vers la
+décision produite sur chaque exécution, ainsi que la version transactionnelle
+de cette décision. Le code conserve l'atomicité par opération déjà décrite
+ci-dessus et rend chaque lot annulable dans une transaction SQLite. Un rejeu
+avec le même `batch_id` reprend les opérations non encore exécutées et n'ajoute
+pas de trace en double. L'acceptation métier de l'application partielle entre
+opérations, proposée par ADR-029, reste à arbitrer par l'orchestrateur.
+Pour pouvoir rejouer ou annuler un appel qui échoue après un commit d'opération,
+l'appelant doit générer puis fournir un `batch_id` stable avant l'appel. Si le
+service le génère lui-même, cet ID n'est disponible que dans le résultat d'un
+appel réussi et ne peut donc pas servir à retrouver un lot après une exception.
+Voir le contrat de revue dans [`docs/REVIEW.md`](REVIEW.md) et la migration
+T20 dans ADR-034.
 
-```sql
-ALTER TABLE rule_executions ADD COLUMN batch_id TEXT;
-ALTER TABLE rule_executions ADD COLUMN rule_version INTEGER;
-CREATE INDEX ix_rule_executions_batch_id ON rule_executions(batch_id);
-```
-
-Cela permettrait d'annuler ou reprendre un lot entier et de filtrer ses
-exécutions. T19 conserve la version dans les snapshots avant/après et ne change
-pas le schéma.
+`undo_rule_application()` vérifie les versions attendues, les allocations
+actives et les décisions humaines postérieures sous le verrou d'écriture. La
+confirmation explicite permet de remplacer une décision humaine postérieure;
+sans elle, la demande échoue sans écriture. `undo_decision()` fournit le même
+contrôle pour une reventilation manuelle. Les deux services préservent le
+montant bancaire, écrivent une nouvelle décision et un événement d'audit, puis
+créent de nouvelles lignes d'allocation en centimes exacts. Les lots T19
+antérieurs à cette migration sont conservés comme lots singleton, sans deviner
+leurs frontières historiques.
 
 Si une règle est modifiée ou désactivée depuis la simulation, sa nouvelle
 version est détectée sous le verrou et l’opération échoue sans allocation.

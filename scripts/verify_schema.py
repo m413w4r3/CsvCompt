@@ -1693,15 +1693,284 @@ def verify_rule_audit_foreign_key(schema_path: Path) -> None:
                VALUES (?, 'Règle synthétique', 'exact_payee', '{}', 'expense', 'groceries', '{}')""",
             (rule_id,),
         )
+        decision_id = new_id()
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'confirm', 'verify-synthetic', '[]', '[]', 2)""",
+            (decision_id, tid),
+        )
+        batch_id = new_id()
+        scope_digest = hashlib.sha256(b"synthetic-rule-audit-fk").hexdigest()
         expect_integrity_error(
             "FK rule_executions.audit_event_id orphelin rejeté",
             lambda: connection.execute(
                 """INSERT INTO rule_executions
-                   (rule_execution_id, rule_id, transaction_id, outcome, audit_event_id)
-                   VALUES (?, ?, ?, 'applied', 'missing-audit-event')""",
-                (new_id(), rule_id, tid),
+                   (rule_execution_id, rule_id, transaction_id, outcome, audit_event_id,
+                    batch_id, rule_version, batch_scope_sha256, classification_decision_id)
+                   VALUES (?, ?, ?, 'applied', 'missing-audit-event', ?, 1, ?, ?)""",
+                (new_id(), rule_id, tid, batch_id, scope_digest, decision_id),
             ),
             "FOREIGN KEY constraint failed",
+        )
+    finally:
+        connection.close()
+
+
+def verify_review_undo_guards(schema_path: Path) -> None:
+    connection = connect(schema_path)
+    try:
+        insert_account(connection)
+        seed_financial_categories(connection)
+        transaction_id = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-13", -100, "T20 revue synthétique"),
+            occurrence_rank=1,
+        )
+        rule_id = new_id()
+        connection.execute(
+            """INSERT INTO rules
+               (rule_id, name, scope_kind, scope_json, flow_kind, category_id, effect_json)
+               VALUES (?, 'Règle revue synthétique', 'exact_payee', '{}',
+                       'expense', 'groceries', '{}')""",
+            (rule_id,),
+        )
+        decision_id = new_id()
+        undo_id = new_id()
+        audit_id = new_id()
+        execution_id = new_id()
+        batch_id = new_id()
+        scope_digest = hashlib.sha256(b"synthetic-review-scope").hexdigest()
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'confirm', 'verify-synthetic', '[]', '[]', 1)""",
+            (decision_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'undo', 'verify-synthetic', '[]', '[]', 2)""",
+            (undo_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (audit_event_id, target_type, target_id, action, actor)
+               VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+            (audit_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO rule_executions
+               (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                classification_decision_id)
+               VALUES (?, ?, ?, 'applied', 0, ?, ?, 1, ?, ?)""",
+            (execution_id, rule_id, transaction_id, audit_id, batch_id, scope_digest, decision_id),
+        )
+        expect_integrity_error(
+            "T20 exécution de règle sans lot/version/décision refusée par SQL",
+            lambda: connection.execute(
+                """INSERT INTO rule_executions
+                   (rule_execution_id, rule_id, transaction_id, outcome, dry_run)
+                   VALUES (?, ?, ?, 'applied', 0)""",
+                (new_id(), rule_id, transaction_id),
+            ),
+            "rule_execution_versioned_trace_required",
+        )
+        second_transaction_id = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-14", -200, "T20 second transaction synthétique"),
+            occurrence_rank=1,
+        )
+        second_rule_id = new_id()
+        connection.execute(
+            """INSERT INTO rules
+               (rule_id, name, scope_kind, scope_json, flow_kind, category_id, effect_json)
+               VALUES (?, 'Deuxième règle revue synthétique', 'exact_payee', '{}',
+                       'expense', 'groceries', '{}')""",
+            (second_rule_id,),
+        )
+        second_decision_id = new_id()
+        second_audit_id = new_id()
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'confirm', 'verify-synthetic', '[]', '[]', 1)""",
+            (second_decision_id, second_transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (audit_event_id, target_type, target_id, action, actor)
+               VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+            (second_audit_id, second_transaction_id),
+        )
+        expect_integrity_error(
+            "T20 un batch ne peut pas mélanger version ou empreinte de portée",
+            lambda: connection.execute(
+                """INSERT INTO rule_executions
+                   (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                    audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                    classification_decision_id)
+                   VALUES (?, ?, ?, 'applied', 0, ?, ?, 2, ?, ?)""",
+                (
+                    new_id(),
+                    second_rule_id,
+                    second_transaction_id,
+                    second_audit_id,
+                    batch_id,
+                    hashlib.sha256(b"different-synthetic-scope").hexdigest(),
+                    second_decision_id,
+                ),
+            ),
+            "rule_execution_batch_metadata_conflict",
+        )
+        duplicate_decision_id = new_id()
+        duplicate_audit_id = new_id()
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'confirm', 'verify-synthetic', '[]', '[]', 1)""",
+            (duplicate_decision_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (audit_event_id, target_type, target_id, action, actor)
+               VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+            (duplicate_audit_id, transaction_id),
+        )
+        expect_integrity_error(
+            "T20 batch/transaction/dry_run unique",
+            lambda: connection.execute(
+                """INSERT INTO rule_executions
+                   (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                    audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                    classification_decision_id)
+                   VALUES (?, ?, ?, 'applied', 0, ?, ?, 1, ?, ?)""",
+                (
+                    new_id(),
+                    rule_id,
+                    transaction_id,
+                    duplicate_audit_id,
+                    batch_id,
+                    scope_digest,
+                    duplicate_decision_id,
+                ),
+            ),
+            "UNIQUE constraint failed: rule_executions.batch_id, "
+            "rule_executions.transaction_id, rule_executions.dry_run",
+        )
+        other_batch_id = new_id()
+        expect_integrity_error(
+            "T20 une décision ne peut appartenir qu'à une exécution",
+            lambda: connection.execute(
+                """INSERT INTO rule_executions
+                   (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                    audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                    classification_decision_id)
+                   VALUES (?, ?, ?, 'applied', 0, ?, ?, 1, ?, ?)""",
+                (
+                    new_id(),
+                    rule_id,
+                    transaction_id,
+                    duplicate_audit_id,
+                    other_batch_id,
+                    scope_digest,
+                    decision_id,
+                ),
+            ),
+            "UNIQUE constraint failed: rule_executions.classification_decision_id",
+        )
+        expect_integrity_error(
+            "T20 trace de règle append-only hors lien d'annulation",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET after_json='{}', undone_by_decision_id=? "
+                "WHERE rule_execution_id=?",
+                (undo_id, execution_id),
+            ),
+            "rule_execution_immutable",
+        )
+        expect_integrity_error(
+            "T20 snapshot de décision immuable lors de son annulation",
+            lambda: connection.execute(
+                """UPDATE classification_decisions
+                   SET after_json='{}', undone_by_decision_id=?, version=version+1
+                   WHERE decision_id=?""",
+                (undo_id, decision_id),
+            ),
+            "classification_decision_undo_link_invalid",
+        )
+        connection.execute(
+            """UPDATE classification_decisions
+               SET undone_by_decision_id=?, version=version+1 WHERE decision_id=?""",
+            (undo_id, decision_id),
+        )
+        connection.execute(
+            "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+            (undo_id, execution_id),
+        )
+        second_execution_id = new_id()
+        second_execution_audit_id = new_id()
+        second_execution_decision_id = new_id()
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json,
+                transaction_version)
+               VALUES (?, ?, 'confirm', 'verify-synthetic', '[]', '[]', 1)""",
+            (second_execution_decision_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (audit_event_id, target_type, target_id, action, actor)
+               VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+            (second_execution_audit_id, transaction_id),
+        )
+        connection.execute(
+            """INSERT INTO rule_executions
+               (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                classification_decision_id)
+               VALUES (?, ?, ?, 'applied', 0, ?, ?, 1, ?, ?)""",
+            (
+                second_execution_id,
+                rule_id,
+                transaction_id,
+                second_execution_audit_id,
+                other_batch_id,
+                scope_digest,
+                second_execution_decision_id,
+            ),
+        )
+        expect_integrity_error(
+            "T20 une décision undo ne peut être réutilisée par deux exécutions",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (undo_id, second_execution_id),
+            ),
+            "UNIQUE constraint failed: rule_executions.undone_by_decision_id",
+        )
+        expect_integrity_error(
+            "T20 décision undo ne peut cibler qu'une décision",
+            lambda: connection.execute(
+                """UPDATE classification_decisions
+                   SET undone_by_decision_id=?, version=version+1 WHERE decision_id=?""",
+                (undo_id, duplicate_decision_id),
+            ),
+            "UNIQUE constraint failed: classification_decisions.undone_by_decision_id",
+        )
+        expect_integrity_error(
+            "T20 règle-exécution append-only sans suppression",
+            lambda: connection.execute(
+                "DELETE FROM rule_executions WHERE rule_execution_id=?", (execution_id,)
+            ),
+            "rule_execution_immutable",
+        )
+        report(
+            "T20 les exécutions et décisions sont versionnées, append-only et annulables une fois"
         )
     finally:
         connection.close()
@@ -1802,7 +2071,7 @@ def verify_allocations(schema_path: Path) -> None:
                 "DELETE FROM classification_decisions WHERE decision_id=?",
                 (same_transaction_decision,),
             ),
-            "FOREIGN KEY constraint failed",
+            "classification_decision_immutable",
         )
         expect_integrity_error(
             "ADR-027 allocation retirée immuable",
@@ -2830,6 +3099,7 @@ def verify_refund_parts_and_state(schema_path: Path) -> None:
             source_allocation_id=second_source,
             target_allocation_id=active,
         )
+
         def update_status(link_id: str, new_status: str) -> None:
             connection.execute(
                 "UPDATE transaction_links SET status=?, version=version+1 "
@@ -3540,12 +3810,17 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
         ),
         (
             "allocation retraction decision foreign key",
-            lambda s: mutate_table_clause(
-                s,
-                "allocations",
-                "retracted_by_decision_id TEXT REFERENCES classification_decisions(decision_id) ON DELETE RESTRICT,",
-                "retracted_by_decision_id TEXT,",
-                "allocation retraction decision foreign key",
+            lambda s: remove_sql_object(
+                mutate_table_clause(
+                    s,
+                    "allocations",
+                    "retracted_by_decision_id TEXT REFERENCES "
+                    "classification_decisions(decision_id) ON DELETE RESTRICT,",
+                    "retracted_by_decision_id TEXT,",
+                    "allocation retraction decision foreign key",
+                ),
+                "trigger",
+                "trg_classification_decisions_delete_forbidden",
             ),
             verify_allocations,
             "ADR-027 décision de retrait référencée non supprimable",
@@ -3991,6 +4266,68 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             verify_transaction_flow_not_stored,
             "flow_kind ne doit pas être stocké sur transactions",
         ),
+        (
+            "rule execution insert guard",
+            lambda s: remove_sql_object(s, "trigger", "trg_rule_executions_insert_guard"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 exécution de règle sans lot/version/"
+            "décision refusée par SQL",
+        ),
+        (
+            "rule execution batch consistency",
+            lambda s: remove_sql_object(s, "trigger", "trg_rule_executions_batch_consistency"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 un batch ne peut pas mélanger version "
+            "ou empreinte de portée",
+        ),
+        (
+            "rule execution batch transaction unique",
+            lambda s: remove_sql_object(s, "index", "ux_rule_executions_batch_transaction"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 batch/transaction/dry_run unique",
+        ),
+        (
+            "rule execution decision unique",
+            lambda s: remove_sql_object(s, "index", "ux_rule_executions_classification_decision"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 une décision ne peut appartenir qu'à "
+            "une exécution",
+        ),
+        (
+            "rule execution undo decision unique",
+            lambda s: remove_sql_object(s, "index", "ux_rule_executions_undo_decision"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 une décision undo ne peut être "
+            "réutilisée par deux exécutions",
+        ),
+        (
+            "classification undo target unique",
+            lambda s: remove_sql_object(s, "index", "ux_classification_decisions_undo_target"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 décision undo ne peut cibler qu'une "
+            "décision",
+        ),
+        (
+            "rule execution immutable update guard",
+            lambda s: remove_sql_object(s, "trigger", "trg_rule_executions_update_guard"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 trace de règle append-only hors lien "
+            "d'annulation",
+        ),
+        (
+            "rule execution delete guard",
+            lambda s: remove_sql_object(s, "trigger", "trg_rule_executions_delete_forbidden"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 règle-exécution append-only sans "
+            "suppression",
+        ),
+        (
+            "decision undo snapshot guard",
+            lambda s: remove_sql_object(s, "trigger", "trg_classification_decisions_undo_guard"),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 snapshot de décision immuable lors de "
+            "son annulation",
+        ),
     ]
     with tempfile.TemporaryDirectory(prefix="verify-schema-proof-") as temp_dir:
         root = Path(temp_dir)
@@ -4071,6 +4408,7 @@ def verify_schema(
         verify_balance_date_cutoff_guard,
         verify_noop_and_committed_hash,
         verify_rule_audit_foreign_key,
+        verify_review_undo_guards,
         verify_transaction_flow_not_stored,
         verify_allocations,
         verify_refund_links,
@@ -4122,12 +4460,13 @@ def verify_migration_history_and_head_schema() -> None:
             config.attributes["operation"] = "upgrade"
             command.upgrade(config, "0001_initial")
             result = upgrade_to_head(settings)
-            if result.revision != "0002_t17_refund_safety" or result.backup is None:
-                raise VerificationError("MIG-0002 chaîne 0001 → 0002 ou sauvegarde absente")
+            if result.revision != "0003_t20_review" or result.backup is None:
+                raise VerificationError("MIG-0003 chaîne 0001 → 0003 ou sauvegarde absente")
 
             expected = connect(DEFAULT_SCHEMA)
             migrated = sqlite3.connect(database)
             try:
+
                 def normalized_objects(
                     connection: sqlite3.Connection,
                 ) -> tuple[tuple[str, str, str, str | None], ...]:
@@ -4150,13 +4489,13 @@ def verify_migration_history_and_head_schema() -> None:
 
                 if normalized_objects(migrated) != normalized_objects(expected):
                     raise VerificationError(
-                        "MIG-0002 sqlite_master après 0001 → 0002 diverge de schema.sql"
+                        "MIG-0003 sqlite_master après 0001 → 0003 diverge de schema.sql"
                     )
                 integrity = migrated.execute("PRAGMA integrity_check").fetchone()
                 foreign_keys = migrated.execute("PRAGMA foreign_key_check").fetchall()
                 if integrity != ("ok",) or foreign_keys:
                     raise VerificationError(
-                        "MIG-0002 migrated database integrity_check/foreign_key_check invalide"
+                        "MIG-0003 migrated database integrity_check/foreign_key_check invalide"
                     )
             finally:
                 expected.close()
@@ -4164,8 +4503,8 @@ def verify_migration_history_and_head_schema() -> None:
     except VerificationError:
         raise
     except Exception as error:
-        raise VerificationError(f"MIG-0002 échec de migration temporaire : {error}") from error
-    report("MIG-0002 la chaîne 0001 → 0002 égale docs/examples/schema.sql")
+        raise VerificationError(f"MIG-0003 échec de migration temporaire : {error}") from error
+    report("MIG-0003 la chaîne 0001 → 0003 égale docs/examples/schema.sql")
 
 
 def main() -> int:

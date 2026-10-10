@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, Literal
@@ -74,6 +74,7 @@ class AllocationState:
     residual_cents: int
     state: Literal["unclassified", "partial", "complete"]
     derived_flow_kinds: tuple[str, ...]
+    decision_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,6 +446,7 @@ def _write_decision_and_audit(
     transaction_id: str,
     actor: str,
     action: str,
+    transaction_version: int,
     audit_action: str,
     before: list[dict[str, str | int]] | None,
     after: list[dict[str, str | int]] | None,
@@ -467,6 +469,7 @@ def _write_decision_and_audit(
             transaction_id=transaction_id,
             action=action,
             actor=actor,
+            transaction_version=transaction_version,
             before_json=before_json,
             after_json=after_json,
         )
@@ -519,7 +522,11 @@ def allocate_in_session(
         mode=mode,
     )
     current = _active_allocations(session, transaction_id)
-    if _same_allocation_content(current, normalized_parts):
+    same_content = _same_allocation_content(current, normalized_parts)
+    explicit_human_promotion = origin_value is Origin.MANUAL and any(
+        row.origin != Origin.MANUAL.value for row in current
+    )
+    if same_content and not explicit_human_promotion:
         return _state_in_session(session, transaction, current)
 
     if (
@@ -559,11 +566,12 @@ def allocate_in_session(
     before_json_value = _allocation_json(current)
     action = "confirm" if not current else ("split" if len(normalized_parts) > 1 else "edit")
     audit_action = "allocation.confirmed" if not current else "allocation.superseded"
-    _write_decision_and_audit(
+    decision_id = _write_decision_and_audit(
         session,
         transaction_id=transaction_id,
         actor=actor_value,
         action=action,
+        transaction_version=transaction.version + 1,
         audit_action=audit_action,
         before=before_json_value or None,
         after=after_json_value,
@@ -604,7 +612,7 @@ def allocate_in_session(
     # transaction-wide optimistic token shared with classification writes.
     transaction.version += 1
     session.flush()
-    return _state_in_session(session, transaction, new_rows)
+    return replace(_state_in_session(session, transaction, new_rows), decision_id=decision_id)
 
 
 @_translate_integrity_errors
@@ -673,6 +681,7 @@ def clear_allocations(
             transaction_id=transaction_id,
             actor=actor_value,
             action="clear",
+            transaction_version=transaction.version + 1,
             audit_action="allocation.retracted",
             before=before,
             after=[],
@@ -687,7 +696,7 @@ def clear_allocations(
             allocation.version += 1
         transaction.version += 1
         session.flush()
-    return get_allocation_state(engine, transaction_id)
+    return replace(get_allocation_state(engine, transaction_id), decision_id=decision_id)
 
 
 @_translate_integrity_errors

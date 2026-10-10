@@ -440,6 +440,7 @@ class ClassificationDecision(VersionedMixin, CreatedAtMixin, Base):
     undone_by_decision_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("classification_decisions.decision_id", ondelete="RESTRICT")
     )
+    transaction_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class Rule(VersionedMixin, CreatedUpdatedAtMixin, Base):
@@ -500,6 +501,27 @@ class RuleExecution(Base):
     )
     executed_at_utc: Mapped[datetime] = mapped_column(
         UTCDateTimeText(), nullable=False, server_default=_utc_default()
+    )
+    batch_id: Mapped[str | None] = mapped_column(Text)
+    rule_version: Mapped[int | None] = mapped_column(Integer)
+    batch_scope_sha256: Mapped[str | None] = mapped_column(Text)
+    classification_decision_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey(
+            "classification_decisions.decision_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+    undone_by_decision_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey(
+            "classification_decisions.decision_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
     )
 
 

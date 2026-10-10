@@ -2,7 +2,7 @@
 
 ## Source de vérité
 
-`backend/app/db/migrations/sql/0001_initial.sql` et `versions/0001_initial.py` sont gelées au commit `1066748` (SHA-256 vérifiés par `MIG-FREEZE-01`). La révision `0002_t17_refund_safety` porte les évolutions T17. `docs/examples/schema.sql` représente désormais la tête `0001 + 0002`; les tests comparent le résultat Alembic à tous les objets tables, index et triggers de cette référence.
+`backend/app/db/migrations/sql/0001_initial.sql` et `versions/0001_initial.py` sont gelées au commit `1066748` (SHA-256 vérifiés par `MIG-FREEZE-01`). La révision `0002_t17_refund_safety` porte les évolutions T17 et `0003_t20_review` ajoute les liens d'annulation versionnés. `docs/examples/schema.sql` représente désormais la tête `0001 + 0002 + 0003`; les tests comparent le résultat Alembic à tous les objets tables, index et triggers de cette référence.
 
 `0002` reconstruit uniquement `classification_decisions` (copie de toutes les
 lignes et colonnes, avec `clear` ajouté à l'ensemble des actions), ajoute
@@ -36,9 +36,13 @@ réinstalle les triggers puis exige `PRAGMA integrity_check = ok` et aucune lign
 de `PRAGMA foreign_key_check` avant commit. `foreign_keys` est réactivé après
 la migration. Ne jamais lancer les tests ou les vérifications sur `data/`.
 
-Le downgrade de 0002 refuse par défaut. Il exige une sauvegarde vérifiée de la
-révision source et `COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1`; l'action de décision
-`clear` est alors réduite à `undo` et les parts matérialisées sont supprimées.
+Le downgrade de chaque révision refuse par défaut. Il exige une sauvegarde
+vérifiée correspondant exactement à la révision source courante et
+`COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1`; pour revenir de 0003 à 0001, il faut
+donc faire deux downgrades successifs avec une nouvelle sauvegarde vérifiée
+entre les deux. Le downgrade de 0002 réduit l'action `clear` à `undo` et
+supprime les parts matérialisées; le downgrade de 0003 supprime les colonnes
+d'annulation et de lot.
 Une révision publiée reste inchangée, y compris en cas de défaut : créer une
 révision corrective vers l'avant.
 

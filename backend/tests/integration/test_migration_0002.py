@@ -17,7 +17,6 @@ from app.core.config import Settings
 from app.db.migrate import create_verified_backup, current_revision, upgrade_to_head
 from app.db.models import Account, Transaction
 from app.db.session import create_sqlite_engine, write_transaction
-from app.services.allocations import AllocationPart, allocate
 
 ROOT = Path(__file__).resolve().parents[3]
 FROZEN_0001_SQL_SHA256 = "b3ee949ad9aedddd6bb6c07ac0b1c1cad41709d8da0d861df676e1db7c49b257"
@@ -44,24 +43,42 @@ def _objects(database: Path) -> tuple[tuple[str, str, str, str | None], ...]:
     )
 
 
-def _snapshot_rows(database: Path) -> dict[str, tuple[tuple[object, ...], ...]]:
+def _snapshot_rows(
+    database: Path, legacy_columns: dict[str, tuple[str, ...]] | None = None
+) -> dict[str, tuple[tuple[str, ...], tuple[tuple[object, ...], ...]]]:
     with sqlite3.connect(database) as connection:
-        tables = [
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name NOT LIKE 'sqlite_%' AND name <> 'alembic_version' ORDER BY name"
+        tables = (
+            sorted(legacy_columns)
+            if legacy_columns is not None
+            else [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' AND name <> 'alembic_version' ORDER BY name"
+                )
+            ]
+        )
+        snapshots = {}
+        for table in tables:
+            columns = (
+                legacy_columns[table]
+                if legacy_columns is not None
+                else tuple(
+                    str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
+                )
             )
-        ]
-        return {
-            table: tuple(
+            projection = ", ".join(f'"{column}"' for column in columns)
+            rows = tuple(
                 sorted(
-                    (tuple(row) for row in connection.execute(f' SELECT * FROM "{table}"')),
+                    (
+                        tuple(row)
+                        for row in connection.execute(f'SELECT {projection} FROM "{table}"')
+                    ),
                     key=repr,
                 )
             )
-            for table in tables
-        }
+            snapshots[table] = (columns, rows)
+        return snapshots
 
 
 def _insert_old_status_links(
@@ -117,6 +134,87 @@ def _seed_old_categories(database: Path) -> None:
             )
 
 
+def _legacy_allocate(
+    database: Path,
+    transaction_id: str,
+    transaction_amount_cents: int,
+    parts: tuple[tuple[str, str, int], ...],
+    *,
+    previous: tuple[dict[str, str | int], ...] = (),
+) -> tuple[dict[str, str | int], ...]:
+    """Seed valid pre-T20 allocation history without using the current ORM model."""
+    decision_id = str(uuid4())
+    audit_id = str(uuid4())
+    allocation_ids = tuple(str(uuid4()) for _ in parts)
+    before_json = (
+        None
+        if not previous
+        else json.dumps(previous, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+    after = tuple(
+        {
+            "allocation_id": allocation_id,
+            "flow_kind": flow_kind,
+            "category_id": category_id,
+            "amount_cents": amount_cents,
+            "origin": "manual",
+            "beneficiary": "unknown",
+            "cadence": "unknown",
+            "flexibility": "unknown",
+            "acquisition": "unknown",
+        }
+        for allocation_id, (flow_kind, category_id, amount_cents) in zip(
+            allocation_ids, parts, strict=True
+        )
+    )
+    after_json = json.dumps(after, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    action = "confirm" if not previous else ("split" if len(parts) > 1 else "edit")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            """INSERT INTO classification_decisions
+               (decision_id, transaction_id, action, actor, before_json, after_json)
+               VALUES (?, ?, ?, 'migration-fixture', ?, ?)""",
+            (decision_id, transaction_id, action, before_json, after_json),
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (audit_event_id, target_type, target_id, action, actor, before_json, after_json)
+               VALUES (?, 'transaction', ?, ?, 'migration-fixture', ?, ?)""",
+            (
+                audit_id,
+                transaction_id,
+                "allocation.superseded" if previous else "allocation.confirmed",
+                before_json,
+                after_json,
+            ),
+        )
+        if previous:
+            for old in previous:
+                connection.execute(
+                    """UPDATE allocations
+                       SET superseded_by_allocation_id=?, superseded_by_audit_event_id=?,
+                           version=version+1 WHERE allocation_id=?""",
+                    (allocation_ids[0], audit_id, old["allocation_id"]),
+                )
+        for allocation_id, (flow_kind, category_id, amount_cents) in zip(
+            allocation_ids, parts, strict=True
+        ):
+            connection.execute(
+                """INSERT INTO allocations
+                   (allocation_id, transaction_id, category_id, flow_kind, amount_cents, origin)
+                   VALUES (?, ?, ?, ?, ?, 'manual')""",
+                (allocation_id, transaction_id, category_id, flow_kind, amount_cents),
+            )
+        connection.execute(
+            "UPDATE transactions SET version=version+1 WHERE transaction_id=?",
+            (transaction_id,),
+        )
+        assert connection.execute("SELECT changes()").fetchone() == (1,)
+    assert sum(int(part["amount_cents"]) for part in after) == transaction_amount_cents
+    return after
+
+
 @pytest.mark.integration
 def test_MIG_FREEZE_01_published_0001_files_are_pinned() -> None:
     sql_path = ROOT / "backend/app/db/migrations/sql/0001_initial.sql"
@@ -167,42 +265,34 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
                 session.flush()
                 transactions[label] = row
         purchase = transactions["ACHAT MIGRATION"]
-        allocate(
-            engine,
+        prior_purchase = _legacy_allocate(
+            database,
             purchase.transaction_id,
-            [
-                AllocationPart("expense", "groceries", -7_000),
-                AllocationPart("expense", "restaurants_dining", -3_000),
-            ],
-            mode="complete",
-            origin="manual",
-            actor="migration-fixture",
-            expected_version=1,
+            -10_000,
+            (
+                ("expense", "groceries", -7_000),
+                ("expense", "restaurants_dining", -3_000),
+            ),
         )
-        allocate(
-            engine,
+        _legacy_allocate(
+            database,
             purchase.transaction_id,
-            [
-                AllocationPart("expense", "groceries", -6_000),
-                AllocationPart("expense", "restaurants_dining", -4_000),
-            ],
-            mode="complete",
-            origin="manual",
-            actor="migration-fixture",
-            expected_version=2,
+            -10_000,
+            (
+                ("expense", "groceries", -6_000),
+                ("expense", "restaurants_dining", -4_000),
+            ),
+            previous=prior_purchase,
         )
         source_allocations: dict[str, str] = {}
         for label, _amount in specs[1:]:
-            state = allocate(
-                engine,
+            parts = _legacy_allocate(
+                database,
                 transactions[label].transaction_id,
-                [AllocationPart("refund", "income_refund", transactions[label].amount_cents)],
-                mode="complete",
-                origin="manual",
-                actor="migration-fixture",
-                expected_version=1,
+                transactions[label].amount_cents,
+                (("refund", "income_refund", transactions[label].amount_cents),),
             )
-            source_allocations[label] = state.allocations[0].allocation_id
+            source_allocations[label] = str(parts[0]["allocation_id"])
         engine.dispose()
 
         # Les écritures historiques couvrent les statuts qui existaient à 0001;
@@ -290,7 +380,7 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
         rows_before = _snapshot_rows(database)
 
         result = upgrade_to_head(settings)
-        assert result.revision == "0002_t17_refund_safety"
+        assert result.revision == "0003_t20_review"
         assert result.backup is not None
         assert stat.S_IMODE(result.backup.database_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(result.backup.manifest_path.stat().st_mode) == 0o600
@@ -298,11 +388,12 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
         assert backup_manifest["source_revision"] == "0001_initial"
         assert backup_manifest["integrity_check"] == "ok"
 
-        rows_after = _snapshot_rows(database)
-        assert {name: rows_after[name] for name in rows_before} == rows_before
+        legacy_columns = {name: snapshot[0] for name, snapshot in rows_before.items()}
+        rows_after = _snapshot_rows(database, legacy_columns)
+        assert rows_after == rows_before
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "0002_t17_refund_safety",
+                "0003_t20_review",
             )
             assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -422,7 +513,7 @@ def test_MIG_0002_downgrade_requires_explicit_verified_backup(
     settings = Settings(
         database_url=f"sqlite:///{database}", data_dir=tmp_path / "private-data", _env_file=None
     )
-    assert upgrade_to_head(settings).revision == "0002_t17_refund_safety"
+    assert upgrade_to_head(settings).revision == "0003_t20_review"
     config = Config(str(ROOT / "alembic.ini"))
     config.attributes["settings"] = settings
     config.attributes["operation"] = "downgrade"
@@ -430,15 +521,22 @@ def test_MIG_0002_downgrade_requires_explicit_verified_backup(
     monkeypatch.delenv("COMPTES_DOWNGRADE_BACKUP", raising=False)
     with pytest.raises(RuntimeError, match="COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1"):
         command.downgrade(config, "0001_initial")
-    assert current_revision(settings.database_url) == "0002_t17_refund_safety"
+    assert current_revision(settings.database_url) == "0003_t20_review"
 
-    backup = create_verified_backup(
+    backup_t20 = create_verified_backup(
+        database,
+        tmp_path / "verified-backups",
+        source_revision="0003_t20_review",
+    )
+    monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
+    monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t20.database_path))
+    command.downgrade(config, "0002_t17_refund_safety")
+    backup_t17 = create_verified_backup(
         database,
         tmp_path / "verified-backups",
         source_revision="0002_t17_refund_safety",
     )
-    monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
-    monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup.database_path))
+    monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t17.database_path))
     command.downgrade(config, "0001_initial")
     assert current_revision(settings.database_url) == "0001_initial"
     base_reference = tmp_path / "frozen-base.sqlite"

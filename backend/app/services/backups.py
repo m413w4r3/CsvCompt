@@ -1159,7 +1159,7 @@ def _export_rows(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
 
     decisions = connection.execute(
         "SELECT decision_id,transaction_id,suggestion_id,action,actor,before_json,after_json,"
-        "undone_by_decision_id,created_at_utc FROM classification_decisions "
+        "undone_by_decision_id,created_at_utc,transaction_version FROM classification_decisions "
         "ORDER BY created_at_utc,decision_id"
     )
     for row in decisions:
@@ -1174,6 +1174,7 @@ def _export_rows(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
             "after_json": _decision_json(row[6]),
             "undone_by_decision_id": row[7],
             "created_at_utc": row[8],
+            "transaction_version": row[9],
         }
 
 
@@ -1207,6 +1208,7 @@ _CSV_COLUMNS = (
     "after_json",
     "undone_by_decision_id",
     "created_at_utc",
+    "transaction_version",
 )
 
 

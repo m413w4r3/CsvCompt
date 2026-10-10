@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -42,7 +43,7 @@ from app.db.models import (
 from app.db.session import session_scope, write_transaction
 from app.domain.types import FlowKind
 from app.importers.normalize import search_label
-from app.services.allocations import AllocationState, allocate_in_session
+from app.services.allocations import AllocationState, allocate_in_session, get_allocation_state
 
 MAX_SIMULATION_TRANSACTIONS = 10_000
 MAX_PAGE_SIZE = 1_000
@@ -144,6 +145,7 @@ class RuleApplication:
     conflict_ids: tuple[str, ...]
     allocation_states: tuple[AllocationState, ...]
     elapsed_ns: int
+    batch_id: str
 
 
 def _fail(code: str, message: str, status: int = 422) -> RuleEngineError:
@@ -214,7 +216,7 @@ def _decision_has_rule_origin(decision: ClassificationDecision) -> bool:
     That describes what was removed, not who made the clear, so it must not
     make the explicit human decision look like another rule execution.
     """
-    if decision.action == "clear":
+    if decision.action in ("clear", "undo"):
         return False
     for serialized in (decision.before_json, decision.after_json):
         if not serialized:
@@ -773,9 +775,12 @@ def _trace_execution(
     rule: RuleRecord,
     transaction_id: str,
     actor: str,
+    batch_id: str,
+    batch_scope_sha256: str,
     outcome: Literal["applied", "skipped_manual", "skipped_scope"],
     before: list[dict[str, str | int]] | None,
     after: list[dict[str, str | int]] | None,
+    classification_decision_id: str | None = None,
 ) -> None:
     event_id = str(uuid.uuid4())
     before_value = {
@@ -825,6 +830,10 @@ def _trace_execution(
             after_json=after_json,
             dry_run=0,
             audit_event_id=event_id,
+            batch_id=batch_id,
+            rule_version=rule.version,
+            batch_scope_sha256=batch_scope_sha256,
+            classification_decision_id=classification_decision_id,
         )
     )
 
@@ -845,6 +854,7 @@ def apply_rule(
     expected_version: int,
     actor: str,
     selection: tuple[str, ...] | list[str] = (),
+    batch_id: str | None = None,
 ) -> RuleApplication:
     """Explicitly apply an approved rule to selected/current existing transactions.
 
@@ -916,12 +926,68 @@ def apply_rule(
                     )
                 )
             )
+    if batch_id is None:
+        batch_id_value = str(uuid.uuid4())
+    else:
+        try:
+            parsed_batch_id = uuid.UUID(batch_id)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise _fail("RULE_BATCH_INVALID", "batch_id doit être un UUIDv4 canonique.") from error
+        if str(parsed_batch_id) != batch_id or parsed_batch_id.version != 4:
+            raise _fail("RULE_BATCH_INVALID", "batch_id doit être un UUIDv4 canonique.")
+        batch_id_value = batch_id
+    scope_document = json.dumps(
+        {
+            "actor": actor.strip(),
+            "rule_id": rule_id,
+            "rule_version": expected_version,
+            "scope": scope,
+            "transaction_ids": sorted(target_ids),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    batch_scope_sha256 = hashlib.sha256(scope_document.encode("utf-8")).hexdigest()
+    with session_scope(engine) as session:
+        batch_rows = tuple(
+            session.execute(
+                select(
+                    RuleExecution.rule_id,
+                    RuleExecution.transaction_id,
+                    RuleExecution.outcome,
+                    RuleExecution.rule_version,
+                    RuleExecution.batch_scope_sha256,
+                    RuleExecution.undone_by_decision_id,
+                ).where(
+                    RuleExecution.batch_id == batch_id_value,
+                    RuleExecution.dry_run == 0,
+                )
+            ).all()
+        )
+    if batch_rows:
+        if any(
+            row.rule_id != rule_id
+            or row.rule_version != expected_version
+            or row.batch_scope_sha256 != batch_scope_sha256
+            for row in batch_rows
+        ):
+            raise _fail("RULE_BATCH_CONFLICT", "batch_id est déjà associé à une autre portée.", 409)
+        if any(row.undone_by_decision_id is not None for row in batch_rows):
+            raise _fail("RULE_BATCH_ALREADY_UNDONE", "Ce lot a déjà été annulé.", 409)
     allocations: list[AllocationState] = []
-    applied_ids: list[str] = []
+    prior_applied = {row.transaction_id for row in batch_rows if row.outcome == "applied"}
+    applied_ids: list[str] = [
+        transaction_id for transaction_id in target_ids if transaction_id in prior_applied
+    ]
+    for transaction_id in applied_ids:
+        allocations.append(get_allocation_state(engine, transaction_id))
     skipped_manual: list[str] = []
     skipped_classified: list[str] = []
 
     for transaction_id in target_ids:
+        if transaction_id in prior_applied:
+            continue
         if transaction_id in manual_ids:
             skipped_manual.append(transaction_id)
             with write_transaction(engine) as session:
@@ -931,6 +997,8 @@ def apply_rule(
                     rule=rule,
                     transaction_id=transaction_id,
                     actor=actor.strip(),
+                    batch_id=batch_id_value,
+                    batch_scope_sha256=batch_scope_sha256,
                     outcome="skipped_manual",
                     before=None,
                     after=None,
@@ -989,9 +1057,12 @@ def apply_rule(
                 rule=rule,
                 transaction_id=transaction_id,
                 actor=actor.strip(),
+                batch_id=batch_id_value,
+                batch_scope_sha256=batch_scope_sha256,
                 outcome="applied",
                 before=[],
                 after=after,
+                classification_decision_id=state.decision_id,
             )
         allocations.append(state)
         applied_ids.append(transaction_id)
@@ -1005,4 +1076,5 @@ def apply_rule(
         conflict_ids=tuple(sorted(conflict_ids)),
         allocation_states=tuple(allocations),
         elapsed_ns=time.perf_counter_ns() - started,
+        batch_id=batch_id_value,
     )

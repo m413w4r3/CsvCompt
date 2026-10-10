@@ -62,8 +62,8 @@ def test_T06_schema_reference_sqlite_master_objects_match_migration(
     migrated_objects = _objects(migrated_db)
     assert migrated_objects == reference_objects
     assert sum(item[0] == "table" for item in migrated_objects) == 29
-    assert sum(item[0] == "index" for item in migrated_objects) == 34
-    assert sum(item[0] == "trigger" for item in migrated_objects) == 75
+    assert sum(item[0] == "index" for item in migrated_objects) == 39
+    assert sum(item[0] == "trigger" for item in migrated_objects) == 81
 
 
 @pytest.mark.integration
