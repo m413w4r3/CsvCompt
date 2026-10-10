@@ -41,6 +41,9 @@ Les filtres partagés suivent `docs/API.md` : période inclusive, comptes, caté
 - Le statut health distingue la connexion, une base à initialiser ou migrer, une base indisponible, une erreur HTTP et le serveur hors ligne. Ces états n’empêchent pas l’utilisation du shell.
 - Sur mobile, le statut health reste dans la topbar ; le menu fermé est masqué et inerte, son ouverture place le focus dans les liens, Tab reste dans le tiroir et Échap le ferme en restituant le focus.
 - `tests/e2e/a11y.spec.ts` vérifie les contrastes et les critères WCAG automatisables par axe-core à 375, 768 et 1280 px, en thèmes clair et sombre.
+- La page Opérations expose les lignes brutes et le flux d'import local. Les réponses serveur sont rendues comme texte React; aucun libellé ni alias n'est injecté comme HTML. Les filtres non sensibles sont conservés dans l'URL; la recherche du libellé reste en mémoire pour éviter de copier une donnée bancaire dans l'historique du navigateur.
+- Les imports passent par aperçu, résolutions versionnées et commit avec une clé `Idempotency-Key` UUID conservée pendant le retry. Une résolution en conflit recharge l'aperçu avant une nouvelle action. Les lignes demeurent « Non ventilée » jusqu'au ticket Revue.
+- Les pages de transactions affichent le résumé du filtre fourni par `GET /api/v1/transactions`; les sommes ne sont pas recalculées depuis la page visible.
 
 ## Direction visuelle
 

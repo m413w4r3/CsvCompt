@@ -52,7 +52,7 @@ describe('UI-00 · shell et navigation', () => {
     for (const item of navigation.slice(1)) {
       await user.click(within(nav).getByRole('link', { name: item.label }))
       expect(await screen.findByRole('heading', { name: item.label })).toBeInTheDocument()
-      expect(screen.getByRole('link', { name: /Importer un relevé/ })).toHaveAttribute('href', '/transactions')
+      if (item.path !== '/transactions') expect(screen.getByRole('link', { name: /Importer un relevé/ })).toHaveAttribute('href', '/transactions')
     }
     expect(navigation).toHaveLength(10)
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })

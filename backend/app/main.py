@@ -6,9 +6,11 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
+from app.api.v1.accounts import router as accounts_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.health import router as health_router
 from app.api.v1.imports import router as imports_router
+from app.api.v1.transactions import router as transactions_router
 from app.core.config import Settings, get_settings
 from app.core.errors import InternalErrorBoundary, install_error_handlers
 from app.core.logging import configure_logging
@@ -57,6 +59,8 @@ def create_app(
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(imports_router, prefix="/api/v1")
     application.include_router(categories_router, prefix="/api/v1")
+    application.include_router(accounts_router, prefix="/api/v1")
+    application.include_router(transactions_router, prefix="/api/v1")
 
     # Point d'extension documenté pour servir ultérieurement le build frontend statique.
     return application
