@@ -6,7 +6,7 @@ PRAGMA foreign_keys = ON;
 PRAGMA recursive_triggers = ON;
 
 CREATE TABLE accounts (
-    account_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL PRIMARY KEY CHECK (length(account_id) = 36 AND account_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     alias TEXT NOT NULL CHECK (length(trim(alias)) > 0),
     account_role TEXT NOT NULL CHECK (account_role IN (
         'current', 'savings', 'pea', 'personal', 'cash', 'other'
@@ -16,15 +16,23 @@ CREATE TABLE accounts (
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc)),
     CHECK ((bank_fingerprint IS NULL AND fingerprint_key_version IS NULL)
         OR (length(bank_fingerprint) = 64 AND fingerprint_key_version IS NOT NULL))
 );
 
+CREATE TRIGGER trg_accounts_version_increment
+BEFORE UPDATE ON accounts
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
+
 CREATE TABLE import_files (
-    import_file_id TEXT PRIMARY KEY,
+    import_file_id TEXT NOT NULL PRIMARY KEY CHECK (length(import_file_id) = 36 AND import_file_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     file_sha256 TEXT NOT NULL CHECK (
         length(file_sha256) = 64 AND file_sha256 NOT GLOB '*[^0-9a-f]*'
     ),
@@ -44,8 +52,8 @@ CREATE TABLE import_files (
     failure_code TEXT,
     failure_summary TEXT,
     started_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(started_at_utc, -1) = 'Z'),
-    finished_at_utc TEXT CHECK (finished_at_utc IS NULL OR substr(finished_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', started_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at_utc) = started_at_utc)),
+    finished_at_utc TEXT CHECK (finished_at_utc IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', finished_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', finished_at_utc) = finished_at_utc)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     CHECK ((status = 'no_op' AND duplicate_of_import_file_id IS NOT NULL)
         OR (status <> 'no_op' AND duplicate_of_import_file_id IS NULL)),
@@ -60,6 +68,14 @@ CREATE TABLE import_files (
     )
 );
 
+CREATE TRIGGER trg_import_files_version_increment
+BEFORE UPDATE ON import_files
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
+
 -- Une empreinte ne peut être committée qu'une fois. Les tentatives répétées sont
 -- conservées comme status=no_op, rattachées au commit initial, sans source_rows.
 CREATE UNIQUE INDEX uq_import_files_committed_sha256
@@ -67,7 +83,7 @@ CREATE UNIQUE INDEX uq_import_files_committed_sha256
 CREATE INDEX ix_import_files_started_at ON import_files(started_at_utc DESC, import_file_id DESC);
 
 CREATE TABLE import_account_sections (
-    import_file_id TEXT NOT NULL REFERENCES import_files(import_file_id) ON DELETE RESTRICT,
+    import_file_id TEXT NOT NULL REFERENCES import_files(import_file_id) ON DELETE RESTRICT CHECK (length(import_file_id) = 36 AND import_file_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     section_index INTEGER NOT NULL CHECK (section_index > 0),
     account_id TEXT REFERENCES accounts(account_id) ON DELETE RESTRICT,
     account_fingerprint TEXT CHECK (account_fingerprint IS NULL OR length(account_fingerprint) = 64),
@@ -90,7 +106,7 @@ CREATE UNIQUE INDEX uq_import_sections_file_account
 -- Snapshot append-only : les résultats sont liés à une empreinte de l'ensemble
 -- d'entrées et recalculés quand cet ensemble change; l'ordre d'import est sans effet.
 CREATE TABLE balance_checks (
-    balance_check_id TEXT PRIMARY KEY,
+    balance_check_id TEXT NOT NULL PRIMARY KEY CHECK (length(balance_check_id) = 36 AND balance_check_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,
     start_import_file_id TEXT NOT NULL,
     start_section_index INTEGER NOT NULL,
@@ -105,7 +121,7 @@ CREATE TABLE balance_checks (
     ),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     FOREIGN KEY (start_import_file_id, start_section_index)
         REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT,
     FOREIGN KEY (end_import_file_id, end_section_index)
@@ -116,6 +132,14 @@ CREATE TABLE balance_checks (
         OR (status IN ('match', 'mismatch') AND recalculated_balance_cents IS NOT NULL AND delta_cents IS NOT NULL)),
     CHECK (start_import_file_id <> end_import_file_id OR start_section_index <> end_section_index)
 );
+
+CREATE TRIGGER trg_balance_checks_version_increment
+BEFORE UPDATE ON balance_checks
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_balance_checks_account_created
     ON balance_checks(account_id, created_at_utc DESC, balance_check_id DESC);
 
@@ -163,7 +187,7 @@ BEGIN
 END;
 
 CREATE TABLE import_rejections (
-    import_rejection_id TEXT PRIMARY KEY,
+    import_rejection_id TEXT NOT NULL PRIMARY KEY CHECK (length(import_rejection_id) = 36 AND import_rejection_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     import_file_id TEXT NOT NULL REFERENCES import_files(import_file_id) ON DELETE RESTRICT,
     section_index INTEGER,
     logical_row_idx INTEGER CHECK (logical_row_idx IS NULL OR
@@ -179,9 +203,9 @@ CREATE TABLE import_rejections (
         resolution_action IN ('link_existing', 'create_occurrence', 'map_account', 'set_coverage')),
     resolved_transaction_id TEXT REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     resolved_by TEXT,
-    resolved_at_utc TEXT CHECK (resolved_at_utc IS NULL OR substr(resolved_at_utc, -1) = 'Z'),
+    resolved_at_utc TEXT CHECK (resolved_at_utc IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', resolved_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', resolved_at_utc) = resolved_at_utc)),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     FOREIGN KEY (import_file_id, section_index)
         REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT,
     CHECK ((requires_resolution = 0 AND resolution_status = 'not_required')
@@ -223,34 +247,50 @@ BEGIN
 END;
 
 CREATE TABLE payees (
-    payee_id TEXT PRIMARY KEY,
+    payee_id TEXT NOT NULL PRIMARY KEY CHECK (length(payee_id) = 36 AND payee_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
     normalized_name TEXT NOT NULL CHECK (length(trim(normalized_name)) > 0),
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc)),
     UNIQUE (normalized_name)
 );
 
+CREATE TRIGGER trg_payees_version_increment
+BEFORE UPDATE ON payees
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
+
 CREATE TABLE payee_aliases (
-    payee_alias_id TEXT PRIMARY KEY,
+    payee_alias_id TEXT NOT NULL PRIMARY KEY CHECK (length(payee_alias_id) = 36 AND payee_alias_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     payee_id TEXT NOT NULL REFERENCES payees(payee_id) ON DELETE RESTRICT,
     alias_text TEXT NOT NULL CHECK (length(trim(alias_text)) > 0),
     normalized_alias TEXT NOT NULL CHECK (length(trim(normalized_alias)) > 0),
     match_kind TEXT NOT NULL CHECK (match_kind IN ('exact', 'approved_pattern')),
     approved_by TEXT,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     UNIQUE (normalized_alias)
 );
+
+CREATE TRIGGER trg_payee_aliases_version_increment
+BEFORE UPDATE ON payee_aliases
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_payee_aliases_payee ON payee_aliases(payee_id);
 
 CREATE TABLE categories (
-    category_id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL PRIMARY KEY,
     parent_category_id TEXT REFERENCES categories(category_id) ON DELETE RESTRICT,
     label TEXT NOT NULL CHECK (length(trim(label)) > 0),
     taxonomy_version INTEGER NOT NULL CHECK (taxonomy_version > 0),
@@ -258,11 +298,19 @@ CREATE TABLE categories (
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc)),
     CHECK (parent_category_id IS NULL OR parent_category_id <> category_id)
 );
+
+CREATE TRIGGER trg_categories_version_increment
+BEFORE UPDATE ON categories
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_categories_parent ON categories(parent_category_id, sort_order, category_id);
 
 -- Table d'admissibilité normalisée : elle rend les combinaisons issues de
@@ -279,7 +327,7 @@ CREATE TABLE category_flow_kinds (
 );
 
 CREATE TABLE transactions (
-    transaction_id TEXT PRIMARY KEY,
+    transaction_id TEXT NOT NULL PRIMARY KEY CHECK (length(transaction_id) = 36 AND transaction_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,
     booked_on TEXT NOT NULL CHECK (date(booked_on) = booked_on),
     amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),
@@ -295,9 +343,17 @@ CREATE TABLE transactions (
     payee_id TEXT REFERENCES payees(payee_id) ON DELETE RESTRICT,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     imported_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(imported_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', imported_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', imported_at_utc) = imported_at_utc)),
     UNIQUE (account_id, booked_on, amount_cents, identity_label, occurrence_rank)
 );
+
+CREATE TRIGGER trg_transactions_version_increment
+BEFORE UPDATE ON transactions
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_transactions_account_booked
     ON transactions(account_id, booked_on DESC, transaction_id DESC);
 CREATE INDEX ix_transactions_payee_booked ON transactions(payee_id, booked_on DESC);
@@ -317,7 +373,7 @@ BEGIN
 END;
 
 CREATE TABLE source_rows (
-    source_row_id TEXT PRIMARY KEY,
+    source_row_id TEXT NOT NULL PRIMARY KEY CHECK (length(source_row_id) = 36 AND source_row_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     import_file_id TEXT NOT NULL,
     section_index INTEGER NOT NULL,
     logical_row_idx INTEGER NOT NULL CHECK (typeof(logical_row_idx) = 'integer' AND logical_row_idx > 0),
@@ -329,7 +385,7 @@ CREATE TABLE source_rows (
     ),
     transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     FOREIGN KEY (import_file_id, section_index)
         REFERENCES import_account_sections(import_file_id, section_index) ON DELETE RESTRICT,
     UNIQUE (import_file_id, section_index, logical_row_idx),
@@ -386,7 +442,7 @@ BEGIN
 END;
 
 CREATE TABLE import_reconciliation_candidates (
-    reconciliation_candidate_id TEXT PRIMARY KEY,
+    reconciliation_candidate_id TEXT NOT NULL PRIMARY KEY CHECK (length(reconciliation_candidate_id) = 36 AND reconciliation_candidate_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     source_row_id TEXT NOT NULL REFERENCES source_rows(source_row_id) ON DELETE RESTRICT,
     candidate_transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     reason_code TEXT NOT NULL CHECK (reason_code IN (
@@ -395,19 +451,27 @@ CREATE TABLE import_reconciliation_candidates (
     )),
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed_distinct', 'resolved_by_explicit_action')),
     reviewed_by TEXT,
-    reviewed_at_utc TEXT CHECK (reviewed_at_utc IS NULL OR substr(reviewed_at_utc, -1) = 'Z'),
+    reviewed_at_utc TEXT CHECK (reviewed_at_utc IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', reviewed_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', reviewed_at_utc) = reviewed_at_utc)),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     CHECK (status = 'open' OR (reviewed_by IS NOT NULL AND reviewed_at_utc IS NOT NULL)),
     CHECK (source_row_id IS NOT NULL AND candidate_transaction_id IS NOT NULL),
     UNIQUE (source_row_id, candidate_transaction_id)
 );
+
+CREATE TRIGGER trg_import_reconciliation_candidates_version_increment
+BEFORE UPDATE ON import_reconciliation_candidates
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_reconciliation_candidates_review
     ON import_reconciliation_candidates(status, created_at_utc, reconciliation_candidate_id);
 
 CREATE TABLE allocations (
-    allocation_id TEXT PRIMARY KEY,
+    allocation_id TEXT NOT NULL PRIMARY KEY CHECK (length(allocation_id) = 36 AND allocation_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     category_id TEXT NOT NULL,
     flow_kind TEXT NOT NULL CHECK (flow_kind IN (
@@ -433,7 +497,7 @@ CREATE TABLE allocations (
         DEFERRABLE INITIALLY DEFERRED,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     FOREIGN KEY (category_id, flow_kind)
         REFERENCES category_flow_kinds(category_id, flow_kind) ON DELETE RESTRICT,
     CHECK (
@@ -446,13 +510,21 @@ CREATE TABLE allocations (
         OR (superseded_by_allocation_id IS NOT NULL AND superseded_by_audit_event_id IS NOT NULL
             AND superseded_by_allocation_id <> allocation_id))
 );
+
+CREATE TRIGGER trg_allocations_version_increment
+BEFORE UPDATE ON allocations
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_allocations_transaction ON allocations(transaction_id, decision);
 CREATE INDEX ix_allocations_review ON allocations(decision, origin, transaction_id);
 CREATE INDEX ix_allocations_active_transaction ON allocations(transaction_id)
     WHERE superseded_by_allocation_id IS NULL;
 
 CREATE TABLE classification_suggestions (
-    suggestion_id TEXT PRIMARY KEY,
+    suggestion_id TEXT NOT NULL PRIMARY KEY CHECK (length(suggestion_id) = 36 AND suggestion_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     proposed_flow_kind TEXT NOT NULL CHECK (proposed_flow_kind IN (
         'expense', 'income_recurring', 'income_other', 'transfer_savings',
@@ -471,16 +543,24 @@ CREATE TABLE classification_suggestions (
     llm_run_id TEXT,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     FOREIGN KEY (category_id, proposed_flow_kind)
         REFERENCES category_flow_kinds(category_id, flow_kind) ON DELETE RESTRICT,
     FOREIGN KEY (llm_run_id) REFERENCES llm_runs(llm_run_id) ON DELETE RESTRICT
 );
+
+CREATE TRIGGER trg_classification_suggestions_version_increment
+BEFORE UPDATE ON classification_suggestions
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_suggestions_review ON classification_suggestions(status, method, created_at_utc, suggestion_id);
 CREATE INDEX ix_suggestions_transaction ON classification_suggestions(transaction_id, status);
 
 CREATE TABLE classification_decisions (
-    decision_id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL PRIMARY KEY CHECK (length(decision_id) = 36 AND decision_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     suggestion_id TEXT REFERENCES classification_suggestions(suggestion_id) ON DELETE RESTRICT,
     action TEXT NOT NULL CHECK (action IN ('confirm', 'edit', 'split', 'reject', 'undo')),
@@ -490,12 +570,20 @@ CREATE TABLE classification_decisions (
     undone_by_decision_id TEXT REFERENCES classification_decisions(decision_id) ON DELETE RESTRICT,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc))
 );
+
+CREATE TRIGGER trg_classification_decisions_version_increment
+BEFORE UPDATE ON classification_decisions
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_classification_decisions_transaction ON classification_decisions(transaction_id, created_at_utc);
 
 CREATE TABLE rules (
-    rule_id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL PRIMARY KEY CHECK (length(rule_id) = 36 AND rule_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     scope_kind TEXT NOT NULL CHECK (scope_kind IN ('exact_payee', 'label_pattern', 'payee_plus_context')),
     scope_json TEXT NOT NULL,
@@ -513,16 +601,24 @@ CREATE TABLE rules (
     approved_by TEXT,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc)),
     FOREIGN KEY (category_id, flow_kind)
         REFERENCES category_flow_kinds(category_id, flow_kind) ON DELETE RESTRICT
 );
+
+CREATE TRIGGER trg_rules_version_increment
+BEFORE UPDATE ON rules
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_rules_active_priority ON rules(is_active, is_approved, priority, rule_id);
 
 CREATE TABLE rule_executions (
-    rule_execution_id TEXT PRIMARY KEY,
+    rule_execution_id TEXT NOT NULL PRIMARY KEY CHECK (length(rule_execution_id) = 36 AND rule_execution_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     rule_id TEXT NOT NULL REFERENCES rules(rule_id) ON DELETE RESTRICT,
     transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     outcome TEXT NOT NULL CHECK (outcome IN ('matched', 'applied', 'skipped_manual', 'skipped_scope', 'failed')),
@@ -532,13 +628,13 @@ CREATE TABLE rule_executions (
     audit_event_id TEXT REFERENCES audit_events(audit_event_id) ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     executed_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(executed_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', executed_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', executed_at_utc) = executed_at_utc))
 );
 CREATE INDEX ix_rule_executions_rule ON rule_executions(rule_id, executed_at_utc DESC);
 CREATE INDEX ix_rule_executions_transaction ON rule_executions(transaction_id, executed_at_utc DESC);
 
 CREATE TABLE transaction_links (
-    transaction_link_id TEXT PRIMARY KEY,
+    transaction_link_id TEXT NOT NULL PRIMARY KEY CHECK (length(transaction_link_id) = 36 AND transaction_link_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     source_transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     target_transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     link_kind TEXT NOT NULL CHECK (link_kind IN ('refund_of', 'transfer_pair', 'related')),
@@ -551,13 +647,21 @@ CREATE TABLE transaction_links (
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     CHECK (source_transaction_id <> target_transaction_id),
     CHECK ((superseded_by_transaction_link_id IS NULL AND superseded_by_audit_event_id IS NULL)
         OR (superseded_by_transaction_link_id IS NOT NULL AND superseded_by_audit_event_id IS NOT NULL)),
     CHECK (superseded_by_transaction_link_id IS NULL
         OR superseded_by_transaction_link_id <> transaction_link_id)
 );
+
+CREATE TRIGGER trg_transaction_links_version_increment
+BEFORE UPDATE ON transaction_links
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE UNIQUE INDEX uq_transaction_links_active
     ON transaction_links(source_transaction_id, target_transaction_id, link_kind,
                          COALESCE(target_allocation_id, ''))
@@ -756,7 +860,7 @@ BEGIN
 END;
 
 CREATE TABLE audit_events (
-    audit_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL PRIMARY KEY CHECK (length(audit_event_id) = 36 AND audit_event_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     import_file_id TEXT REFERENCES import_files(import_file_id) ON DELETE RESTRICT,
     target_type TEXT NOT NULL,
     target_id TEXT NOT NULL,
@@ -766,22 +870,30 @@ CREATE TABLE audit_events (
     after_json TEXT,
     idempotency_key TEXT,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc))
 );
 CREATE INDEX ix_audit_target ON audit_events(target_type, target_id, created_at_utc, audit_event_id);
 CREATE INDEX ix_audit_import ON audit_events(import_file_id, created_at_utc);
 
 CREATE TABLE app_settings (
-    setting_key TEXT PRIMARY KEY,
+    setting_key TEXT NOT NULL PRIMARY KEY,
     setting_value TEXT NOT NULL,
     is_secret INTEGER NOT NULL DEFAULT 0 CHECK (is_secret IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc))
 );
 
+CREATE TRIGGER trg_app_settings_version_increment
+BEFORE UPDATE ON app_settings
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
+
 CREATE TABLE llm_runs (
-    llm_run_id TEXT PRIMARY KEY,
+    llm_run_id TEXT NOT NULL PRIMARY KEY CHECK (length(llm_run_id) = 36 AND llm_run_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('succeeded', 'partial', 'timeout', 'http_error', 'invalid_response', 'cancelled')),
@@ -791,12 +903,12 @@ CREATE TABLE llm_runs (
     output_tokens INTEGER CHECK (output_tokens IS NULL OR (typeof(output_tokens) = 'integer' AND output_tokens >= 0)),
     recovered_line_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(recovered_line_count) = 'integer' AND recovered_line_count >= 0),
     redacted_error_code TEXT,
-    started_at_utc TEXT NOT NULL CHECK (substr(started_at_utc, -1) = 'Z'),
-    finished_at_utc TEXT CHECK (finished_at_utc IS NULL OR substr(finished_at_utc, -1) = 'Z')
+    started_at_utc TEXT NOT NULL CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', started_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at_utc) = started_at_utc)),
+    finished_at_utc TEXT CHECK (finished_at_utc IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', finished_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', finished_at_utc) = finished_at_utc))
 );
 
 CREATE TABLE budgets (
-    budget_id TEXT PRIMARY KEY,
+    budget_id TEXT NOT NULL PRIMARY KEY CHECK (length(budget_id) = 36 AND budget_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     category_id TEXT NOT NULL,
     flow_kind TEXT NOT NULL DEFAULT 'expense' CHECK (flow_kind IN ('expense', 'allocation_personal')),
     period_start TEXT NOT NULL CHECK (date(period_start) = period_start),
@@ -806,39 +918,55 @@ CREATE TABLE budgets (
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc)),
     FOREIGN KEY (category_id, flow_kind)
         REFERENCES category_flow_kinds(category_id, flow_kind) ON DELETE RESTRICT,
     CHECK (period_start <= period_end)
 );
+
+CREATE TRIGGER trg_budgets_version_increment
+BEFORE UPDATE ON budgets
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_budgets_period ON budgets(period_start, period_end, is_active);
 
 CREATE TABLE budget_accounts (
-    budget_id TEXT NOT NULL REFERENCES budgets(budget_id) ON DELETE RESTRICT,
-    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,
+    budget_id TEXT NOT NULL REFERENCES budgets(budget_id) ON DELETE RESTRICT CHECK (length(budget_id) = 36 AND budget_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
+    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT CHECK (length(account_id) = 36 AND account_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     PRIMARY KEY (budget_id, account_id)
 );
 CREATE INDEX ix_budget_accounts_account ON budget_accounts(account_id, budget_id);
 
 CREATE TABLE insights (
-    insight_id TEXT PRIMARY KEY,
+    insight_id TEXT NOT NULL PRIMARY KEY CHECK (length(insight_id) = 36 AND insight_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ignored', 'archived')),
     narrative TEXT NOT NULL,
     generated_by TEXT NOT NULL CHECK (generated_by IN ('deterministic', 'llm')),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(updated_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at_utc) = updated_at_utc))
 );
+
+CREATE TRIGGER trg_insights_version_increment
+BEFORE UPDATE ON insights
+WHEN NEW.version <> OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'version_increment_required');
+END;
+
 CREATE INDEX ix_insights_status_created ON insights(status, created_at_utc DESC);
 
 -- Les faits sont unitaires : leur metric_definition_id est validé ici et chaque
 -- transaction utilisée peut être reliée pour le drilldown vérifiable.
 CREATE TABLE insight_facts (
-    insight_fact_id TEXT PRIMARY KEY,
+    insight_fact_id TEXT NOT NULL PRIMARY KEY CHECK (length(insight_fact_id) = 36 AND insight_fact_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     insight_id TEXT NOT NULL REFERENCES insights(insight_id) ON DELETE RESTRICT,
     fact_ordinal INTEGER NOT NULL CHECK (typeof(fact_ordinal) = 'integer' AND fact_ordinal > 0),
     metric_definition_id TEXT NOT NULL CHECK (metric_definition_id IN (
@@ -857,7 +985,7 @@ CREATE TABLE insight_facts (
     filters_json TEXT NOT NULL,
     coverage_json TEXT NOT NULL,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     UNIQUE (insight_id, fact_ordinal),
     CHECK (period_start <= period_end),
     CHECK (
@@ -870,15 +998,15 @@ CREATE TABLE insight_facts (
 CREATE INDEX ix_insight_facts_metric_period ON insight_facts(metric_definition_id, period_start, period_end);
 
 CREATE TABLE insight_fact_transactions (
-    insight_fact_id TEXT NOT NULL REFERENCES insight_facts(insight_fact_id) ON DELETE RESTRICT,
-    transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
+    insight_fact_id TEXT NOT NULL REFERENCES insight_facts(insight_fact_id) ON DELETE RESTRICT CHECK (length(insight_fact_id) = 36 AND insight_fact_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
+    transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT CHECK (length(transaction_id) = 36 AND transaction_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     contribution_cents INTEGER CHECK (contribution_cents IS NULL OR typeof(contribution_cents) = 'integer'),
     PRIMARY KEY (insight_fact_id, transaction_id)
 );
 CREATE INDEX ix_insight_fact_transactions_transaction ON insight_fact_transactions(transaction_id, insight_fact_id);
 
 CREATE TABLE backup_manifests (
-    backup_manifest_id TEXT PRIMARY KEY,
+    backup_manifest_id TEXT NOT NULL PRIMARY KEY CHECK (length(backup_manifest_id) = 36 AND backup_manifest_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
     schema_version TEXT NOT NULL,
     archive_relpath TEXT NOT NULL,
     archive_sha256 TEXT NOT NULL CHECK (length(archive_sha256) = 64 AND archive_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -888,8 +1016,8 @@ CREATE TABLE backup_manifests (
     includes_hmac_key INTEGER NOT NULL DEFAULT 1 CHECK (includes_hmac_key = 1),
     status TEXT NOT NULL CHECK (status IN ('created', 'verified', 'restored', 'failed')),
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
-    verified_at_utc TEXT CHECK (verified_at_utc IS NULL OR substr(verified_at_utc, -1) = 'Z')
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
+    verified_at_utc TEXT CHECK (verified_at_utc IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', verified_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', verified_at_utc) = verified_at_utc))
 );
 CREATE INDEX ix_backup_manifests_created ON backup_manifests(created_at_utc DESC);
 
@@ -897,16 +1025,17 @@ CREATE INDEX ix_backup_manifests_created ON backup_manifests(created_at_utc DESC
 -- et sont purgées au démarrage ; hors fenêtre, l'API ne promet pas le rejeu.
 -- La réponse conservée n'inclut ni secret ni libellé brut non nécessaire.
 CREATE TABLE idempotency_records (
-    idempotency_key TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL PRIMARY KEY,
     http_method TEXT NOT NULL,
     canonical_path TEXT NOT NULL,
     request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
     response_status INTEGER NOT NULL CHECK (response_status BETWEEN 200 AND 599),
     response_json TEXT NOT NULL,
     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-        CHECK (substr(created_at_utc, -1) = 'Z'),
+        CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),
     expires_at_utc TEXT GENERATED ALWAYS AS
         (strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc, '+7 days')) STORED
+        CHECK (strftime('%Y-%m-%dT%H:%M:%fZ', expires_at_utc) = expires_at_utc)
 );
 CREATE INDEX ix_idempotency_expiry ON idempotency_records(expires_at_utc);
 

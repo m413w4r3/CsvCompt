@@ -19,6 +19,7 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b"), "[REDACTED_IBAN]"),
     (re.compile(r"\d{8,}"), "[REDACTED_NUMBER]"),
 )
+_HTTPX_REQUEST_URL = re.compile(r'^(HTTP Request: \w+)\s+\S+(\s+"HTTP/[^\"]+")$')
 
 
 def redact_text(value: str) -> str:
@@ -37,6 +38,8 @@ class RedactionFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             message = "[message de log indisponible]"
+        if record.name == "httpx":
+            message = _HTTPX_REQUEST_URL.sub(r"\1 [URL REDACTED]\2", message)
         record.msg = redact_text(message)
         record.args = ()
         return True
@@ -69,3 +72,41 @@ def configure_logging() -> None:
             handler.addFilter(RedactionFilter())
         handler.setFormatter(JsonFormatter())
     root.setLevel(logging.INFO)
+
+
+def uvicorn_log_config() -> dict[str, Any]:
+    """Configuration Uvicorn structurée; filtre également les loggers serveur."""
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {"redaction": {"()": RedactionFilter}},
+        "formatters": {"json": {"()": JsonFormatter}},
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "filters": ["redaction"],
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "filters": ["redaction"],
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {
+                "handlers": ["default"],
+                "level": "INFO",
+                "propagate": False,
+            },
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+        "root": {"handlers": ["default"], "level": "INFO"},
+    }

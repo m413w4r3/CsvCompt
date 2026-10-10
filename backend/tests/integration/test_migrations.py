@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,13 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.db import migrate
-from app.db.migrate import BackupError, create_verified_backup, upgrade_to_head
+from app.db.migrate import (
+    BackupError,
+    MigrationError,
+    create_verified_backup,
+    database_state,
+    upgrade_to_head,
+)
 from app.db.session import create_sqlite_engine
 from app.main import create_app
 
@@ -21,9 +28,11 @@ def _settings(database: Path, data_dir: Path) -> Settings:
     return Settings(database_url=f"sqlite:///{database}", data_dir=data_dir, _env_file=None)
 
 
-def _alembic_config(settings: Settings) -> Config:
+def _alembic_config(settings: Settings, *, operation: str | None = None) -> Config:
     config = Config(str(migrate.ALEMBIC_INI))
     config.attributes["settings"] = settings
+    if operation is not None:
+        config.attributes["operation"] = operation
     return config
 
 
@@ -106,6 +115,114 @@ def test_OPS_02_failed_pre_upgrade_backup_refuses_migration(
 
 
 @pytest.mark.integration
+def test_MAJ_07_direct_alembic_upgrade_refuses_nonempty_database(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-direct.sqlite"
+    settings = _settings(database, tmp_path / "data")
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE legacy_probe (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO legacy_probe(value) VALUES ('keep-me')")
+    before = _schema_snapshot(database)
+
+    with pytest.raises(RuntimeError, match="upgrade direct refusé.*sauvegarde vérifiée"):
+        command.upgrade(_alembic_config(settings, operation="upgrade"), "head")
+
+    assert _schema_snapshot(database) == before
+    assert not (settings.data_dir / "backups").exists()
+
+
+@pytest.mark.integration
+def test_M06_data_loss_flag_never_disables_foreign_keys_during_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
+    database = tmp_path / "upgrade-with-downgrade-flag.sqlite"
+    result = upgrade_to_head(_settings(database, tmp_path / "data"))
+    assert result.revision == "0001_initial"
+
+
+@pytest.mark.integration
+def test_MAJ_15_upgrade_failure_message_matches_backup_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_upgrade(*_args, **_kwargs) -> None:
+        raise RuntimeError("synthetic migration failure")
+
+    monkeypatch.setattr(migrate.command, "upgrade", fail_upgrade)
+    fresh = tmp_path / "fresh.sqlite"
+    with pytest.raises(MigrationError) as fresh_error:
+        upgrade_to_head(_settings(fresh, tmp_path / "fresh-data"))
+    assert str(fresh_error.value) == (
+        "La migration Alembic a échoué; aucune sauvegarde pré-migration n'a été créée."
+    )
+
+    existing = tmp_path / "existing.sqlite"
+    with sqlite3.connect(existing) as connection:
+        connection.execute("CREATE TABLE legacy_probe (value INTEGER)")
+    with pytest.raises(MigrationError) as existing_error:
+        upgrade_to_head(_settings(existing, tmp_path / "existing-data"))
+    message = str(existing_error.value)
+    assert message.startswith(
+        "La migration Alembic a échoué; la sauvegarde vérifiée est conservée: pre-upgrade-"
+    )
+    backup_name = message.rsplit(": ", maxsplit=1)[-1]
+    assert (tmp_path / "existing-data" / "backups" / backup_name).is_file()
+
+
+@pytest.mark.integration
+def test_MAJ_07_upgrade_permissions_harden_existing_sqlite_files_and_data_dir(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "permissions.sqlite"
+    data_directory = tmp_path / "data"
+    settings = _settings(database, data_directory)
+    upgrade_to_head(settings)
+    database.chmod(0o644)
+    data_directory.chmod(0o755)
+
+    engine = create_sqlite_engine(settings.database_url)
+    try:
+        connection = engine.connect()
+        try:
+            connection.exec_driver_sql("SELECT count(*) FROM accounts").scalar_one()
+            for journal_file in (Path(f"{database}-wal"), Path(f"{database}-shm")):
+                if journal_file.exists():
+                    journal_file.chmod(0o644)
+            upgrade_to_head(settings)
+            assert stat.S_IMODE(database.stat().st_mode) == 0o600
+            assert stat.S_IMODE(data_directory.stat().st_mode) == 0o700
+            for journal_file in (Path(f"{database}-wal"), Path(f"{database}-shm")):
+                if journal_file.exists():
+                    assert stat.S_IMODE(journal_file.stat().st_mode) == 0o600
+        finally:
+            connection.close()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_MAJ_08_database_state_is_bounded_and_degraded_when_exclusively_locked(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "exclusive-lock.sqlite"
+    settings = _settings(database, tmp_path / "data")
+    upgrade_to_head(settings)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+
+    blocker = sqlite3.connect(database, isolation_level=None)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        state, revision = database_state(settings)
+        elapsed = time.monotonic() - started
+        assert (state, revision) == ("degraded", None)
+        assert elapsed < 0.5
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+@pytest.mark.integration
 def test_T06_downgrade_refuses_business_data_without_explicit_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -125,7 +242,7 @@ def test_T06_downgrade_refuses_business_data_without_explicit_backup(
     monkeypatch.delenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", raising=False)
     monkeypatch.delenv("COMPTES_DOWNGRADE_BACKUP", raising=False)
     with pytest.raises(RuntimeError, match="downgrade refusé.*données métier"):
-        command.downgrade(_alembic_config(settings), "base")
+        command.downgrade(_alembic_config(settings, operation="downgrade"), "base")
 
     assert migrate.current_revision(settings.database_url) == "0001_initial"
     with sqlite3.connect(database) as connection:
@@ -158,7 +275,7 @@ def test_T06_downgrade_succeeds_only_with_explicit_verified_backup(
     )
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup.database_path))
-    command.downgrade(_alembic_config(settings), "base")
+    command.downgrade(_alembic_config(settings, operation="downgrade"), "base")
 
     with sqlite3.connect(database) as connection:
         app_tables = connection.execute(

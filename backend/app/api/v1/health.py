@@ -47,6 +47,5 @@ def health(request: Request) -> dict[str, object]:
         "version": settings.version,
         "time_utc": request.app.state.clock().isoformat().replace("+00:00", "Z"),
         "database": {"status": detail_status, "revision": revision},
-        "llm": {"enabled": settings.llm_enabled},
         "offline_ready": True,
     }

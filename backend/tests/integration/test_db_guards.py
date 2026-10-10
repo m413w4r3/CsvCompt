@@ -53,5 +53,7 @@ def test_IMP_06_IMP_07_and_SEC_06_schema_contracts_replay_on_migrated_database(
     assert "IMP-06 erreur SQL au milieu du commit" in output
     assert "IMP-07 deux connexions" in output
     assert "SEC-06 chaque connexion vérifiée" in output
+    assert "ADR-025 PK non-nulles/UUIDv4" in output
+    assert "m-12 version inchangée refusée par trigger" in output
     assert "allocation confirmée au-delà du montant rejetée" in output
     assert "plafonds source/cible" in output

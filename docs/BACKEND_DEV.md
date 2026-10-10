@@ -9,7 +9,11 @@ uv sync
 uv run python -m app
 ```
 
-Le serveur lit `APP_HOST` et `APP_PORT` depuis l'environnement ou `.env` (facultatif, local et ignoré par Git). Par défaut, il écoute `127.0.0.1:9513`. L'hôte non loopback est refusé, sauf activation explicite de `ALLOW_NON_LOOPBACK=true`. La clé LLM (`LLM_API_KEY`) est une configuration backend de type secret et ne doit jamais être journalisée ni renvoyée par une API.
+Le serveur lit `APP_HOST` et `APP_PORT` depuis l'environnement ou `.env` (facultatif, local et ignoré par Git, toujours résolu à la racine du projet). Par défaut, il écoute `127.0.0.1:9513`. L'hôte non loopback est refusé, sauf activation explicite de `ALLOW_NON_LOOPBACK=true`; les requêtes dont `Host` n'est ni `127.0.0.1` ni `localhost` sont rejetées avec une erreur normalisée. Ne lance pas Uvicorn directement avec `--host 0.0.0.0` : même avec la garde Host, le service doit rester inaccessible depuis le réseau.
+
+Uvicorn est démarré par `python -m app` avec un `log_config` JSON et le filtre de rédaction sur ses loggers. Les logs d'accès HTTP sont désactivés afin qu'aucun chemin ni query string ne soit journalisé. La clé LLM (`LLM_API_KEY`) est une configuration backend de type secret; les erreurs de validation des paramètres n'en affichent pas la valeur.
+
+Les URL SQLite relatives et `DATA_DIR` sont ancrés à la racine du projet; les chemins ne dépendent jamais du répertoire courant. Les tests passent `_env_file=None`, utilisent une base sous `tmp_path` et ne lisent donc pas le `.env` local ni `data/`.
 
 `GET /api/v1/health` est utilisable hors ligne et ne crée pas la base. Son contrat stable comprend `status`, `api_version` (`"1"`), `storage_status` et `llm_enabled`. Le stockage vaut `ok` si la base est migrée à la révision courante, `degraded` si elle est absente, non initialisée ou en retard de migration, et `unavailable` si elle est illisible ou corrompue. Des champs additionnels `version`, `time_utc`, `database` et `offline_ready` donnent des détails sans remplacer ces quatre champs.
 

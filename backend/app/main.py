@@ -10,6 +10,7 @@ from app.api.v1.health import router as health_router
 from app.core.config import Settings, get_settings
 from app.core.errors import InternalErrorBoundary, install_error_handlers
 from app.core.logging import configure_logging
+from app.core.security import LocalTrustedHostMiddleware
 from app.db.session import create_sqlite_engine
 
 
@@ -34,11 +35,12 @@ def create_app(
     application.state.clock = clock or (lambda: datetime.now(UTC))
     application.state.db_engine = create_sqlite_engine(active_settings.database_url)
     application.add_middleware(InternalErrorBoundary)
+    application.add_middleware(
+        LocalTrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost"],
+    )
     install_error_handlers(application)
     application.include_router(health_router, prefix="/api/v1")
 
     # Point d'extension documenté pour servir ultérieurement le build frontend statique.
     return application
-
-
-app = create_app()

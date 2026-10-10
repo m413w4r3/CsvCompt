@@ -13,6 +13,7 @@ from app.db.models import (
     AuditEvent,
     BackupManifest,
     BalanceCheck,
+    Base,
     Budget,
     ClassificationDecision,
     ClassificationSuggestion,
@@ -89,12 +90,18 @@ def test_T06_ORM_03_text_dates_and_timestamps_are_typed_and_utc() -> None:
     timestamp_type = UTCDateTimeText()
     local_time = datetime(2026, 10, 10, 14, 30, tzinfo=timezone(timedelta(hours=2)))
     stored = timestamp_type.process_bind_param(local_time, None)
-    assert stored == "2026-10-10T12:30:00.000000Z"
+    assert stored == "2026-10-10T12:30:00.000Z"
     restored = timestamp_type.process_result_value(stored, None)
     assert restored is not None and restored.tzinfo is UTC
     assert restored == local_time.astimezone(UTC)
     with pytest.raises(ValueError, match="fuseau"):
         timestamp_type.process_bind_param(datetime(2026, 10, 10), None)
+    with pytest.raises(ValueError, match="millisecondes"):
+        timestamp_type.process_result_value("2026-10-10T12:30:00.000000Z", None)
+    with pytest.raises(ValueError, match="millisecondes"):
+        timestamp_type.process_result_value("2026-10-10T12:30:00Z", None)
+    precise = datetime(2026, 10, 10, 14, 30, 0, 123456, tzinfo=timezone(timedelta(hours=2)))
+    assert timestamp_type.process_bind_param(precise, None) == "2026-10-10T12:30:00.123Z"
 
 
 def test_T06_ORM_04_versioned_rows_enable_optimistic_locking() -> None:
@@ -103,8 +110,11 @@ def test_T06_ORM_04_versioned_rows_enable_optimistic_locking() -> None:
 
 
 def test_T06_ORM_05_all_reference_tables_have_a_typed_model() -> None:
-    from app.db.models import Base
-
     assert len(Base.metadata.tables) == 28
     assert "flow_kind" not in Transaction.__table__.columns
     assert "expires_at_utc" not in Base.metadata.tables["idempotency_records"].columns
+    assert all(
+        not column.nullable
+        for table in Base.metadata.tables.values()
+        for column in table.primary_key.columns
+    )

@@ -24,6 +24,32 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA = ROOT / "docs" / "examples" / "schema.sql"
 ACCOUNT_ID = "00000000-0000-4000-8000-000000000001"
 ACCOUNT_B_ID = "00000000-0000-4000-8000-000000000002"
+UUID_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "accounts": ("account_id",),
+    "allocations": ("allocation_id",),
+    "audit_events": ("audit_event_id",),
+    "backup_manifests": ("backup_manifest_id",),
+    "balance_checks": ("balance_check_id",),
+    "budget_accounts": ("budget_id", "account_id"),
+    "budgets": ("budget_id",),
+    "classification_decisions": ("decision_id",),
+    "classification_suggestions": ("suggestion_id",),
+    "import_account_sections": ("import_file_id",),
+    "import_files": ("import_file_id",),
+    "import_reconciliation_candidates": ("reconciliation_candidate_id",),
+    "import_rejections": ("import_rejection_id",),
+    "insight_fact_transactions": ("insight_fact_id", "transaction_id"),
+    "insight_facts": ("insight_fact_id",),
+    "insights": ("insight_id",),
+    "llm_runs": ("llm_run_id",),
+    "payee_aliases": ("payee_alias_id",),
+    "payees": ("payee_id",),
+    "rule_executions": ("rule_execution_id",),
+    "rules": ("rule_id",),
+    "source_rows": ("source_row_id",),
+    "transaction_links": ("transaction_link_id",),
+    "transactions": ("transaction_id",),
+}
 
 
 class VerificationError(RuntimeError):
@@ -63,7 +89,9 @@ def report(label: str) -> None:
     print(f"OK {label}")
 
 
-def expect_integrity_error(label: str, action: Callable[[], object], expected: str | None = None) -> None:
+def expect_integrity_error(
+    label: str, action: Callable[[], object], expected: str | None = None
+) -> None:
     try:
         action()
     except sqlite3.IntegrityError as error:
@@ -120,7 +148,11 @@ def insert_import(
     import_id = new_id()
     digest = digest or hashlib.sha256(import_id.encode("ascii")).hexdigest()
     if status == "no_op":
-        if archive_relpath is None and archive_storage_mode is None and archive_permissions_octal is None:
+        if (
+            archive_relpath is None
+            and archive_storage_mode is None
+            and archive_permissions_octal is None
+        ):
             pass
     else:
         archive_relpath = archive_relpath or f"data/originals/{import_id}.bin"
@@ -133,9 +165,20 @@ def insert_import(
             archive_permissions_octal, file_size_bytes, received_on, generation_date,
             generation_date_source, parsed_operation_count, status, duplicate_of_import_file_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (import_id, digest, archive_relpath, archive_storage_mode, archive_permissions_octal,
-         128, received_on, generation_date, generation_date_source, parsed_operation_count,
-         status, duplicate_of),
+        (
+            import_id,
+            digest,
+            archive_relpath,
+            archive_storage_mode,
+            archive_permissions_octal,
+            128,
+            received_on,
+            generation_date,
+            generation_date_source,
+            parsed_operation_count,
+            status,
+            duplicate_of,
+        ),
     )
     return import_id
 
@@ -170,8 +213,16 @@ def insert_section(
            (import_file_id, section_index, account_id, coverage_from, coverage_through, complete_through,
             balance_as_of, header_balance_cents)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (import_id, section_index, account_id, coverage_from, coverage_through, complete_through_value,
-         balance_as_of, header_balance_cents),
+        (
+            import_id,
+            section_index,
+            account_id,
+            coverage_from,
+            coverage_through,
+            complete_through_value,
+            balance_as_of,
+            header_balance_cents,
+        ),
     )
 
 
@@ -205,11 +256,26 @@ def insert_transaction(
         amount = None
         sql = amount_sql
     parameters = (
-        (transaction_id, account_id, booked_on, amount, identity_label,
-         identity_label, identity_digest(identity), occurrence_rank)
+        (
+            transaction_id,
+            account_id,
+            booked_on,
+            amount,
+            identity_label,
+            identity_label,
+            identity_digest(identity),
+            occurrence_rank,
+        )
         if amount_sql is None
-        else (transaction_id, account_id, booked_on, identity_label,
-              identity_label, identity_digest(identity), occurrence_rank)
+        else (
+            transaction_id,
+            account_id,
+            booked_on,
+            identity_label,
+            identity_label,
+            identity_digest(identity),
+            occurrence_rank,
+        )
     )
     connection.execute(
         f"""INSERT INTO transactions
@@ -243,15 +309,22 @@ def insert_source(
            (source_row_id, import_file_id, section_index, logical_row_idx, row_sha256,
             identity_key_sha256, transaction_id)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (source_row_id, import_id, section_index, logical_row_idx, row_digest,
-         identity_key_sha256, transaction_id),
+        (
+            source_row_id,
+            import_id,
+            section_index,
+            logical_row_idx,
+            row_digest,
+            identity_key_sha256,
+            transaction_id,
+        ),
     )
     return source_row_id
 
 
 def commit_import(connection: sqlite3.Connection, import_id: str) -> None:
     connection.execute(
-        "UPDATE import_files SET status = 'committed', finished_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE import_file_id = ?",
+        "UPDATE import_files SET status = 'committed', finished_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ','now'), version=version+1 WHERE import_file_id = ?",
         (import_id,),
     )
 
@@ -357,11 +430,15 @@ def verify_connection_pragmas_and_replace(schema_path: Path) -> None:
         iid = insert_import(connection, parsed_operation_count=1)
         insert_section(connection, iid)
         unprovenanced = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-11", -1234, "Sans source synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-11", -1234, "Sans source synthétique"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "SEC-06 DELETE d'une transaction sans provenance rejeté par trigger",
-            lambda: connection.execute("DELETE FROM transactions WHERE transaction_id = ?", (unprovenanced,)),
+            lambda: connection.execute(
+                "DELETE FROM transactions WHERE transaction_id = ?", (unprovenanced,)
+            ),
             "transaction_source_immutable",
         )
         expect_integrity_error(
@@ -373,12 +450,17 @@ def verify_connection_pragmas_and_replace(schema_path: Path) -> None:
             "transaction_source_immutable",
         )
         tid = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-12", -1234, "Paiement synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-12", -1234, "Paiement synthétique"),
+            occurrence_rank=1,
         )
         sid = insert_source(connection, iid, tid, 1)
         expect_integrity_error(
             "ADR-019.b UPDATE d'un champ source transaction rejeté",
-            lambda: connection.execute("UPDATE transactions SET raw_label='Modifié' WHERE transaction_id = ?", (tid,)),
+            lambda: connection.execute(
+                "UPDATE transactions SET raw_label='Modifié', version=version+1 WHERE transaction_id = ?",
+                (tid,),
+            ),
             "transaction_source_immutable",
         )
         expect_integrity_error(
@@ -388,7 +470,9 @@ def verify_connection_pragmas_and_replace(schema_path: Path) -> None:
         )
         expect_integrity_error(
             "ADR-019.b UPDATE d'une source_row rejeté",
-            lambda: connection.execute("UPDATE source_rows SET row_sha256=? WHERE source_row_id=?", ("1" * 64, sid)),
+            lambda: connection.execute(
+                "UPDATE source_rows SET row_sha256=? WHERE source_row_id=?", ("1" * 64, sid)
+            ),
             "source_row_immutable",
         )
         expect_integrity_error(
@@ -402,9 +486,16 @@ def verify_connection_pragmas_and_replace(schema_path: Path) -> None:
                 """INSERT OR REPLACE INTO source_rows
                    (source_row_id, import_file_id, section_index, logical_row_idx, row_sha256,
                     identity_key_sha256, transaction_id) VALUES (?, ?, 1, 1, ?, ?, ?)""",
-                (sid, iid, hashlib.sha256(b"replace").hexdigest(),
-                 connection.execute("SELECT identity_key_sha256 FROM transactions WHERE transaction_id=?", (tid,)).fetchone()[0],
-                 tid),
+                (
+                    sid,
+                    iid,
+                    hashlib.sha256(b"replace").hexdigest(),
+                    connection.execute(
+                        "SELECT identity_key_sha256 FROM transactions WHERE transaction_id=?",
+                        (tid,),
+                    ).fetchone()[0],
+                    tid,
+                ),
             ),
             "source_row_immutable",
         )
@@ -417,6 +508,107 @@ def verify_connection_pragmas_and_replace(schema_path: Path) -> None:
             "transaction_source_immutable",
         )
         report("SEC-06 chaque connexion vérifiée avec les deux PRAGMA")
+    finally:
+        connection.close()
+
+
+def verify_primary_key_timestamp_and_version_guards(schema_path: Path) -> None:
+    connection = connect(schema_path)
+    try:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        for table in tables:
+            columns = connection.execute(f'PRAGMA table_xinfo("{table}")').fetchall()
+            table_sql_row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            table_sql = (
+                "" if table_sql_row is None or table_sql_row[0] is None else table_sql_row[0]
+            )
+            for column in columns:
+                name = column[1]
+                if column[5] and column[3] != 1:
+                    raise VerificationError(f"PK NOT NULL absent: {table}.{name}")
+                if name in UUID_PRIMARY_KEYS.get(table, ()):
+                    if column[2].upper() != "TEXT" or column[3] != 1 or column[5] == 0:
+                        raise VerificationError(f"UUIDv4 PK mal typée: {table}.{name}")
+                    if f"length({name}) = 36" not in table_sql or f"{name} GLOB '" not in table_sql:
+                        raise VerificationError(f"UUIDv4 CHECK absent: {table}.{name}")
+                if name.endswith("_utc"):
+                    if (
+                        "strftime('%Y-%m-%dT%H:%M:%fZ'," not in table_sql
+                        or f"= {name}" not in table_sql
+                    ):
+                        raise VerificationError(f"horodatage UTC strict absent: {table}.{name}")
+
+            if any(column[1] == "version" for column in columns):
+                trigger = f"trg_{table}_version_increment"
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise VerificationError(f"trigger de version absent: {table}")
+
+        insert_account(connection)
+        expect_integrity_error(
+            "ADR-025 PK UUIDv4 invalide rejetée",
+            lambda: insert_account(connection, "not-a-uuid"),
+        )
+        expect_integrity_error(
+            "ADR-025 PK UUID NULL rejetée",
+            lambda: connection.execute(
+                "INSERT INTO accounts(account_id, alias, account_role) VALUES (NULL, ?, ?)",
+                ("Compte sans identifiant", "current"),
+            ),
+        )
+        expect_integrity_error(
+            "m-11 horodatage non canonique rejeté",
+            lambda: connection.execute(
+                "INSERT INTO accounts(account_id, alias, account_role, created_at_utc) "
+                "VALUES (?, ?, ?, ?)",
+                (new_id(), "Horodatage invalide", "current", "2026-10-10T10:00:00Z"),
+            ),
+        )
+        default_time = connection.execute(
+            "SELECT created_at_utc FROM accounts WHERE account_id=?", (ACCOUNT_ID,)
+        ).fetchone()[0]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", default_time) is None:
+            raise VerificationError(f"DEFAULT UTC non canonique: {default_time!r}")
+
+        expect_integrity_error(
+            "m-12 version inchangée refusée par trigger",
+            lambda: connection.execute(
+                "UPDATE accounts SET alias='Version inchangée' WHERE account_id=?", (ACCOUNT_ID,)
+            ),
+            "version_increment_required",
+        )
+        expect_integrity_error(
+            "m-12 saut de version refusé par trigger",
+            lambda: connection.execute(
+                "UPDATE accounts SET version=version+2 WHERE account_id=?", (ACCOUNT_ID,)
+            ),
+            "version_increment_required",
+        )
+        connection.execute(
+            "UPDATE accounts SET alias='Version suivante', version=version+1 WHERE account_id=?",
+            (ACCOUNT_ID,),
+        )
+        if (
+            connection.execute(
+                "SELECT version FROM accounts WHERE account_id=?", (ACCOUNT_ID,)
+            ).fetchone()[0]
+            != 2
+        ):
+            raise VerificationError("m-12 incrément de version valide non appliqué")
+        report(
+            "ADR-025 PK non-nulles/UUIDv4, m-11 UTC milliseconde et m-12 version optimiste vérifiés"
+        )
     finally:
         connection.close()
 
@@ -460,9 +652,16 @@ def verify_occurrence_rank_guards(schema_path: Path) -> None:
 
 
 WHITE_SPACE_RANGES = (
-    (0x0009, 0x000D), (0x0020, 0x0020), (0x0085, 0x0085), (0x00A0, 0x00A0),
-    (0x1680, 0x1680), (0x2000, 0x200A), (0x2028, 0x2029), (0x202F, 0x202F),
-    (0x205F, 0x205F), (0x3000, 0x3000),
+    (0x0009, 0x000D),
+    (0x0020, 0x0020),
+    (0x0085, 0x0085),
+    (0x00A0, 0x00A0),
+    (0x1680, 0x1680),
+    (0x2000, 0x200A),
+    (0x2028, 0x2029),
+    (0x202F, 0x202F),
+    (0x205F, 0x205F),
+    (0x3000, 0x3000),
 )
 
 
@@ -502,14 +701,18 @@ def verify_identity_label(schema_path: Path) -> None:
         expect_integrity_error(
             "ADR-019.g espace ASCII de bord rejeté par le schéma",
             lambda: insert_transaction(
-                connection, identity=(ACCOUNT_ID, "2026-03-12", -100, " Libellé "), occurrence_rank=1
+                connection,
+                identity=(ACCOUNT_ID, "2026-03-12", -100, " Libellé "),
+                occurrence_rank=1,
             ),
             "CHECK constraint failed",
         )
         expect_integrity_error(
             "ADR-019.g double espace ASCII rejeté par le schéma",
             lambda: insert_transaction(
-                connection, identity=(ACCOUNT_ID, "2026-03-12", -100, "Libellé  double"), occurrence_rank=1
+                connection,
+                identity=(ACCOUNT_ID, "2026-03-12", -100, "Libellé  double"),
+                occurrence_rank=1,
             ),
             "CHECK constraint failed",
         )
@@ -558,8 +761,12 @@ def verify_amount_guards(schema_path: Path) -> None:
             ),
             "CHECK constraint failed",
         )
-        expect_python_rejection("ADR-019.h float intégral rejeté avant binding", lambda: require_cents(1123.0))
-        expect_python_rejection("ADR-019.h texte décimal rejeté avant binding", lambda: require_cents("12.00"))
+        expect_python_rejection(
+            "ADR-019.h float intégral rejeté avant binding", lambda: require_cents(1123.0)
+        )
+        expect_python_rejection(
+            "ADR-019.h texte décimal rejeté avant binding", lambda: require_cents("12.00")
+        )
         expect_python_rejection("ADR-019.h bool rejeté avant binding", lambda: require_cents(True))
         if require_cents(-1123) != -1123:
             raise VerificationError("binder strict a modifié un montant entier")
@@ -593,7 +800,9 @@ def verify_archive_metadata(schema_path: Path) -> None:
             lambda: insert_import(connection, archive_permissions_octal="0644"),
             "CHECK constraint failed",
         )
-        committed = create_committed_empty(connection, hashlib.sha256(b"archive-less source").hexdigest())
+        committed = create_committed_empty(
+            connection, hashlib.sha256(b"archive-less source").hexdigest()
+        )
         digest = connection.execute(
             "SELECT file_sha256 FROM import_files WHERE import_file_id=?", (committed,)
         ).fetchone()[0]
@@ -607,7 +816,10 @@ def verify_archive_metadata(schema_path: Path) -> None:
         expect_integrity_error(
             "n-09 un no_op ne peut conserver des octets archivés",
             lambda: insert_import(
-                connection, status="no_op", duplicate_of=committed, digest=digest,
+                connection,
+                status="no_op",
+                duplicate_of=committed,
+                digest=digest,
                 archive_relpath=f"data/originals/{new_id()}.bin",
             ),
             "CHECK constraint failed",
@@ -621,14 +833,19 @@ def verify_noop_archive_constraint(schema_path: Path) -> None:
     connection = connect(schema_path)
     try:
         insert_account(connection)
-        committed = create_committed_empty(connection, hashlib.sha256(b"no-op archive proof").hexdigest())
+        committed = create_committed_empty(
+            connection, hashlib.sha256(b"no-op archive proof").hexdigest()
+        )
         digest = connection.execute(
             "SELECT file_sha256 FROM import_files WHERE import_file_id=?", (committed,)
         ).fetchone()[0]
         expect_integrity_error(
             "n-09 un no_op ne peut conserver des octets archivés",
             lambda: insert_import(
-                connection, status="no_op", duplicate_of=committed, digest=digest,
+                connection,
+                status="no_op",
+                duplicate_of=committed,
+                digest=digest,
                 archive_relpath=f"data/originals/{new_id()}.bin",
             ),
             "CHECK constraint failed",
@@ -650,7 +867,9 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
             "UNIQUE constraint failed",
         )
         tid = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-03-12", -100, "Mauvais compte"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-03-12", -100, "Mauvais compte"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "IMP-14 source_row compte différent de la section rejetée",
@@ -659,7 +878,9 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
         )
 
         ok_tid = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-12", -100, "Même transaction"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-12", -100, "Même transaction"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "n-08 source_row identity_key_sha256 doit égaler la transaction cible",
@@ -674,7 +895,9 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
         )
         connection.execute("SAVEPOINT source_row_unique")
         another_tid = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-13", -101, "Collision de ligne"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-13", -101, "Collision de ligne"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "IMP-14 logical_row_idx unique par section et fichier",
@@ -692,14 +915,25 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
 
         original = iid
         noop = insert_import(
-            connection, status="no_op", duplicate_of=original,
-            digest=connection.execute("SELECT file_sha256 FROM import_files WHERE import_file_id=?", (original,)).fetchone()[0],
+            connection,
+            status="no_op",
+            duplicate_of=original,
+            digest=connection.execute(
+                "SELECT file_sha256 FROM import_files WHERE import_file_id=?", (original,)
+            ).fetchone()[0],
         )
-        if connection.execute("SELECT count(*) FROM source_rows WHERE import_file_id=?", (noop,)).fetchone()[0] != 0:
+        if (
+            connection.execute(
+                "SELECT count(*) FROM source_rows WHERE import_file_id=?", (noop,)
+            ).fetchone()[0]
+            != 0
+        ):
             raise VerificationError("IMP-01 un no_op ne doit jamais apporter de source_row")
         report("IMP-01 tentative no_op conservée avec 0 source_row")
         extra = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-14", -101, "Après commit synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-14", -101, "Après commit synthétique"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "ADR-019.b capacité de provenance d'un import commité fermée",
@@ -708,7 +942,10 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
         )
         rejected = insert_import(connection)
         insert_section(connection, rejected)
-        connection.execute("UPDATE import_files SET status='rejected' WHERE import_file_id=?", (rejected,))
+        connection.execute(
+            "UPDATE import_files SET status='rejected', version=version+1 WHERE import_file_id=?",
+            (rejected,),
+        )
         expect_integrity_error(
             "INV-01 source_row d'un import rejected rejetée",
             lambda: insert_source(connection, rejected, ok_tid, 1),
@@ -717,13 +954,16 @@ def verify_section_and_provenance_guards(schema_path: Path) -> None:
         pending_reject = insert_import(connection, parsed_operation_count=1)
         insert_section(connection, pending_reject)
         pending_tx = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-15", -101, "Source avant rejet"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-15", -101, "Source avant rejet"),
+            occurrence_rank=1,
         )
         insert_source(connection, pending_reject, pending_tx, 1)
         expect_integrity_error(
             "n-06 import avec source_row ne peut pas devenir rejected",
             lambda: connection.execute(
-                "UPDATE import_files SET status='rejected' WHERE import_file_id=?", (pending_reject,)
+                "UPDATE import_files SET status='rejected', version=version+1 WHERE import_file_id=?",
+                (pending_reject,),
             ),
             "rejected_import_cannot_have_source_rows",
         )
@@ -738,7 +978,9 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
         iid = insert_import(connection, parsed_operation_count=1)
         insert_section(connection, iid)
         tid = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-12", -100, "Import commité"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-12", -100, "Import commité"),
+            occurrence_rank=1,
         )
         insert_source(connection, iid, tid, 1)
         rejection_id = new_id()
@@ -751,7 +993,10 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
         commit_import(connection, iid)
         expect_integrity_error(
             "ADR-019.d métadonnées de fichier commitées immuables",
-            lambda: connection.execute("UPDATE import_files SET file_sha256=? WHERE import_file_id=?", ("0" * 64, iid)),
+            lambda: connection.execute(
+                "UPDATE import_files SET file_sha256=?, version=version+1 WHERE import_file_id=?",
+                ("0" * 64, iid),
+            ),
             "committed_import_immutable",
         )
         expect_integrity_error(
@@ -761,13 +1006,17 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
         )
         expect_integrity_error(
             "ADR-019.d couverture/mapping de section commité immuable",
-            lambda: connection.execute("UPDATE import_account_sections SET coverage_through='2026-04-01' WHERE import_file_id=?", (iid,)),
+            lambda: connection.execute(
+                "UPDATE import_account_sections SET coverage_through='2026-04-01' WHERE import_file_id=?",
+                (iid,),
+            ),
             "committed_import_section_immutable",
         )
         expect_integrity_error(
             "n-07 décision d'aperçu d'un import commité non modifiable",
             lambda: connection.execute(
-                "UPDATE import_rejections SET message='Réécriture' WHERE import_rejection_id=?", (rejection_id,)
+                "UPDATE import_rejections SET message='Réécriture' WHERE import_rejection_id=?",
+                (rejection_id,),
             ),
             "committed_import_rejection_immutable",
         )
@@ -788,15 +1037,21 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
             ),
             "import_rejection_requires_previewed_file",
         )
-        empty_committed = create_committed_empty(connection, hashlib.sha256(b"empty committed section").hexdigest())
+        empty_committed = create_committed_empty(
+            connection, hashlib.sha256(b"empty committed section").hexdigest()
+        )
         expect_integrity_error(
             "ADR-019.d section vide d'un import commité non supprimable",
-            lambda: connection.execute("DELETE FROM import_account_sections WHERE import_file_id=?", (empty_committed,)),
+            lambda: connection.execute(
+                "DELETE FROM import_account_sections WHERE import_file_id=?", (empty_committed,)
+            ),
             "committed_import_section_immutable",
         )
         expect_integrity_error(
             "ADR-019.d section commité non supprimable",
-            lambda: connection.execute("DELETE FROM import_account_sections WHERE import_file_id=?", (iid,)),
+            lambda: connection.execute(
+                "DELETE FROM import_account_sections WHERE import_file_id=?", (iid,)
+            ),
             "committed_import_section_immutable",
         )
         expect_integrity_error(
@@ -820,7 +1075,9 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
         no_source = insert_import(connection, parsed_operation_count=0)
         insert_section(connection, no_source)
         insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-20", -100, "Transaction sans provenance"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-20", -100, "Transaction sans provenance"),
+            occurrence_rank=1,
         )
         expect_integrity_error(
             "ADR-019.c aucune transaction commise sans provenance",
@@ -852,26 +1109,36 @@ def verify_import_status_and_immutability(schema_path: Path) -> None:
         )
         connection.execute(
             """UPDATE import_rejections SET resolution_status='resolved', resolution_action='create_occurrence',
-               resolved_by='user', resolved_at_utc='2026-10-10T10:00:00Z' WHERE import_file_id=?""",
+               resolved_by='user', resolved_at_utc='2026-10-10T10:00:00.000Z' WHERE import_file_id=?""",
             (unresolved,),
         )
         out_of_period = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-02-28", -90, "Ligne hors période synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-02-28", -90, "Ligne hors période synthétique"),
+            occurrence_rank=1,
         )
         insert_source(connection, unresolved, out_of_period, 1)
-        connection.execute("UPDATE import_files SET parsed_operation_count=1 WHERE import_file_id=?", (unresolved,))
+        connection.execute(
+            "UPDATE import_files SET parsed_operation_count=1, version=version+1 WHERE import_file_id=?",
+            (unresolved,),
+        )
         commit_import(connection, unresolved)
         report("IMP-12 décision d'aperçu auditée débloque le commit intégral")
         invalid_noop = hashlib.sha256(b"other content").hexdigest()
         expect_integrity_error(
             "ADR-019.d no_op doit viser un hash commité identique",
-            lambda: insert_import(connection, status="no_op", digest=invalid_noop, duplicate_of=iid),
+            lambda: insert_import(
+                connection, status="no_op", digest=invalid_noop, duplicate_of=iid
+            ),
             "no_op_must_reference_committed_same_hash",
         )
         transition = insert_import(connection)
         expect_integrity_error(
             "ADR-019.d transition previewed vers no_op interdite",
-            lambda: connection.execute("UPDATE import_files SET status='no_op' WHERE import_file_id=?", (transition,)),
+            lambda: connection.execute(
+                "UPDATE import_files SET status='no_op', version=version+1 WHERE import_file_id=?",
+                (transition,),
+            ),
             "import_status_transition_invalid",
         )
     finally:
@@ -883,12 +1150,15 @@ def verify_import_generation_fields(schema_path: Path) -> None:
     try:
         insert_account(connection)
         header = insert_import(
-            connection, received_on="2026-04-01", generation_date="2026-03-31",
+            connection,
+            received_on="2026-04-01",
+            generation_date="2026-03-31",
             generation_date_source="header_download",
         )
         insert_section(connection, header, coverage_through="2026-03-31")
         got = connection.execute(
-            "SELECT generation_date, generation_date_source FROM import_files WHERE import_file_id=?", (header,)
+            "SELECT generation_date, generation_date_source FROM import_files WHERE import_file_id=?",
+            (header,),
         ).fetchone()
         ct = connection.execute(
             "SELECT complete_through FROM import_account_sections WHERE import_file_id=?", (header,)
@@ -896,28 +1166,43 @@ def verify_import_generation_fields(schema_path: Path) -> None:
         if got != ("2026-03-31", "header_download") or ct != "2026-03-30":
             raise VerificationError("IMP-11 generated_on/complete_through du préambule incorrect")
         fallback = insert_import(
-            connection, received_on="2026-04-01", generation_date="2026-04-01",
+            connection,
+            received_on="2026-04-01",
+            generation_date="2026-04-01",
             generation_date_source="received_on_fallback",
             parsed_operation_count=1,
         )
         insert_section(
-            connection, fallback, coverage_from="2026-03-01", coverage_through="2026-04-05",
+            connection,
+            fallback,
+            coverage_from="2026-03-01",
+            coverage_through="2026-04-05",
             complete_through_value="2026-04-01",
         )
         fallback_tx = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-04-02", -250, "Dernier jour provisoire"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-02", -250, "Dernier jour provisoire"),
+            occurrence_rank=1,
         )
         insert_source(connection, fallback, fallback_tx, 1)
         commit_import(connection, fallback)
         generated, source = connection.execute(
-            "SELECT generation_date, generation_date_source FROM import_files WHERE import_file_id=?", (fallback,)
+            "SELECT generation_date, generation_date_source FROM import_files WHERE import_file_id=?",
+            (fallback,),
         ).fetchone()
         fallback_through = connection.execute(
-            "SELECT complete_through FROM import_account_sections WHERE import_file_id=?", (fallback,)
+            "SELECT complete_through FROM import_account_sections WHERE import_file_id=?",
+            (fallback,),
         ).fetchone()[0]
-        if (generated, source, fallback_through) != ("2026-04-01", "received_on_fallback", "2026-04-01"):
+        if (generated, source, fallback_through) != (
+            "2026-04-01",
+            "received_on_fallback",
+            "2026-04-01",
+        ):
             raise VerificationError("IMP-11 date de réception de repli incorrecte")
-        report("IMP-11 date de repli : dernier jour avec opérations provisoire, complete_through veille")
+        report(
+            "IMP-11 date de repli : dernier jour avec opérations provisoire, complete_through veille"
+        )
     finally:
         connection.close()
 
@@ -927,15 +1212,22 @@ def verify_fallback_complete_through_guard(schema_path: Path) -> None:
     try:
         insert_account(connection)
         import_id = insert_import(
-            connection, received_on="2026-04-01", generation_date="2026-04-01",
-            generation_date_source="received_on_fallback", parsed_operation_count=1,
+            connection,
+            received_on="2026-04-01",
+            generation_date="2026-04-01",
+            generation_date_source="received_on_fallback",
+            parsed_operation_count=1,
         )
         insert_section(
-            connection, import_id, coverage_from="2026-03-01", coverage_through="2026-04-05",
+            connection,
+            import_id,
+            coverage_from="2026-03-01",
+            coverage_through="2026-04-05",
             complete_through_value="2026-04-02",
         )
         transaction_id = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-04-02", -250, "Dernier jour à garder provisoire"),
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-02", -250, "Dernier jour à garder provisoire"),
             occurrence_rank=1,
         )
         insert_source(connection, import_id, transaction_id, 1)
@@ -978,9 +1270,13 @@ def compute_balance_delta(
 ) -> int | None:
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
-    if start > date.fromisoformat(start_complete_through) or end > date.fromisoformat(end_complete_through):
+    if start > date.fromisoformat(start_complete_through) or end > date.fromisoformat(
+        end_complete_through
+    ):
         return None
-    if start >= end or not coverage_union_covers(coverage, (start + timedelta(days=1)).isoformat(), end_date):
+    if start >= end or not coverage_union_covers(
+        coverage, (start + timedelta(days=1)).isoformat(), end_date
+    ):
         return None
     recalculated = start_cents + sum(
         amount for booked_on, amount in transactions if start_date < booked_on <= end_date
@@ -999,8 +1295,14 @@ def canonical_balance_snapshot_hash(
     transaction_inputs: Iterable[tuple[str, int]],
 ) -> str:
     records = ["section\0" + "\0".join(map(str, row)) for row in sorted(section_inputs)]
-    records.extend("transaction\0" + booked_on + "\0" + str(amount) for booked_on, amount in sorted(transaction_inputs))
-    encoded = b"".join(len(record.encode("utf-8")).to_bytes(4, "big") + record.encode("utf-8") for record in records)
+    records.extend(
+        "transaction\0" + booked_on + "\0" + str(amount)
+        for booked_on, amount in sorted(transaction_inputs)
+    )
+    encoded = b"".join(
+        len(record.encode("utf-8")).to_bytes(4, "big") + record.encode("utf-8")
+        for record in records
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -1010,41 +1312,69 @@ def verify_balance_checks(schema_path: Path) -> None:
         insert_account(connection)
         first = insert_import(connection, parsed_operation_count=1, generation_date="2026-04-01")
         insert_section(
-            connection, first, coverage_from="2026-03-01", coverage_through="2026-03-31",
-            complete_through_value="2026-03-31", balance_as_of="2026-03-15", header_balance_cents=10000,
+            connection,
+            first,
+            coverage_from="2026-03-01",
+            coverage_through="2026-03-31",
+            complete_through_value="2026-03-31",
+            balance_as_of="2026-03-15",
+            header_balance_cents=10000,
         )
         debit = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-20", -1000, "Débit de solde synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-20", -1000, "Débit de solde synthétique"),
+            occurrence_rank=1,
         )
         insert_source(connection, first, debit, 1)
         commit_import(connection, first)
 
         second = insert_import(connection, parsed_operation_count=0, generation_date="2026-04-16")
         insert_section(
-            connection, second, coverage_from="2026-03-16", coverage_through="2026-04-15",
-            complete_through_value="2026-04-15", balance_as_of="2026-04-15", header_balance_cents=9000,
+            connection,
+            second,
+            coverage_from="2026-03-16",
+            coverage_through="2026-04-15",
+            complete_through_value="2026-04-15",
+            balance_as_of="2026-04-15",
+            header_balance_cents=9000,
         )
         commit_import(connection, second)
         calculated_delta = compute_balance_delta(
-            "2026-03-15", 10000, "2026-04-15", 9000, "2026-03-31", "2026-04-15",
+            "2026-03-15",
+            10000,
+            "2026-04-15",
+            9000,
+            "2026-03-31",
+            "2026-04-15",
             [("2026-03-01", "2026-03-31"), ("2026-03-16", "2026-04-15")],
             [("2026-03-20", -1000)],
         )
         reversed_delta = compute_balance_delta(
-            "2026-03-15", 10000, "2026-04-15", 9000, "2026-03-31", "2026-04-15",
+            "2026-03-15",
+            10000,
+            "2026-04-15",
+            9000,
+            "2026-03-31",
+            "2026-04-15",
             [("2026-03-16", "2026-04-15"), ("2026-03-01", "2026-03-31")],
             [("2026-03-20", -1000)],
         )
         if calculated_delta != 0 or reversed_delta != calculated_delta:
-            raise VerificationError("ADR-024.1/2 union des jours et solde dépendent de l'ordre des imports")
+            raise VerificationError(
+                "ADR-024.1/2 union des jours et solde dépendent de l'ordre des imports"
+            )
         section_facts = [
             (first, "2026-03-01", "2026-03-31", "2026-03-15", 10000),
             (second, "2026-03-16", "2026-04-15", "2026-04-15", 9000),
         ]
         snapshot_a = canonical_balance_snapshot_hash(section_facts, [("2026-03-20", -1000)])
-        snapshot_b = canonical_balance_snapshot_hash(list(reversed(section_facts)), [("2026-03-20", -1000)])
+        snapshot_b = canonical_balance_snapshot_hash(
+            list(reversed(section_facts)), [("2026-03-20", -1000)]
+        )
         if snapshot_a != snapshot_b:
-            raise VerificationError("ADR-024.2 empreinte des entrées de solde dépend de l'ordre d'import")
+            raise VerificationError(
+                "ADR-024.2 empreinte des entrées de solde dépend de l'ordre d'import"
+            )
 
         check_id = new_id()
         snapshot = hashlib.sha256(b"ordered balance inputs").hexdigest()
@@ -1059,19 +1389,29 @@ def verify_balance_checks(schema_path: Path) -> None:
         expect_integrity_error(
             "ADR-024.2 balance_checks append-only UPDATE",
             lambda: connection.execute(
-                "UPDATE balance_checks SET delta_cents=1 WHERE balance_check_id=?", (check_id,)
+                "UPDATE balance_checks SET delta_cents=1, version=version+1 WHERE balance_check_id=?",
+                (check_id,),
             ),
             "balance_check_append_only",
         )
         expect_integrity_error(
             "ADR-024.2 balance_checks append-only DELETE",
-            lambda: connection.execute("DELETE FROM balance_checks WHERE balance_check_id=?", (check_id,)),
+            lambda: connection.execute(
+                "DELETE FROM balance_checks WHERE balance_check_id=?", (check_id,)
+            ),
             "balance_check_append_only",
         )
-        mismatch_file = insert_import(connection, parsed_operation_count=0, generation_date="2026-04-16")
+        mismatch_file = insert_import(
+            connection, parsed_operation_count=0, generation_date="2026-04-16"
+        )
         insert_section(
-            connection, mismatch_file, coverage_from="2026-03-16", coverage_through="2026-04-15",
-            complete_through_value="2026-04-15", balance_as_of="2026-04-15", header_balance_cents=9001,
+            connection,
+            mismatch_file,
+            coverage_from="2026-03-16",
+            coverage_through="2026-04-15",
+            complete_through_value="2026-04-15",
+            balance_as_of="2026-04-15",
+            header_balance_cents=9001,
         )
         commit_import(connection, mismatch_file)
         connection.execute(
@@ -1080,7 +1420,13 @@ def verify_balance_checks(schema_path: Path) -> None:
                 end_import_file_id, end_section_index, status, recalculated_balance_cents,
                 delta_cents, input_snapshot_sha256)
                VALUES (?, ?, ?, 1, ?, 1, 'mismatch', 9000, 1, ?)""",
-            (new_id(), ACCOUNT_ID, first, mismatch_file, hashlib.sha256(b"mismatch snapshot").hexdigest()),
+            (
+                new_id(),
+                ACCOUNT_ID,
+                first,
+                mismatch_file,
+                hashlib.sha256(b"mismatch snapshot").hexdigest(),
+            ),
         )
         mismatch_status = connection.execute(
             "SELECT status FROM balance_checks WHERE end_import_file_id=?", (mismatch_file,)
@@ -1103,8 +1449,13 @@ def verify_balance_checks(schema_path: Path) -> None:
 
         late = insert_import(connection, parsed_operation_count=0, generation_date="2026-04-16")
         insert_section(
-            connection, late, coverage_from="2026-03-01", coverage_through="2026-04-15",
-            complete_through_value="2026-04-15", balance_as_of="2026-04-16", header_balance_cents=9000,
+            connection,
+            late,
+            coverage_from="2026-03-01",
+            coverage_through="2026-04-15",
+            complete_through_value="2026-04-15",
+            balance_as_of="2026-04-16",
+            header_balance_cents=9000,
         )
         commit_import(connection, late)
         expect_integrity_error(
@@ -1122,7 +1473,9 @@ def verify_balance_checks(schema_path: Path) -> None:
         gap = [("2026-03-01", "2026-03-30"), ("2026-04-01", "2026-04-15")]
         if coverage_union_covers(gap, "2026-03-01", "2026-04-15"):
             raise VerificationError("ADR-024.1 une journée absente a été déclarée complète")
-        report("ADR-024.1/2 couverture par union et balance_checks append-only, versionnés par empreinte")
+        report(
+            "ADR-024.1/2 couverture par union et balance_checks append-only, versionnés par empreinte"
+        )
     finally:
         connection.close()
 
@@ -1133,14 +1486,24 @@ def verify_balance_date_cutoff_guard(schema_path: Path) -> None:
         insert_account(connection)
         start = insert_import(connection, parsed_operation_count=0, generation_date="2026-04-01")
         insert_section(
-            connection, start, coverage_from="2026-03-01", coverage_through="2026-03-31",
-            complete_through_value="2026-03-31", balance_as_of="2026-03-15", header_balance_cents=10000,
+            connection,
+            start,
+            coverage_from="2026-03-01",
+            coverage_through="2026-03-31",
+            complete_through_value="2026-03-31",
+            balance_as_of="2026-03-15",
+            header_balance_cents=10000,
         )
         commit_import(connection, start)
         late = insert_import(connection, parsed_operation_count=0, generation_date="2026-04-16")
         insert_section(
-            connection, late, coverage_from="2026-03-16", coverage_through="2026-04-15",
-            complete_through_value="2026-04-15", balance_as_of="2026-04-16", header_balance_cents=10000,
+            connection,
+            late,
+            coverage_from="2026-03-16",
+            coverage_through="2026-04-15",
+            complete_through_value="2026-04-15",
+            balance_as_of="2026-04-16",
+            header_balance_cents=10000,
         )
         commit_import(connection, late)
         expect_integrity_error(
@@ -1151,7 +1514,13 @@ def verify_balance_date_cutoff_guard(schema_path: Path) -> None:
                     end_import_file_id, end_section_index, status, recalculated_balance_cents,
                     delta_cents, input_snapshot_sha256)
                    VALUES (?, ?, ?, 1, ?, 1, 'match', 10000, 0, ?)""",
-                (new_id(), ACCOUNT_ID, start, late, hashlib.sha256(b"ineligible balance date").hexdigest()),
+                (
+                    new_id(),
+                    ACCOUNT_ID,
+                    start,
+                    late,
+                    hashlib.sha256(b"ineligible balance date").hexdigest(),
+                ),
             ),
             "balance_check_not_comparable_inputs",
         )
@@ -1189,7 +1558,9 @@ def verify_rule_audit_foreign_key(schema_path: Path) -> None:
         insert_account(connection)
         seed_financial_categories(connection)
         tid = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-12", -100, "Règle synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-12", -100, "Règle synthétique"),
+            occurrence_rank=1,
         )
         rule_id = new_id()
         connection.execute(
@@ -1228,10 +1599,14 @@ def verify_allocations(schema_path: Path) -> None:
         insert_account(connection)
         seed_financial_categories(connection)
         debit = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-12", -1000, "Débit synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-12", -1000, "Débit synthétique"),
+            occurrence_rank=1,
         )
         credit = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-13", 1000, "Crédit synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-13", 1000, "Crédit synthétique"),
+            occurrence_rank=1,
         )
         old = insert_allocation(
             connection, debit, category_id="groceries", flow_kind="expense", amount_cents=-700
@@ -1253,12 +1628,20 @@ def verify_allocations(schema_path: Path) -> None:
         expect_integrity_error(
             "ADR-019.e catégorie flow_savings_out positive rejetée",
             lambda: insert_allocation(
-                connection, credit, category_id="flow_savings_out", flow_kind="transfer_savings", amount_cents=100
+                connection,
+                credit,
+                category_id="flow_savings_out",
+                flow_kind="transfer_savings",
+                amount_cents=100,
             ),
             "allocation_category_direction_invalid",
         )
         income_id = insert_allocation(
-            connection, credit, category_id="income_salary_a", flow_kind="income_recurring", amount_cents=900
+            connection,
+            credit,
+            category_id="income_salary_a",
+            flow_kind="income_recurring",
+            amount_cents=900,
         )
         expect_integrity_error(
             "ADR-019.b allocation amount_cents REAL rejeté",
@@ -1272,7 +1655,10 @@ def verify_allocations(schema_path: Path) -> None:
         )
         expect_integrity_error(
             "ADR-019.e UPDATE en place d'allocation confirmée rejeté",
-            lambda: connection.execute("UPDATE allocations SET amount_cents=-700 WHERE allocation_id=?", (income_id,)),
+            lambda: connection.execute(
+                "UPDATE allocations SET amount_cents=-700, version=version+1 WHERE allocation_id=?",
+                (income_id,),
+            ),
             "allocation_update_requires_audited_supersession",
         )
         expect_integrity_error(
@@ -1304,7 +1690,11 @@ def verify_allocations(schema_path: Path) -> None:
             (replacement_id, audit_id, old),
         )
         insert_allocation(
-            connection, debit, category_id="groceries", flow_kind="expense", amount_cents=-900,
+            connection,
+            debit,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-900,
             allocation_id=replacement_id,
         )
         connection.execute("COMMIT")
@@ -1313,7 +1703,9 @@ def verify_allocations(schema_path: Path) -> None:
             (debit,),
         ).fetchone()[0]
         if active != -900:
-            raise VerificationError("ADR-019.e supersession auditée ne remplace pas l'allocation active")
+            raise VerificationError(
+                "ADR-019.e supersession auditée ne remplace pas l'allocation active"
+            )
         report("ADR-019.e supersession versionnée/auditée ; allocation active correcte")
     finally:
         if connection.in_transaction:
@@ -1328,32 +1720,60 @@ def verify_refund_links(schema_path: Path) -> None:
         insert_account(connection, ACCOUNT_B_ID, account_role="personal")
         seed_financial_categories(connection)
         credit = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-04-02", 20000, "Avoir synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-02", 20000, "Avoir synthétique"),
+            occurrence_rank=1,
         )
         purchase_a = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-03-30", -20000, "Achat synthétique A"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-03-30", -20000, "Achat synthétique A"),
+            occurrence_rank=1,
         )
         purchase_b = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-02-20", -5000, "Achat synthétique B"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-02-20", -5000, "Achat synthétique B"),
+            occurrence_rank=1,
         )
-        insert_allocation(connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=15000)
-        insert_allocation(connection, credit, category_id="income_other_test", flow_kind="income_other", amount_cents=5000)
+        insert_allocation(
+            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=15000
+        )
+        insert_allocation(
+            connection,
+            credit,
+            category_id="income_other_test",
+            flow_kind="income_other",
+            amount_cents=5000,
+        )
         grocery_allocation = insert_allocation(
-            connection, purchase_a, category_id="groceries", flow_kind="expense", amount_cents=-10000
+            connection,
+            purchase_a,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-10000,
         )
         add_category(connection, "restaurants", "expense")
         restaurant_allocation = insert_allocation(
-            connection, purchase_a, category_id="restaurants", flow_kind="expense", amount_cents=-5000
+            connection,
+            purchase_a,
+            category_id="restaurants",
+            flow_kind="expense",
+            amount_cents=-5000,
         )
-        insert_allocation(connection, purchase_b, category_id="groceries", flow_kind="expense", amount_cents=-5000)
+        insert_allocation(
+            connection, purchase_b, category_id="groceries", flow_kind="expense", amount_cents=-5000
+        )
         confirmed_link = insert_refund_link(
             connection, credit, purchase_a, 10000, target_allocation_id=grocery_allocation
         )
         insert_refund_link(connection, credit, purchase_b, 5000)
         target_c = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-01-10", -5000, "Achat synthétique C"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-01-10", -5000, "Achat synthétique C"),
+            occurrence_rank=1,
         )
-        insert_allocation(connection, target_c, category_id="groceries", flow_kind="expense", amount_cents=-5000)
+        insert_allocation(
+            connection, target_c, category_id="groceries", flow_kind="expense", amount_cents=-5000
+        )
         expect_integrity_error(
             "n-04 plafond par allocation refund, distinct du montant brut du crédit",
             lambda: insert_refund_link(connection, credit, target_c, 1),
@@ -1362,7 +1782,13 @@ def verify_refund_links(schema_path: Path) -> None:
         second_credit = insert_transaction(
             connection, identity=(ACCOUNT_ID, "2026-04-03", 10000, "Autre avoir"), occurrence_rank=1
         )
-        insert_allocation(connection, second_credit, category_id="income_refund", flow_kind="refund", amount_cents=10000)
+        insert_allocation(
+            connection,
+            second_credit,
+            category_id="income_refund",
+            flow_kind="refund",
+            amount_cents=10000,
+        )
         expect_integrity_error(
             "ADR-024.3 plafond de l'allocation expense ciblée",
             lambda: insert_refund_link(
@@ -1376,13 +1802,29 @@ def verify_refund_links(schema_path: Path) -> None:
             "refund_link_target_cap_exceeded",
         )
         not_refund = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-04-04", 100, "Crédit non avoir"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-04", 100, "Crédit non avoir"),
+            occurrence_rank=1,
         )
-        insert_allocation(connection, not_refund, category_id="income_other_test", flow_kind="income_other", amount_cents=100)
+        insert_allocation(
+            connection,
+            not_refund,
+            category_id="income_other_test",
+            flow_kind="income_other",
+            amount_cents=100,
+        )
         direction_target = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-01-11", -100, "Cible de sens synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-01-11", -100, "Cible de sens synthétique"),
+            occurrence_rank=1,
         )
-        insert_allocation(connection, direction_target, category_id="groceries", flow_kind="expense", amount_cents=-100)
+        insert_allocation(
+            connection,
+            direction_target,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-100,
+        )
         expect_integrity_error(
             "MONEY-10 source sans allocation refund rejetée",
             lambda: insert_refund_link(connection, not_refund, direction_target, 1),
@@ -1390,14 +1832,22 @@ def verify_refund_links(schema_path: Path) -> None:
         )
         # Un lien non confirmé n'est pas imputé aux plafonds analytiques.
         proposed = insert_refund_link(connection, second_credit, target_c, 5000, status="proposed")
-        if connection.execute(
-            "SELECT status FROM transaction_links WHERE transaction_link_id=?", (proposed,)
-        ).fetchone()[0] != "proposed":
+        if (
+            connection.execute(
+                "SELECT status FROM transaction_links WHERE transaction_link_id=?", (proposed,)
+            ).fetchone()[0]
+            != "proposed"
+        ):
             raise VerificationError("MONEY-10 lien proposed compté comme confirmé")
         expect_integrity_error(
             "ADR-024.3 FK de target_allocation_id",
             lambda: insert_refund_link(
-                connection, second_credit, target_c, 1, status="proposed", target_allocation_id="missing-allocation"
+                connection,
+                second_credit,
+                target_c,
+                1,
+                status="proposed",
+                target_allocation_id="missing-allocation",
             ),
             "FOREIGN KEY constraint failed",
         )
@@ -1414,7 +1864,8 @@ def verify_refund_links(schema_path: Path) -> None:
         expect_integrity_error(
             "n-05 lien refund confirmé modifiable uniquement par supersession",
             lambda: connection.execute(
-                "UPDATE transaction_links SET amount_cents=9999 WHERE transaction_link_id=?", (confirmed_link,)
+                "UPDATE transaction_links SET amount_cents=9999, version=version+1 WHERE transaction_link_id=?",
+                (confirmed_link,),
             ),
             "confirmed_transaction_link_supersession_required",
         )
@@ -1448,7 +1899,9 @@ def verify_refund_links(schema_path: Path) -> None:
             raise VerificationError(
                 "n-11 UPDATE ancien lien puis INSERT remplaçant requiert la FK différée"
             ) from error
-        report("n-11 UPDATE ancien lien puis INSERT remplaçant : FK différée, audit et version validés")
+        report(
+            "n-11 UPDATE ancien lien puis INSERT remplaçant : FK différée, audit et version validés"
+        )
         # Mars seul garde l'achat ; avril seul porte l'effet du remboursement.
         march_cost = -connection.execute(
             "SELECT sum(amount_cents) FROM allocations WHERE transaction_id=? AND flow_kind='expense'",
@@ -1461,7 +1914,9 @@ def verify_refund_links(schema_path: Path) -> None:
             (credit,),
         ).fetchone()[0]
         if march_cost != 15000 or april_credit_effect != -14000:
-            raise VerificationError("MONEY-10 remboursement inter-mois ne suit pas la date de l'avoir")
+            raise VerificationError(
+                "MONEY-10 remboursement inter-mois ne suit pas la date de l'avoir"
+            )
         expect_integrity_error(
             "ADR-021 lien de remboursement confirmé non supprimable",
             lambda: connection.execute(
@@ -1479,7 +1934,9 @@ def verify_refund_links(schema_path: Path) -> None:
             ),
             "confirmed_transaction_link_immutable",
         )
-        report("MONEY-10 refund_of inter-mois/inter-comptes, proposed ignoré, plafonds source/cible")
+        report(
+            "MONEY-10 refund_of inter-mois/inter-comptes, proposed ignoré, plafonds source/cible"
+        )
     finally:
         connection.close()
 
@@ -1523,7 +1980,8 @@ def verify_insight_facts_and_idempotency(schema_path: Path) -> None:
             (key, hashlib.sha256(b"request").hexdigest()),
         )
         created, expires = connection.execute(
-            "SELECT created_at_utc, expires_at_utc FROM idempotency_records WHERE idempotency_key=?", (key,)
+            "SELECT created_at_utc, expires_at_utc FROM idempotency_records WHERE idempotency_key=?",
+            (key,),
         ).fetchone()
         days = connection.execute(
             "SELECT julianday(?) - julianday(?)", (expires, created)
@@ -1576,17 +2034,41 @@ def verify_personal_mode_oracle(schema_path: Path) -> None:
         insert_account(connection, ACCOUNT_B_ID, account_role="personal")
         seed_financial_categories(connection)
         allowance = insert_transaction(
-            connection, identity=(ACCOUNT_ID, "2026-03-01", -25000, "Enveloppe synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-01", -25000, "Enveloppe synthétique"),
+            occurrence_rank=1,
         )
         personal_credit = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-03-02", 25000, "Virement propre synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-03-02", 25000, "Virement propre synthétique"),
+            occurrence_rank=1,
         )
         personal_spend = insert_transaction(
-            connection, identity=(ACCOUNT_B_ID, "2026-03-03", -18000, "Dépense personnelle synthétique"), occurrence_rank=1
+            connection,
+            identity=(ACCOUNT_B_ID, "2026-03-03", -18000, "Dépense personnelle synthétique"),
+            occurrence_rank=1,
         )
-        insert_allocation(connection, allowance, category_id="flow_personal_a", flow_kind="allocation_personal", amount_cents=-25000)
-        insert_allocation(connection, personal_credit, category_id="flow_owned_transfer", flow_kind="transfer_owned", amount_cents=25000)
-        insert_allocation(connection, personal_spend, category_id="groceries", flow_kind="expense", amount_cents=-18000)
+        insert_allocation(
+            connection,
+            allowance,
+            category_id="flow_personal_a",
+            flow_kind="allocation_personal",
+            amount_cents=-25000,
+        )
+        insert_allocation(
+            connection,
+            personal_credit,
+            category_id="flow_owned_transfer",
+            flow_kind="transfer_owned",
+            amount_cents=25000,
+        )
+        insert_allocation(
+            connection,
+            personal_spend,
+            category_id="groceries",
+            flow_kind="expense",
+            amount_cents=-18000,
+        )
         envelope_consumption = connection.execute(
             """SELECT coalesce(-sum(a.amount_cents),0) FROM allocations a JOIN transactions t USING(transaction_id)
                JOIN accounts ac USING(account_id) WHERE a.flow_kind='expense' AND ac.account_role<>'personal'
@@ -1602,9 +2084,17 @@ def verify_personal_mode_oracle(schema_path: Path) -> None:
         ).fetchone()[0]
         observed_allowance = 0
         unspent = 25000 - 18000
-        if (envelope_consumption, envelope_allowance, observed_consumption, observed_allowance, unspent) != (0, 25000, 18000, 0, 7000):
+        if (
+            envelope_consumption,
+            envelope_allowance,
+            observed_consumption,
+            observed_allowance,
+            unspent,
+        ) != (0, 25000, 18000, 0, 7000):
             raise VerificationError("KPI-08 envelope/observed double compte ou reliquat incorrect")
-        report("KPI-08 compte personnel importé : envelope (0,25000), observed (18000,0), reliquat 7000")
+        report(
+            "KPI-08 compte personnel importé : envelope (0,25000), observed (18000,0), reliquat 7000"
+        )
     finally:
         connection.close()
 
@@ -1634,7 +2124,9 @@ def verify_import_rollback(schema_path: Path) -> None:
         )
         if counts != (0, 0, 0):
             raise VerificationError(f"IMP-06 rollback incomplet : {counts}")
-        report("IMP-06 erreur SQL au milieu du commit : fichier/transaction/source_rows tous annulés")
+        report(
+            "IMP-06 erreur SQL au milieu du commit : fichier/transaction/source_rows tous annulés"
+        )
     finally:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -1656,9 +2148,13 @@ def verify_two_connection_noop(schema_path: Path) -> None:
         failure: list[BaseException] = []
         try:
             first.execute("BEGIN IMMEDIATE")
-            if first.execute(
-                "SELECT 1 FROM import_files WHERE file_sha256=? AND status='committed'", (digest,)
-            ).fetchone() is not None:
+            if (
+                first.execute(
+                    "SELECT 1 FROM import_files WHERE file_sha256=? AND status='committed'",
+                    (digest,),
+                ).fetchone()
+                is not None
+            ):
                 raise VerificationError("IMP-07 hash synthétique déjà présent avant la course")
 
             def second_writer() -> None:
@@ -1671,8 +2167,12 @@ def verify_two_connection_noop(schema_path: Path) -> None:
                         (digest,),
                     ).fetchone()
                     if original is None:
-                        raise VerificationError("IMP-07 la seconde connexion n'a pas vu le commit initial")
-                    no_op = insert_import(second, digest=digest, status="no_op", duplicate_of=original[0])
+                        raise VerificationError(
+                            "IMP-07 la seconde connexion n'a pas vu le commit initial"
+                        )
+                    no_op = insert_import(
+                        second, digest=digest, status="no_op", duplicate_of=original[0]
+                    )
                     second.execute(
                         """INSERT INTO audit_events(audit_event_id, import_file_id, target_type, target_id, action, actor)
                            VALUES (?, ?, 'import', ?, 'import.no_op', 'verify_schema')""",
@@ -1691,25 +2191,35 @@ def verify_two_connection_noop(schema_path: Path) -> None:
                 raise VerificationError("IMP-07 seconde connexion n'a pas démarré")
             # Tant que la première garde le verrou, BEGIN IMMEDIATE de la seconde attend.
             if second_acquired.wait(0.1):
-                raise VerificationError("IMP-07 la seconde connexion a lu avant d'obtenir le verrou")
+                raise VerificationError(
+                    "IMP-07 la seconde connexion a lu avant d'obtenir le verrou"
+                )
             original = insert_import(first, digest=digest)
             insert_section(first, original)
             commit_import(first, original)
             first.execute("COMMIT")
             if not second_acquired.wait(4):
-                raise VerificationError("IMP-07 seconde connexion bloquée après libération du verrou")
+                raise VerificationError(
+                    "IMP-07 seconde connexion bloquée après libération du verrou"
+                )
             thread.join(timeout=4)
             if thread.is_alive() or failure:
                 raise VerificationError(f"IMP-07 erreur du second écrivain : {failure}")
             count = first.execute(
-                "SELECT count(*) FROM import_files WHERE file_sha256=? AND status='committed'", (digest,)
+                "SELECT count(*) FROM import_files WHERE file_sha256=? AND status='committed'",
+                (digest,),
             ).fetchone()[0]
             noops = first.execute(
-                "SELECT count(*) FROM import_files WHERE file_sha256=? AND status='no_op'", (digest,)
+                "SELECT count(*) FROM import_files WHERE file_sha256=? AND status='no_op'",
+                (digest,),
             ).fetchone()[0]
             if (count, noops, result) != (1, 1, ["no_op"]):
-                raise VerificationError(f"IMP-07 cardinalité concurrente incorrecte : {count}, {noops}, {result}")
-            report("IMP-07 deux connexions : hash relu sous BEGIN IMMEDIATE, seconde tentative no_op")
+                raise VerificationError(
+                    f"IMP-07 cardinalité concurrente incorrecte : {count}, {noops}, {result}"
+                )
+            report(
+                "IMP-07 deux connexions : hash relu sous BEGIN IMMEDIATE, seconde tentative no_op"
+            )
         finally:
             if first.in_transaction:
                 first.execute("ROLLBACK")
@@ -1737,10 +2247,13 @@ def run_export(
     digest = hashlib.sha256(content).hexdigest()
     connection.execute("BEGIN IMMEDIATE")
     existing = connection.execute(
-        "SELECT import_file_id FROM import_files WHERE file_sha256=? AND status='committed'", (digest,)
+        "SELECT import_file_id FROM import_files WHERE file_sha256=? AND status='committed'",
+        (digest,),
     ).fetchone()
     if existing:
-        no_op_id = insert_import(connection, digest=digest, status="no_op", duplicate_of=existing[0])
+        no_op_id = insert_import(
+            connection, digest=digest, status="no_op", duplicate_of=existing[0]
+        )
         connection.execute(
             """INSERT INTO audit_events(audit_event_id, import_file_id, target_type, target_id, action, actor)
                VALUES (?, ?, 'import', ?, 'import.no_op', 'verify_schema')""",
@@ -1750,16 +2263,22 @@ def run_export(
         return connection.execute("SELECT count(*) FROM transactions").fetchone()[0], True
 
     import_id = insert_import(connection, digest=digest, parsed_operation_count=len(rows))
-    insert_section(connection, import_id, ACCOUNT_ID, coverage_from="2026-01-01", coverage_through="2026-12-31")
+    insert_section(
+        connection, import_id, ACCOUNT_ID, coverage_from="2026-01-01", coverage_through="2026-12-31"
+    )
     occurrences: dict[Identity, list[int]] = defaultdict(list)
     for logical_row_idx, identity in enumerate(rows, start=1):
         occurrences[identity].append(logical_row_idx)
 
     for identity in sorted(occurrences):
-        ranks = [row[0] for row in connection.execute(
-            """SELECT occurrence_rank FROM transactions WHERE account_id=? AND booked_on=?
-               AND amount_cents=? AND identity_label=? ORDER BY occurrence_rank""", identity
-        )]
+        ranks = [
+            row[0]
+            for row in connection.execute(
+                """SELECT occurrence_rank FROM transactions WHERE account_id=? AND booked_on=?
+               AND amount_cents=? AND identity_label=? ORDER BY occurrence_rank""",
+                identity,
+            )
+        ]
         if ranks and (len(ranks) != max(ranks) or ranks != list(range(1, max(ranks) + 1))):
             raise VerificationError("IMP-14 n_existing count != max : rangs non contigus")
         n_existing = max(ranks, default=0)
@@ -1768,13 +2287,16 @@ def run_export(
             rank: transaction_id
             for rank, transaction_id in connection.execute(
                 """SELECT occurrence_rank, transaction_id FROM transactions WHERE account_id=? AND booked_on=?
-                   AND amount_cents=? AND identity_label=?""", identity
+                   AND amount_cents=? AND identity_label=?""",
+                identity,
             )
         }
         for rank in range(1, max(n_existing, n_new) + 1):
             transaction_id = known.get(rank)
             if transaction_id is None:
-                transaction_id = insert_transaction(connection, identity=identity, occurrence_rank=rank)
+                transaction_id = insert_transaction(
+                    connection, identity=identity, occurrence_rank=rank
+                )
             if rank <= n_new:
                 logical_row_idx = occurrences[identity][rank - 1]
                 # Le hash de ligne est synthétique ; aucune donnée bancaire n'est utilisée.
@@ -1797,16 +2319,20 @@ def transaction_signature(connection: sqlite3.Connection) -> list[tuple[str, str
 
 
 def verify_IMP_01_to_IMP_05_and_IMP_09_order_independence(schema_path: Path) -> None:
-    a_rows = rows_for([
-        ("2026-03-12", "Paiement répété", -1123, "x", 2),
-        ("2026-03-12", "Crédit similaire", 1123, "y", 1),
-    ])
-    b_rows = rows_for([
-        ("2026-03-12", "Paiement répété", -1123, "x", 3),
-        ("2026-03-12", "Crédit similaire", 1123, "y", 1),
-        ("2026-03-13", "Paiement distinct", -50, "z", 1),
-        ("2026-01-10", "Opération ancienne nouvellement exportée", -75, "old", 1),
-    ])
+    a_rows = rows_for(
+        [
+            ("2026-03-12", "Paiement répété", -1123, "x", 2),
+            ("2026-03-12", "Crédit similaire", 1123, "y", 1),
+        ]
+    )
+    b_rows = rows_for(
+        [
+            ("2026-03-12", "Paiement répété", -1123, "x", 3),
+            ("2026-03-12", "Crédit similaire", 1123, "y", 1),
+            ("2026-03-13", "Paiement distinct", -50, "z", 1),
+            ("2026-01-10", "Opération ancienne nouvellement exportée", -75, "old", 1),
+        ]
+    )
     a_bytes = b"synthetic export A"
     b_bytes = b"synthetic export B"
     forward = connect(schema_path)
@@ -1816,8 +2342,13 @@ def verify_IMP_01_to_IMP_05_and_IMP_09_order_independence(schema_path: Path) -> 
         insert_account(reverse)
         observed: list[int] = []
         seen: set[bytes] = set()
-        sequence = (("A", a_bytes, a_rows), ("B", b_bytes, b_rows), ("A", a_bytes, a_rows),
-                    ("B", b_bytes, b_rows), ("A", a_bytes, a_rows))
+        sequence = (
+            ("A", a_bytes, a_rows),
+            ("B", b_bytes, b_rows),
+            ("A", a_bytes, a_rows),
+            ("B", b_bytes, b_rows),
+            ("A", a_bytes, a_rows),
+        )
         for label, content, rows in sequence:
             count, was_noop = run_export(forward, content=content, rows=rows, file_label=label)
             observed.append(count)
@@ -1843,7 +2374,9 @@ def verify_IMP_01_to_IMP_05_and_IMP_09_order_independence(schema_path: Path) -> 
             raise VerificationError("IMP-05 A/B et B/A ou ordre de lignes divergent")
         if forward.execute("SELECT count(*) FROM source_rows").fetchone()[0] != 9:
             raise VerificationError("IMP-02 occurrences A+B : attendu 9 source_rows")
-        if forward.execute("SELECT count(*) FROM transactions WHERE NOT EXISTS (SELECT 1 FROM source_rows s WHERE s.transaction_id=transactions.transaction_id)").fetchone()[0]:
+        if forward.execute(
+            "SELECT count(*) FROM transactions WHERE NOT EXISTS (SELECT 1 FROM source_rows s WHERE s.transaction_id=transactions.transaction_id)"
+        ).fetchone()[0]:
             raise VerificationError("IMP-02 une transaction n'a aucune source")
         report("IMP-01..05 A/B/A/B/A → transactions [3, 6, 6, 6, 6], rangs 1..3")
         report("IMP-05 B/A et ordre des lignes inversé → même signature")
@@ -1887,66 +2420,505 @@ def mutate_table_clause(text: str, table_name: str, old: str, new: str, label: s
     return prefix + replace_once(table, old, new, label) + suffix
 
 
+def remove_uuid_primary_key_check(text: str, table_name: str, column_name: str) -> str:
+    start = text.index(f"CREATE TABLE {table_name} (")
+    end = text.index("\n);", start)
+    prefix, table, suffix = text[:start], text[start:end], text[end:]
+    pattern = re.compile(
+        rf"({re.escape(column_name)} TEXT NOT NULL PRIMARY KEY) "
+        rf"CHECK \(length\({re.escape(column_name)}\) = 36 AND "
+        rf"{re.escape(column_name)} GLOB '[^']+'\)"
+    )
+    mutated, count = pattern.subn(r"\1", table, count=1)
+    if count != 1:
+        raise VerificationError(
+            f"preuve temporaire : UUIDv4 CHECK introuvable {table_name}.{column_name}"
+        )
+    return prefix + mutated + suffix
+
+
 def verify_constraint_mutation_proofs(schema_path: Path) -> None:
     source = schema_path.read_text(encoding="utf-8")
     mutations: list[tuple[str, Callable[[str], str], Callable[[Path], None], str]] = [
-        ("rank contiguous", lambda s: remove_sql_object(s, "trigger", "trg_transactions_occurrence_contiguous"), verify_occurrence_rank_guards, "IMP-14 rang 3 sans rang 2"),
-        ("foreign key account", lambda s: mutate_transaction_amount_clause(s, "account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,", "account_id TEXT NOT NULL,", "transaction account FK"), verify_foreign_key, "FK-01 compte inexistant"),
-        ("source/account match", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_account_matches_section"), verify_section_and_provenance_guards, "IMP-14 source_row compte différent"),
-        ("source/import status", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_import_status"), verify_section_and_provenance_guards, "INV-01 source_row d'un import rejected"),
-        ("no sources on rejected import", lambda s: remove_sql_object(s, "trigger", "trg_import_files_reject_requires_no_sources"), verify_section_and_provenance_guards, "n-06 import avec source_row ne peut pas devenir rejected"),
-        ("source identity hash equality", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_identity_matches_transaction"), verify_section_and_provenance_guards, "n-08 source_row identity_key_sha256 doit égaler la transaction cible"),
-        ("source same-transaction uniqueness", lambda s: replace_once(s, "    UNIQUE (import_file_id, section_index, logical_row_idx),\n    UNIQUE (import_file_id, transaction_id)\n", "    UNIQUE (import_file_id, section_index, logical_row_idx)\n", "UNIQUE source import/transaction"), verify_section_and_provenance_guards, "IMP-14 une source par fichier"),
-        ("source same-row uniqueness", lambda s: replace_once(s, "    UNIQUE (import_file_id, section_index, logical_row_idx),\n    UNIQUE (import_file_id, transaction_id)\n", "    UNIQUE (import_file_id, transaction_id)\n", "UNIQUE source logical row"), verify_section_and_provenance_guards, "IMP-14 logical_row_idx unique"),
-        ("source committed capacity", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_import_capacity"), verify_section_and_provenance_guards, "ADR-019.b capacité de provenance"),
-        ("unique account section", lambda s: remove_sql_object(s, "index", "uq_import_sections_file_account"), verify_section_and_provenance_guards, "IMP-13 second section mappée"),
-        ("committed file hash unique", lambda s: remove_sql_object(s, "index", "uq_import_files_committed_sha256"), verify_noop_and_committed_hash, "IMP-01 hash de fichier commité dupliqué"),
-        ("import commit guard", lambda s: remove_sql_object(s, "trigger", "trg_import_files_commit_guard"), verify_import_status_and_immutability, "ADR-019.c nombre de source_rows"),
-        ("fallback complete-through boundary", lambda s: remove_sql_object(s, "trigger", "trg_import_files_commit_guard"), verify_fallback_complete_through_guard, "IMP-11 complete_through repli ne peut inclure le dernier jour avec opérations"),
-        ("direct commit forbidden", lambda s: remove_sql_object(s, "trigger", "trg_import_files_no_direct_commit"), verify_import_status_and_immutability, "ADR-019.d INSERT direct au statut committed"),
-        ("no_op reference validated", lambda s: remove_sql_object(s, "trigger", "trg_import_files_noop_validate"), verify_import_status_and_immutability, "ADR-019.d no_op doit viser"),
-        ("committed import immutable", lambda s: remove_sql_object(s, "trigger", "trg_import_files_committed_immutable"), verify_import_status_and_immutability, "ADR-019.d métadonnées de fichier"),
-        ("import file no delete", lambda s: remove_sql_object(s, "trigger", "trg_import_files_no_delete"), verify_noop_and_committed_hash, "ADR-019.d historique no_op"),
-        ("committed section immutable", lambda s: remove_sql_object(s, "trigger", "trg_import_sections_committed_immutable_update"), verify_import_status_and_immutability, "ADR-019.d couverture/mapping"),
-        ("committed section no delete", lambda s: remove_sql_object(s, "trigger", "trg_import_sections_committed_immutable_delete"), verify_import_status_and_immutability, "ADR-019.d section vide"),
-        ("preview decision insert cutoff", lambda s: remove_sql_object(s, "trigger", "trg_import_rejections_insert_previewed_only"), verify_import_status_and_immutability, "n-07 ajout de décision après commit interdit"),
-        ("preview decision update immutable", lambda s: remove_sql_object(s, "trigger", "trg_import_rejections_committed_immutable_update"), verify_import_status_and_immutability, "n-07 décision d'aperçu d'un import commité non modifiable"),
-        ("preview decision delete immutable", lambda s: remove_sql_object(s, "trigger", "trg_import_rejections_committed_immutable_delete"), verify_import_status_and_immutability, "n-07 décision d'aperçu d'un import commité non supprimable"),
-        ("transaction source update immutable", lambda s: remove_sql_object(s, "trigger", "trg_transactions_source_immutable"), verify_connection_pragmas_and_replace, "ADR-019.b UPDATE d'un champ source transaction"),
-        ("transaction no delete", lambda s: remove_sql_object(s, "trigger", "trg_transactions_no_delete"), verify_connection_pragmas_and_replace, "SEC-06 DELETE d'une transaction sans provenance"),
-        ("source row update immutable", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_immutable"), verify_connection_pragmas_and_replace, "ADR-019.b UPDATE d'une source_row"),
-        ("source row no delete", lambda s: remove_sql_object(s, "trigger", "trg_source_rows_no_delete"), verify_connection_pragmas_and_replace, "SEC-06 DELETE d'une source_row"),
-        ("transaction sign", lambda s: remove_sql_object(s, "trigger", "trg_allocations_transaction_sign"), verify_allocations, "ADR-019.e allocation de signe différent"),
-        ("allocation total cap", lambda s: remove_sql_object(s, "trigger", "trg_allocations_total_cap"), verify_allocations, "ADR-019.e allocation confirmée au-delà"),
-        ("category direction", lambda s: remove_sql_object(s, "trigger", "trg_allocations_category_direction_insert"), verify_allocations, "ADR-019.e catégorie flow_savings_out"),
-        ("allocation update immutability", lambda s: remove_sql_object(s, "trigger", "trg_allocations_update_only_supersede"), verify_allocations, "ADR-019.e UPDATE en place"),
-        ("allocation no delete", lambda s: remove_sql_object(s, "trigger", "trg_allocations_no_delete"), verify_allocations, "ADR-019.e DELETE d'allocation confirmée"),
-        ("refund direction", lambda s: remove_sql_object(s, "trigger", "trg_refund_links_confirmed_direction_insert"), verify_refund_links, "MONEY-10 source sans allocation refund"),
-        ("refund source cap", lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_insert"), verify_refund_links, "n-04 plafond par allocation refund"),
-        ("refund target cap", lambda s: remove_sql_object(s, "trigger", "trg_refund_links_target_cap_insert"), verify_refund_links, "ADR-024.3 somme liée plafonnée par les allocations expense"),
-        ("refund target allocation cap", lambda s: remove_sql_object(s, "trigger", "trg_refund_links_target_allocation_cap_insert"), verify_refund_links, "ADR-024.3 plafond de l'allocation expense ciblée"),
-        ("confirmed refund link no delete", lambda s: remove_sql_object(s, "trigger", "trg_confirmed_transaction_links_no_delete"), verify_refund_links, "ADR-021 lien de remboursement confirmé non supprimable"),
-        ("confirmed refund link supersession only", lambda s: remove_sql_object(s, "trigger", "trg_confirmed_transaction_links_supersede_only"), verify_refund_links, "n-05 lien refund confirmé modifiable uniquement par supersession"),
-        ("refund target allocation FK", lambda s: mutate_table_clause(s, "transaction_links", "target_allocation_id TEXT REFERENCES allocations(allocation_id) ON DELETE RESTRICT,", "target_allocation_id TEXT,", "target allocation foreign key"), verify_refund_links, "ADR-024.3 FK de target_allocation_id"),
-        ("link supersession deferred FK", lambda s: mutate_table_clause(s, "transaction_links", "superseded_by_transaction_link_id TEXT REFERENCES transaction_links(transaction_link_id)\n        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,", "superseded_by_transaction_link_id TEXT REFERENCES transaction_links(transaction_link_id)\n        ON DELETE RESTRICT,", "deferred supersession foreign key"), verify_refund_links, "n-11 UPDATE ancien lien puis INSERT remplaçant"),
-        ("link supersession audit deferred FK", lambda s: mutate_table_clause(s, "transaction_links", "superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)\n        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,", "superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)\n        ON DELETE RESTRICT,", "deferred supersession audit foreign key"), verify_refund_links, "n-11 UPDATE ancien lien puis INSERT remplaçant"),
-        ("balance check input validation", lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_validate_insert"), verify_balance_checks, "ADR-024.3 delta de balance_check"),
-        ("balance check date cutoff", lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_validate_insert"), verify_balance_date_cutoff_guard, "ADR-024.2 balance_as_of postérieur à complete_through refusé en match"),
-        ("balance check update append-only", lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_immutable_update"), verify_balance_checks, "ADR-024.2 balance_checks append-only UPDATE"),
-        ("balance check delete append-only", lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_immutable_delete"), verify_balance_checks, "ADR-024.2 balance_checks append-only DELETE"),
-        ("zero transaction rejected", lambda s: mutate_transaction_amount_clause(s, "AND amount_cents <> 0", "AND amount_cents = amount_cents", "zero amount CHECK"), verify_amount_guards, "ADR-019.i montant zéro"),
-        ("integer transaction cents", lambda s: mutate_transaction_amount_clause(s, "typeof(amount_cents) = 'integer' AND ", "", "integer amount CHECK"), verify_amount_guards, "INV-02 montant SQLite REAL non entier"),
-        ("identity trim", lambda s: replace_once(s, "length(identity_label) > 0 AND identity_label = trim(identity_label)\n        AND instr(identity_label, '  ') = 0", "length(identity_label) > 0 AND instr(identity_label, '  ') = 0", "identity trim CHECK"), verify_identity_label, "ADR-019.g espace ASCII de bord"),
-        ("identity double-space", lambda s: replace_once(s, "AND instr(identity_label, '  ') = 0", "AND instr(identity_label, ' ') >= 0", "identity double-space CHECK"), verify_identity_label, "ADR-019.g double espace ASCII"),
-        ("insight metric registry", lambda s: re.sub(r"    metric_definition_id TEXT NOT NULL CHECK \(metric_definition_id IN \(.*?\n    \)\),", "    metric_definition_id TEXT NOT NULL,", s, count=1, flags=re.S), verify_insight_facts_and_idempotency, "F-04 metric ID d'insight"),
-        ("idempotency seven days", lambda s: replace_once(s, "created_at_utc, '+7 days'", "created_at_utc, '+6 days'", "idempotency expiry"), verify_insight_facts_and_idempotency, "ADR-023 rétention idempotence"),
-        ("backup HMAC key required", lambda s: mutate_table_clause(s, "backup_manifests", "includes_hmac_key INTEGER NOT NULL DEFAULT 1 CHECK (includes_hmac_key = 1),", "includes_hmac_key INTEGER NOT NULL DEFAULT 1,", "backup HMAC flag"), verify_backup_hmac_key_flag, "ADR-023 backup sans clé HMAC"),
-        ("no_op archive forbidden", lambda s: mutate_table_clause(s, "import_files", "    CHECK (\n        (status = 'no_op' AND archive_relpath IS NULL\n            AND archive_storage_mode IS NULL AND archive_permissions_octal IS NULL)\n        OR (status <> 'no_op' AND archive_relpath IS NOT NULL\n            AND archive_relpath = 'data/originals/' || import_file_id || '.bin'\n            AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600')\n    )", "    CHECK (1 = 1)", "no_op archive CHECK"), verify_noop_archive_constraint, "n-09 un no_op ne peut conserver des octets archivés"),
-        ("archive relative path", lambda s: replace_once(s, "AND archive_relpath = 'data/originals/' || import_file_id || '.bin'\n            AND archive_storage_mode", "AND archive_storage_mode", "archive path check"), verify_archive_metadata, "INV-11 chemin d'archive hors"),
-        ("archive raw storage", lambda s: replace_once(s, "AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600'", "AND archive_permissions_octal = '0600'", "archive raw check"), verify_archive_metadata, "INV-11 mode de stockage non raw"),
-        ("archive permissions", lambda s: replace_once(s, "AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600'", "AND archive_storage_mode = 'raw'", "archive permissions check"), verify_archive_metadata, "INV-11 permissions autres que 0600"),
-        ("import status enum", lambda s: mutate_table_clause(s, "import_files", "status TEXT NOT NULL CHECK (status IN ('previewed', 'committed', 'rejected', 'no_op')),", "status TEXT NOT NULL,", "import status enum"), verify_import_status_and_immutability, "ADR-017 aucun statut d'import partial"),
-        ("transaction flow not stored", lambda s: mutate_transaction_amount_clause(s, "    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),", "    flow_kind TEXT,\n    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),", "stored transaction flow"), verify_transaction_flow_not_stored, "flow_kind ne doit pas être stocké sur transactions"),
+        (
+            "UUIDv4 primary key",
+            lambda s: remove_uuid_primary_key_check(s, "accounts", "account_id"),
+            verify_primary_key_timestamp_and_version_guards,
+            "UUIDv4 CHECK absent: accounts.account_id",
+        ),
+        (
+            "strict UTC timestamp",
+            lambda s: mutate_table_clause(
+                s,
+                "accounts",
+                "CHECK ((strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc) = created_at_utc)),",
+                "CHECK (1 = 1),",
+                "created_at_utc CHECK",
+            ),
+            verify_primary_key_timestamp_and_version_guards,
+            "horodatage UTC strict absent: accounts.created_at_utc",
+        ),
+        (
+            "optimistic version trigger",
+            lambda s: remove_sql_object(s, "trigger", "trg_accounts_version_increment"),
+            verify_primary_key_timestamp_and_version_guards,
+            "trigger de version absent: accounts",
+        ),
+        (
+            "rank contiguous",
+            lambda s: remove_sql_object(s, "trigger", "trg_transactions_occurrence_contiguous"),
+            verify_occurrence_rank_guards,
+            "IMP-14 rang 3 sans rang 2",
+        ),
+        (
+            "foreign key account",
+            lambda s: mutate_transaction_amount_clause(
+                s,
+                "account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE RESTRICT,",
+                "account_id TEXT NOT NULL,",
+                "transaction account FK",
+            ),
+            verify_foreign_key,
+            "FK-01 compte inexistant",
+        ),
+        (
+            "source/account match",
+            lambda s: remove_sql_object(s, "trigger", "trg_source_rows_account_matches_section"),
+            verify_section_and_provenance_guards,
+            "IMP-14 source_row compte différent",
+        ),
+        (
+            "source/import status",
+            lambda s: remove_sql_object(s, "trigger", "trg_source_rows_import_status"),
+            verify_section_and_provenance_guards,
+            "INV-01 source_row d'un import rejected",
+        ),
+        (
+            "no sources on rejected import",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_files_reject_requires_no_sources"
+            ),
+            verify_section_and_provenance_guards,
+            "n-06 import avec source_row ne peut pas devenir rejected",
+        ),
+        (
+            "source identity hash equality",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_source_rows_identity_matches_transaction"
+            ),
+            verify_section_and_provenance_guards,
+            "n-08 source_row identity_key_sha256 doit égaler la transaction cible",
+        ),
+        (
+            "source same-transaction uniqueness",
+            lambda s: replace_once(
+                s,
+                "    UNIQUE (import_file_id, section_index, logical_row_idx),\n    UNIQUE (import_file_id, transaction_id)\n",
+                "    UNIQUE (import_file_id, section_index, logical_row_idx)\n",
+                "UNIQUE source import/transaction",
+            ),
+            verify_section_and_provenance_guards,
+            "IMP-14 une source par fichier",
+        ),
+        (
+            "source same-row uniqueness",
+            lambda s: replace_once(
+                s,
+                "    UNIQUE (import_file_id, section_index, logical_row_idx),\n    UNIQUE (import_file_id, transaction_id)\n",
+                "    UNIQUE (import_file_id, transaction_id)\n",
+                "UNIQUE source logical row",
+            ),
+            verify_section_and_provenance_guards,
+            "IMP-14 logical_row_idx unique",
+        ),
+        (
+            "source committed capacity",
+            lambda s: remove_sql_object(s, "trigger", "trg_source_rows_import_capacity"),
+            verify_section_and_provenance_guards,
+            "ADR-019.b capacité de provenance",
+        ),
+        (
+            "unique account section",
+            lambda s: remove_sql_object(s, "index", "uq_import_sections_file_account"),
+            verify_section_and_provenance_guards,
+            "IMP-13 second section mappée",
+        ),
+        (
+            "committed file hash unique",
+            lambda s: remove_sql_object(s, "index", "uq_import_files_committed_sha256"),
+            verify_noop_and_committed_hash,
+            "IMP-01 hash de fichier commité dupliqué",
+        ),
+        (
+            "import commit guard",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_commit_guard"),
+            verify_import_status_and_immutability,
+            "ADR-019.c nombre de source_rows",
+        ),
+        (
+            "fallback complete-through boundary",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_commit_guard"),
+            verify_fallback_complete_through_guard,
+            "IMP-11 complete_through repli ne peut inclure le dernier jour avec opérations",
+        ),
+        (
+            "direct commit forbidden",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_no_direct_commit"),
+            verify_import_status_and_immutability,
+            "ADR-019.d INSERT direct au statut committed",
+        ),
+        (
+            "no_op reference validated",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_noop_validate"),
+            verify_import_status_and_immutability,
+            "ADR-019.d no_op doit viser",
+        ),
+        (
+            "committed import immutable",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_committed_immutable"),
+            verify_import_status_and_immutability,
+            "ADR-019.d métadonnées de fichier",
+        ),
+        (
+            "import file no delete",
+            lambda s: remove_sql_object(s, "trigger", "trg_import_files_no_delete"),
+            verify_noop_and_committed_hash,
+            "ADR-019.d historique no_op",
+        ),
+        (
+            "committed section immutable",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_sections_committed_immutable_update"
+            ),
+            verify_import_status_and_immutability,
+            "ADR-019.d couverture/mapping",
+        ),
+        (
+            "committed section no delete",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_sections_committed_immutable_delete"
+            ),
+            verify_import_status_and_immutability,
+            "ADR-019.d section vide",
+        ),
+        (
+            "preview decision insert cutoff",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_rejections_insert_previewed_only"
+            ),
+            verify_import_status_and_immutability,
+            "n-07 ajout de décision après commit interdit",
+        ),
+        (
+            "preview decision update immutable",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_rejections_committed_immutable_update"
+            ),
+            verify_import_status_and_immutability,
+            "n-07 décision d'aperçu d'un import commité non modifiable",
+        ),
+        (
+            "preview decision delete immutable",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_import_rejections_committed_immutable_delete"
+            ),
+            verify_import_status_and_immutability,
+            "n-07 décision d'aperçu d'un import commité non supprimable",
+        ),
+        (
+            "transaction source update immutable",
+            lambda s: remove_sql_object(s, "trigger", "trg_transactions_source_immutable"),
+            verify_connection_pragmas_and_replace,
+            "ADR-019.b UPDATE d'un champ source transaction",
+        ),
+        (
+            "transaction no delete",
+            lambda s: remove_sql_object(s, "trigger", "trg_transactions_no_delete"),
+            verify_connection_pragmas_and_replace,
+            "SEC-06 DELETE d'une transaction sans provenance",
+        ),
+        (
+            "source row update immutable",
+            lambda s: remove_sql_object(s, "trigger", "trg_source_rows_immutable"),
+            verify_connection_pragmas_and_replace,
+            "ADR-019.b UPDATE d'une source_row",
+        ),
+        (
+            "source row no delete",
+            lambda s: remove_sql_object(s, "trigger", "trg_source_rows_no_delete"),
+            verify_connection_pragmas_and_replace,
+            "SEC-06 DELETE d'une source_row",
+        ),
+        (
+            "transaction sign",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_transaction_sign"),
+            verify_allocations,
+            "ADR-019.e allocation de signe différent",
+        ),
+        (
+            "allocation total cap",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_total_cap"),
+            verify_allocations,
+            "ADR-019.e allocation confirmée au-delà",
+        ),
+        (
+            "category direction",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_category_direction_insert"),
+            verify_allocations,
+            "ADR-019.e catégorie flow_savings_out",
+        ),
+        (
+            "allocation update immutability",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_update_only_supersede"),
+            verify_allocations,
+            "ADR-019.e UPDATE en place",
+        ),
+        (
+            "allocation no delete",
+            lambda s: remove_sql_object(s, "trigger", "trg_allocations_no_delete"),
+            verify_allocations,
+            "ADR-019.e DELETE d'allocation confirmée",
+        ),
+        (
+            "refund direction",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_confirmed_direction_insert"
+            ),
+            verify_refund_links,
+            "MONEY-10 source sans allocation refund",
+        ),
+        (
+            "refund source cap",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_source_cap_insert"),
+            verify_refund_links,
+            "n-04 plafond par allocation refund",
+        ),
+        (
+            "refund target cap",
+            lambda s: remove_sql_object(s, "trigger", "trg_refund_links_target_cap_insert"),
+            verify_refund_links,
+            "ADR-024.3 somme liée plafonnée par les allocations expense",
+        ),
+        (
+            "refund target allocation cap",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_target_allocation_cap_insert"
+            ),
+            verify_refund_links,
+            "ADR-024.3 plafond de l'allocation expense ciblée",
+        ),
+        (
+            "confirmed refund link no delete",
+            lambda s: remove_sql_object(s, "trigger", "trg_confirmed_transaction_links_no_delete"),
+            verify_refund_links,
+            "ADR-021 lien de remboursement confirmé non supprimable",
+        ),
+        (
+            "confirmed refund link supersession only",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_confirmed_transaction_links_supersede_only"
+            ),
+            verify_refund_links,
+            "n-05 lien refund confirmé modifiable uniquement par supersession",
+        ),
+        (
+            "refund target allocation FK",
+            lambda s: mutate_table_clause(
+                s,
+                "transaction_links",
+                "target_allocation_id TEXT REFERENCES allocations(allocation_id) ON DELETE RESTRICT,",
+                "target_allocation_id TEXT,",
+                "target allocation foreign key",
+            ),
+            verify_refund_links,
+            "ADR-024.3 FK de target_allocation_id",
+        ),
+        (
+            "link supersession deferred FK",
+            lambda s: mutate_table_clause(
+                s,
+                "transaction_links",
+                "superseded_by_transaction_link_id TEXT REFERENCES transaction_links(transaction_link_id)\n        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,",
+                "superseded_by_transaction_link_id TEXT REFERENCES transaction_links(transaction_link_id)\n        ON DELETE RESTRICT,",
+                "deferred supersession foreign key",
+            ),
+            verify_refund_links,
+            "n-11 UPDATE ancien lien puis INSERT remplaçant",
+        ),
+        (
+            "link supersession audit deferred FK",
+            lambda s: mutate_table_clause(
+                s,
+                "transaction_links",
+                "superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)\n        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,",
+                "superseded_by_audit_event_id TEXT REFERENCES audit_events(audit_event_id)\n        ON DELETE RESTRICT,",
+                "deferred supersession audit foreign key",
+            ),
+            verify_refund_links,
+            "n-11 UPDATE ancien lien puis INSERT remplaçant",
+        ),
+        (
+            "balance check input validation",
+            lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_validate_insert"),
+            verify_balance_checks,
+            "ADR-024.3 delta de balance_check",
+        ),
+        (
+            "balance check date cutoff",
+            lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_validate_insert"),
+            verify_balance_date_cutoff_guard,
+            "ADR-024.2 balance_as_of postérieur à complete_through refusé en match",
+        ),
+        (
+            "balance check update append-only",
+            lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_immutable_update"),
+            verify_balance_checks,
+            "ADR-024.2 balance_checks append-only UPDATE",
+        ),
+        (
+            "balance check delete append-only",
+            lambda s: remove_sql_object(s, "trigger", "trg_balance_checks_immutable_delete"),
+            verify_balance_checks,
+            "ADR-024.2 balance_checks append-only DELETE",
+        ),
+        (
+            "zero transaction rejected",
+            lambda s: mutate_transaction_amount_clause(
+                s, "AND amount_cents <> 0", "AND amount_cents = amount_cents", "zero amount CHECK"
+            ),
+            verify_amount_guards,
+            "ADR-019.i montant zéro",
+        ),
+        (
+            "integer transaction cents",
+            lambda s: mutate_transaction_amount_clause(
+                s, "typeof(amount_cents) = 'integer' AND ", "", "integer amount CHECK"
+            ),
+            verify_amount_guards,
+            "INV-02 montant SQLite REAL non entier",
+        ),
+        (
+            "identity trim",
+            lambda s: replace_once(
+                s,
+                "length(identity_label) > 0 AND identity_label = trim(identity_label)\n        AND instr(identity_label, '  ') = 0",
+                "length(identity_label) > 0 AND instr(identity_label, '  ') = 0",
+                "identity trim CHECK",
+            ),
+            verify_identity_label,
+            "ADR-019.g espace ASCII de bord",
+        ),
+        (
+            "identity double-space",
+            lambda s: replace_once(
+                s,
+                "AND instr(identity_label, '  ') = 0",
+                "AND instr(identity_label, ' ') >= 0",
+                "identity double-space CHECK",
+            ),
+            verify_identity_label,
+            "ADR-019.g double espace ASCII",
+        ),
+        (
+            "insight metric registry",
+            lambda s: re.sub(
+                r"    metric_definition_id TEXT NOT NULL CHECK \(metric_definition_id IN \(.*?\n    \)\),",
+                "    metric_definition_id TEXT NOT NULL,",
+                s,
+                count=1,
+                flags=re.S,
+            ),
+            verify_insight_facts_and_idempotency,
+            "F-04 metric ID d'insight",
+        ),
+        (
+            "idempotency seven days",
+            lambda s: replace_once(
+                s, "created_at_utc, '+7 days'", "created_at_utc, '+6 days'", "idempotency expiry"
+            ),
+            verify_insight_facts_and_idempotency,
+            "ADR-023 rétention idempotence",
+        ),
+        (
+            "backup HMAC key required",
+            lambda s: mutate_table_clause(
+                s,
+                "backup_manifests",
+                "includes_hmac_key INTEGER NOT NULL DEFAULT 1 CHECK (includes_hmac_key = 1),",
+                "includes_hmac_key INTEGER NOT NULL DEFAULT 1,",
+                "backup HMAC flag",
+            ),
+            verify_backup_hmac_key_flag,
+            "ADR-023 backup sans clé HMAC",
+        ),
+        (
+            "no_op archive forbidden",
+            lambda s: mutate_table_clause(
+                s,
+                "import_files",
+                "    CHECK (\n        (status = 'no_op' AND archive_relpath IS NULL\n            AND archive_storage_mode IS NULL AND archive_permissions_octal IS NULL)\n        OR (status <> 'no_op' AND archive_relpath IS NOT NULL\n            AND archive_relpath = 'data/originals/' || import_file_id || '.bin'\n            AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600')\n    )",
+                "    CHECK (1 = 1)",
+                "no_op archive CHECK",
+            ),
+            verify_noop_archive_constraint,
+            "n-09 un no_op ne peut conserver des octets archivés",
+        ),
+        (
+            "archive relative path",
+            lambda s: replace_once(
+                s,
+                "AND archive_relpath = 'data/originals/' || import_file_id || '.bin'\n            AND archive_storage_mode",
+                "AND archive_storage_mode",
+                "archive path check",
+            ),
+            verify_archive_metadata,
+            "INV-11 chemin d'archive hors",
+        ),
+        (
+            "archive raw storage",
+            lambda s: replace_once(
+                s,
+                "AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600'",
+                "AND archive_permissions_octal = '0600'",
+                "archive raw check",
+            ),
+            verify_archive_metadata,
+            "INV-11 mode de stockage non raw",
+        ),
+        (
+            "archive permissions",
+            lambda s: replace_once(
+                s,
+                "AND archive_storage_mode = 'raw' AND archive_permissions_octal = '0600'",
+                "AND archive_storage_mode = 'raw'",
+                "archive permissions check",
+            ),
+            verify_archive_metadata,
+            "INV-11 permissions autres que 0600",
+        ),
+        (
+            "import status enum",
+            lambda s: mutate_table_clause(
+                s,
+                "import_files",
+                "status TEXT NOT NULL CHECK (status IN ('previewed', 'committed', 'rejected', 'no_op')),",
+                "status TEXT NOT NULL,",
+                "import status enum",
+            ),
+            verify_import_status_and_immutability,
+            "ADR-017 aucun statut d'import partial",
+        ),
+        (
+            "transaction flow not stored",
+            lambda s: mutate_transaction_amount_clause(
+                s,
+                "    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),",
+                "    flow_kind TEXT,\n    amount_cents INTEGER NOT NULL CHECK (typeof(amount_cents) = 'integer' AND amount_cents <> 0),",
+                "stored transaction flow",
+            ),
+            verify_transaction_flow_not_stored,
+            "flow_kind ne doit pas être stocké sur transactions",
+        ),
     ]
     with tempfile.TemporaryDirectory(prefix="verify-schema-proof-") as temp_dir:
         root = Path(temp_dir)
@@ -1962,25 +2934,44 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
                     ) from error
                 report(f"preuve /tmp : retrait {name} détecté par {expected_failure}")
             else:
-                raise VerificationError(f"preuve de régression {name}: le test est resté vert sans sa contrainte")
+                raise VerificationError(
+                    f"preuve de régression {name}: le test est resté vert sans sa contrainte"
+                )
 
     script_source = Path(__file__).read_text(encoding="utf-8")
     binder_start = script_source.index("def require_cents(")
     binder_end = script_source.index("\n\ndef insert_account(", binder_start)
     mutant_binder = replace_once(
-        script_source[binder_start:binder_end], "if type(value) is not int:", "if False:", "strict int binder"
+        script_source[binder_start:binder_end],
+        "if type(value) is not int:",
+        "if False:",
+        "strict int binder",
     )
     mutant_source = script_source[:binder_start] + mutant_binder + script_source[binder_end:]
     with tempfile.TemporaryDirectory(prefix="verify-schema-python-proof-") as temp_dir:
         mutant_script = Path(temp_dir) / "verify_schema_mutant.py"
         mutant_script.write_text(mutant_source, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, "-I", str(mutant_script), "--schema", str(schema_path), "--skip-mutation-proofs"],
-            capture_output=True, text=True, check=False,
+            [
+                sys.executable,
+                "-I",
+                str(mutant_script),
+                "--schema",
+                str(schema_path),
+                "--skip-mutation-proofs",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         combined = result.stdout + result.stderr
-        if result.returncode == 0 or "ADR-019.h float intégral rejeté avant binding" not in combined:
-            raise VerificationError("preuve ADR-019.h: retirer type(value) is int n'a pas fait échouer son test")
+        if (
+            result.returncode == 0
+            or "ADR-019.h float intégral rejeté avant binding" not in combined
+        ):
+            raise VerificationError(
+                "preuve ADR-019.h: retirer type(value) is int n'a pas fait échouer son test"
+            )
         report("preuve /tmp : retrait du binder ADR-019.h détecté par le test strict-int")
 
 
@@ -1990,6 +2981,7 @@ def verify_schema(schema_path: Path, *, prove_mutations: bool = True) -> None:
     connection.close()
     tests: tuple[Callable[[Path], None], ...] = (
         verify_connection_pragmas_and_replace,
+        verify_primary_key_timestamp_and_version_guards,
         verify_foreign_key,
         verify_occurrence_rank_guards,
         verify_identity_label,
@@ -2023,11 +3015,14 @@ def verify_schema(schema_path: Path, *, prove_mutations: bool = True) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--schema", type=Path, default=DEFAULT_SCHEMA,
+        "--schema",
+        type=Path,
+        default=DEFAULT_SCHEMA,
         help="copie alternative de schema.sql, utile pour vérifier qu'une régression échoue",
     )
     parser.add_argument(
-        "--skip-mutation-proofs", action="store_true",
+        "--skip-mutation-proofs",
+        action="store_true",
         help="réservé à l'exécution rapide d'une copie mutante par un outil externe",
     )
     args = parser.parse_args()

@@ -43,7 +43,7 @@ class Account(VersionedMixin, CreatedUpdatedAtMixin, Base):
     __tablename__ = "accounts"
 
     account_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     alias: Mapped[str] = mapped_column(Text, nullable=False)
     account_role: Mapped[str] = mapped_column(Text, nullable=False)
@@ -61,7 +61,7 @@ class ImportFile(VersionedMixin, Base):
     __tablename__ = "import_files"
 
     import_file_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     archive_relpath: Mapped[str | None] = mapped_column(Text, unique=True)
@@ -131,7 +131,7 @@ class BalanceCheck(VersionedMixin, CreatedAtMixin, Base):
     )
 
     balance_check_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     account_id: Mapped[str] = mapped_column(
         Text, ForeignKey("accounts.account_id", ondelete="RESTRICT"), nullable=False
@@ -157,7 +157,7 @@ class ImportRejection(CreatedAtMixin, Base):
     )
 
     import_rejection_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     import_file_id: Mapped[str] = mapped_column(
         Text, ForeignKey("import_files.import_file_id", ondelete="RESTRICT"), nullable=False
@@ -187,7 +187,9 @@ class ImportRejection(CreatedAtMixin, Base):
 class Payee(VersionedMixin, CreatedUpdatedAtMixin, Base):
     __tablename__ = "payees"
 
-    payee_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=True, default=uuid4_text)
+    payee_id: Mapped[str] = mapped_column(
+        Text, primary_key=True, nullable=False, default=uuid4_text
+    )
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     is_active: Mapped[int] = mapped_column(
@@ -202,7 +204,7 @@ class PayeeAlias(VersionedMixin, CreatedAtMixin, Base):
     __tablename__ = "payee_aliases"
 
     payee_alias_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     payee_id: Mapped[str] = mapped_column(
         Text, ForeignKey("payees.payee_id", ondelete="RESTRICT"), nullable=False
@@ -218,7 +220,7 @@ class PayeeAlias(VersionedMixin, CreatedAtMixin, Base):
 class Category(VersionedMixin, CreatedUpdatedAtMixin, Base):
     __tablename__ = "categories"
 
-    category_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=True)
+    category_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
     parent_category_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("categories.category_id", ondelete="RESTRICT")
     )
@@ -256,7 +258,7 @@ class Transaction(VersionedMixin, Base):
     __tablename__ = "transactions"
 
     transaction_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     account_id: Mapped[str] = mapped_column(
         Text, ForeignKey("accounts.account_id", ondelete="RESTRICT"), nullable=False
@@ -291,7 +293,7 @@ class SourceRow(CreatedAtMixin, Base):
     )
 
     source_row_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     import_file_id: Mapped[str] = mapped_column(Text, nullable=False)
     section_index: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -311,7 +313,7 @@ class ImportReconciliationCandidate(VersionedMixin, CreatedAtMixin, Base):
     __tablename__ = "import_reconciliation_candidates"
 
     reconciliation_candidate_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     source_row_id: Mapped[str] = mapped_column(
         Text, ForeignKey("source_rows.source_row_id", ondelete="RESTRICT"), nullable=False
@@ -338,7 +340,7 @@ class Allocation(VersionedMixin, CreatedAtMixin, Base):
     )
 
     allocation_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     transaction_id: Mapped[str] = mapped_column(
         Text, ForeignKey("transactions.transaction_id", ondelete="RESTRICT"), nullable=False
@@ -392,7 +394,7 @@ class ClassificationSuggestion(VersionedMixin, CreatedAtMixin, Base):
     )
 
     suggestion_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     transaction_id: Mapped[str] = mapped_column(
         Text, ForeignKey("transactions.transaction_id", ondelete="RESTRICT"), nullable=False
@@ -419,7 +421,7 @@ class ClassificationDecision(VersionedMixin, CreatedAtMixin, Base):
     __tablename__ = "classification_decisions"
 
     decision_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     transaction_id: Mapped[str] = mapped_column(
         Text, ForeignKey("transactions.transaction_id", ondelete="RESTRICT"), nullable=False
@@ -446,7 +448,7 @@ class Rule(VersionedMixin, CreatedUpdatedAtMixin, Base):
         ),
     )
 
-    rule_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=True, default=uuid4_text)
+    rule_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False, default=uuid4_text)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     scope_kind: Mapped[str] = mapped_column(Text, nullable=False)
     scope_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -469,7 +471,7 @@ class RuleExecution(Base):
     __tablename__ = "rule_executions"
 
     rule_execution_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     rule_id: Mapped[str] = mapped_column(
         Text, ForeignKey("rules.rule_id", ondelete="RESTRICT"), nullable=False
@@ -501,7 +503,7 @@ class TransactionLink(VersionedMixin, CreatedAtMixin, Base):
     __tablename__ = "transaction_links"
 
     transaction_link_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     source_transaction_id: Mapped[str] = mapped_column(
         Text, ForeignKey("transactions.transaction_id", ondelete="RESTRICT"), nullable=False
@@ -541,7 +543,7 @@ class AuditEvent(CreatedAtMixin, Base):
     __tablename__ = "audit_events"
 
     audit_event_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     import_file_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("import_files.import_file_id", ondelete="RESTRICT")
@@ -558,7 +560,7 @@ class AuditEvent(CreatedAtMixin, Base):
 class AppSetting(VersionedMixin, Base):
     __tablename__ = "app_settings"
 
-    setting_key: Mapped[str] = mapped_column(Text, primary_key=True, nullable=True)
+    setting_key: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
     setting_value: Mapped[str] = mapped_column(Text, nullable=False)
     is_secret: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
@@ -572,7 +574,7 @@ class LlmRun(Base):
     __tablename__ = "llm_runs"
 
     llm_run_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
@@ -600,7 +602,7 @@ class Budget(VersionedMixin, CreatedUpdatedAtMixin, Base):
     )
 
     budget_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     category_id: Mapped[str] = mapped_column(
         Text, ForeignKey("categories.category_id", ondelete="RESTRICT"), nullable=False
@@ -638,7 +640,7 @@ class Insight(VersionedMixin, CreatedUpdatedAtMixin, Base):
     __tablename__ = "insights"
 
     insight_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="active", server_default=text("'active'")
@@ -651,7 +653,7 @@ class InsightFact(CreatedAtMixin, Base):
     __tablename__ = "insight_facts"
 
     insight_fact_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     insight_id: Mapped[str] = mapped_column(
         Text, ForeignKey("insights.insight_id", ondelete="RESTRICT"), nullable=False
@@ -691,7 +693,7 @@ class BackupManifest(CreatedAtMixin, Base):
     __tablename__ = "backup_manifests"
 
     backup_manifest_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, nullable=True, default=uuid4_text
+        Text, primary_key=True, nullable=False, default=uuid4_text
     )
     schema_version: Mapped[str] = mapped_column(Text, nullable=False)
     archive_relpath: Mapped[str] = mapped_column(Text, nullable=False)
@@ -713,7 +715,7 @@ class BackupManifest(CreatedAtMixin, Base):
 class IdempotencyRecord(CreatedAtMixin, Base):
     __tablename__ = "idempotency_records"
 
-    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
     http_method: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_path: Mapped[str] = mapped_column(Text, nullable=False)
     request_sha256: Mapped[str] = mapped_column(Text, nullable=False)

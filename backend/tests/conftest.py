@@ -16,8 +16,27 @@ def temp_sqlite_url(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-def test_settings(temp_sqlite_url: str) -> Settings:
-    return Settings(database_url=temp_sqlite_url, data_dir=Path("/tmp/comptes-familiaux-test"))
+def test_settings(temp_sqlite_url: str, tmp_path: Path) -> Settings:
+    return Settings(
+        database_url=temp_sqlite_url,
+        data_dir=tmp_path / "app-data",
+        _env_file=None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def test_clients_use_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aligne le Host par défaut de TestClient sur le bind local de l'application."""
+    original_init = TestClient.__init__
+
+    def init_with_loopback(self, app, *args, **kwargs):
+        if args:
+            args = ("http://127.0.0.1" if args[0] == "http://testserver" else args[0], *args[1:])
+        else:
+            kwargs.setdefault("base_url", "http://127.0.0.1")
+        original_init(self, app, *args, **kwargs)
+
+    monkeypatch.setattr(TestClient, "__init__", init_with_loopback)
 
 
 @pytest.fixture

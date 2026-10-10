@@ -11,6 +11,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.db.errors import (
+    DatabaseBusyError,
+)
+from app.db.errors import (
+    VersionConflictError as DatabaseVersionConflictError,
+)
+
 logger = logging.getLogger("comptes_familiaux.api")
 
 
@@ -29,6 +36,14 @@ class AppError(Exception):
         self.status_code = status_code
         self.message = message
         self.details = dict(details or {})
+
+
+class VersionConflictError(DatabaseVersionConflictError):
+    """La version demandée est périmée; interface temporaire en attendant T06."""
+
+    def __init__(self, current_version: int | None = None) -> None:
+        super().__init__()
+        self.current_version = current_version
 
 
 def _error_response(
@@ -81,6 +96,23 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
         return _error_response(exc.status_code, exc.code, exc.message, exc.details)
+
+    @app.exception_handler(DatabaseBusyError)
+    async def database_busy_handler(_request: Request, _exc: DatabaseBusyError) -> JSONResponse:
+        return _error_response(
+            503,
+            "DATABASE_BUSY",
+            "La base est occupée; réessayez dans un instant.",
+            {"retryable": True},
+        )
+
+    @app.exception_handler(DatabaseVersionConflictError)
+    async def version_conflict_handler(
+        _request: Request, exc: DatabaseVersionConflictError
+    ) -> JSONResponse:
+        current_version = getattr(exc, "current_version", None)
+        details = {"current_version": current_version} if current_version is not None else {}
+        return _error_response(409, "VERSION_CONFLICT", "Cette ressource a changé.", details)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:

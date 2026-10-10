@@ -6,8 +6,11 @@ from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 from app.core.security import DEFAULT_BIND_HOST, DEFAULT_BIND_PORT
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def is_loopback_host(host: str) -> bool:
@@ -25,11 +28,12 @@ class Settings(BaseSettings):
     """Paramètres applicatifs sans divulgation des secrets dans leur repr."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
         validate_default=True,
+        hide_input_in_errors=True,
     )
 
     app_host: str = DEFAULT_BIND_HOST
@@ -42,6 +46,28 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     data_dir: Path = Path("data")
     version: str = Field(default="0.1.0", validation_alias="APP_VERSION")
+
+    @field_validator("database_url")
+    @classmethod
+    def anchor_database_url(cls, value: str) -> str:
+        url = make_url(value)
+        database = url.database
+        if (
+            url.get_backend_name() == "sqlite"
+            and database is not None
+            and database not in ("", ":memory:")
+            and not Path(database).is_absolute()
+            and not database.startswith("file:")
+        ):
+            anchored = (PROJECT_ROOT / database).resolve()
+            return url.set(database=str(anchored)).render_as_string(hide_password=False)
+        return value
+
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def anchor_data_dir(cls, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
     @field_validator("app_host")
     @classmethod

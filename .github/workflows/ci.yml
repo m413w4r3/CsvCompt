@@ -11,14 +11,14 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
+      - uses: astral-sh/setup-uv@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           python-version: '3.12'
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: uv run ruff check backend
       - run: uv run ruff format --check backend
       - run: uv run mypy backend/app
@@ -27,8 +27,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
+      - uses: actions/setup-node@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           node-version: 24
           cache: npm
@@ -47,47 +47,49 @@ jobs:
   contracts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
+      - uses: astral-sh/setup-uv@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           python-version: '3.12'
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: ./scripts/verify_contracts.sh
 
   privacy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
+      - uses: astral-sh/setup-uv@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           python-version: '3.12'
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: scripts/check_no_private_data.sh --with-untracked
       - run: uv run pytest -q backend/tests/unit/test_repo_guards.py
 
   e2e-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
+      - uses: astral-sh/setup-uv@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4 # Major tag; SHA pin deferred because it cannot be audited offline.
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
         working-directory: frontend
       - run: ./scripts/test_e2e_smoke.sh
         env:

@@ -19,6 +19,16 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _operation() -> str | None:
+    configured = config.attributes.get("operation")
+    if isinstance(configured, str):
+        return configured
+    cli_command = getattr(getattr(config, "cmd_opts", None), "cmd", None)
+    function = cli_command[0] if isinstance(cli_command, tuple) and cli_command else cli_command
+    name = getattr(function, "__name__", None)
+    return name if isinstance(name, str) else None
+
+
 def _settings() -> Settings:
     configured = config.attributes.get("settings")
     if isinstance(configured, Settings):
@@ -36,13 +46,33 @@ def run_migrations_online() -> None:
     engine: Engine = create_sqlite_engine(settings.database_url)
     try:
         with engine.connect() as connection:
-            if os.environ.get("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE") == "1":
-                # PRAGMA foreign_keys ne peut être modifié après BEGIN; le mode
-                # destructif ne s'active qu'avec le drapeau explicite et reste
-                # protégé par la vérification de sauvegarde de la révision.
-                dbapi_connection = connection.connection.driver_connection
+            operation = _operation()
+            dbapi_connection = connection.connection.driver_connection
+            if (
+                operation == "downgrade"
+                and os.environ.get("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE") == "1"
+            ):
+                # PRAGMA foreign_keys ne peut être modifié après BEGIN. Il n'est
+                # désactivé que pour un downgrade explicitement destructif.
                 assert dbapi_connection is not None
                 dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+            elif dbapi_connection is not None:
+                fk_enabled = dbapi_connection.execute("PRAGMA foreign_keys").fetchone()
+                if fk_enabled != (1,):
+                    raise RuntimeError("foreign_keys doit rester actif hors downgrade destructif")
+            if operation == "upgrade":
+                assert dbapi_connection is not None
+                has_schema = (
+                    dbapi_connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
+                    ).fetchone()
+                    is not None
+                )
+                if has_schema and config.attributes.get("pre_upgrade_backup_checked") is not True:
+                    raise RuntimeError(
+                        "upgrade direct refusé sur une base non vide; utilisez "
+                        "uv run python -m app.db.migrate upgrade pour la sauvegarde vérifiée"
+                    )
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,

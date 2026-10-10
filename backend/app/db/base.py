@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -36,10 +37,12 @@ class ISODateText(TypeDecorator[date]):
 
 
 class UTCDateTimeText(TypeDecorator[datetime]):
-    """Expose des instants conscients du fuseau et les stocke en texte UTC ``Z``."""
+    """Expose des instants conscients du fuseau au format UTC canonique milliseconde."""
 
     impl = Text
     cache_ok = True
+    _format = "%Y-%m-%dT%H:%M:%S.%fZ"
+    _pattern = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
 
     def process_bind_param(self, value: datetime | None, _dialect: Any) -> str | None:
         if value is None:
@@ -47,15 +50,17 @@ class UTCDateTimeText(TypeDecorator[datetime]):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("un horodatage doit inclure un fuseau horaire")
         utc_value = value.astimezone(UTC)
-        return utc_value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return utc_value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     def process_result_value(self, value: str | None, _dialect: Any) -> datetime | None:
         if value is None:
             return None
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("l'horodatage SQLite ne contient pas de fuseau")
-        return parsed.astimezone(UTC)
+        if self._pattern.fullmatch(value) is None:
+            raise ValueError(
+                "l'horodatage SQLite doit respecter le format UTC avec millisecondes "
+                "YYYY-MM-DDTHH:MM:SS.mmmZ"
+            )
+        return datetime.strptime(value, self._format).replace(tzinfo=UTC)
 
 
 class CreatedAtMixin:

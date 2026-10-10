@@ -41,13 +41,14 @@ Forme commune :
 - Toute ressource modifiable expose `version`. La requête de mutation envoie `expected_version`; une version obsolète répond `409 VERSION_CONFLICT` avec `details.current_version`.
 - Les entrées `idempotency_records` sont conservées 7 jours glissants, avec `expires_at_utc`; une purge au démarrage supprime celles expirées. Les réponses créatrices ne sont rejouables qu'au cours de cette fenêtre (ADR-023).
 - Le serveur écoute `127.0.0.1` uniquement. `GET /api/v1/health` n'appelle ni banque ni fournisseur LLM et fonctionne sans réseau externe ni clé configurée.
-- Erreur normalisée, sans secret, chemin disque, numéro de compte ou libellé réel dans les détails techniques :
+- Erreur normalisée sous l'enveloppe `{ "error": { "code", "message", "details" } }`, sans secret, chemin disque, numéro de compte ou libellé réel dans les détails techniques :
 
+<!-- contract-example:error -->
 ```json
-{"code":"VERSION_CONFLICT","message":"Cette ressource a changé.","details":{"current_version":3}}
+{"error":{"code":"VERSION_CONFLICT","message":"Cette ressource a changé.","details":{"current_version":3}}}
 ```
 
-Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (400), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
+Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `INVALID_HOST` (400), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (400), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
 
 ### Enveloppe analytique
 
@@ -71,10 +72,17 @@ Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metri
 
 | Méthode et chemin | Requête | Réponse |
 |---|---|---|
-| `GET /api/v1/health` | aucune | `status`, `api_version`, `storage_status`, `llm_enabled`; 200 hors ligne. |
+| `GET /api/v1/health` | aucune | Champs obligatoires `status`, `api_version`, `storage_status`, `llm_enabled`; peut aussi renvoyer `version`, `time_utc`, `database:{status,revision}`, `offline_ready`. 200 hors ligne. |
 | `GET /api/v1/security/csrf` | bootstrap same-origin du client local | établit le cookie de session `SameSite=Strict; HttpOnly` et renvoie un jeton anti-CSRF à conserver en mémoire pour les mutations. |
 
-Exemple : `GET /api/v1/health` → `200 {"status":"ok","api_version":"1","storage_status":"ok","llm_enabled":false}`. Aucun nom de machine, secret, compte bancaire ou appel réseau externe.
+Exemple : `GET /api/v1/health` → 200. `storage_status` vaut `ok` si la base est migrée à la révision courante, `degraded` si elle est absente, non initialisée ou en retard, et `unavailable` si elle est illisible ou corrompue. Aucun appel réseau externe ni création de base.
+
+<!-- contract-example:health -->
+```json
+{"status":"ok","api_version":"1","storage_status":"ok","llm_enabled":false,"version":"0.1.0","time_utc":"2026-10-10T12:00:00Z","database":{"status":"ok","revision":"0001_initial"},"offline_ready":true}
+```
+
+Le bind est loopback uniquement et les en-têtes `Host` non autorisés reçoivent l'erreur normalisée `INVALID_HOST` (400). Le lancement direct d'Uvicorn avec `--host 0.0.0.0` est déconseillé : la garde d'hôte demeure active, mais le serveur ne doit pas être exposé sur un réseau.
 
 Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-aléatoire>"}` + cookie local `SameSite=Strict; HttpOnly`; le jeton n'est pas écrit dans `localStorage`.
 

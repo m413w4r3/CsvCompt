@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:9513',
+        target: `http://127.0.0.1:${process.env.SMOKE_API_PORT ?? '9513'}`,
         changeOrigin: false,
       },
     },

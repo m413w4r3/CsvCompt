@@ -23,7 +23,7 @@ make verify-contracts
 make privacy
 ```
 
-Les tests backend excluent toujours `opt_in_real_data`. Les tests d'intégration sélectionnent le marqueur `integration`. Le smoke migre une base SQLite temporaire sous `/tmp` avant de démarrer le backend prêt, puis démarre un second backend avec une base vide. Playwright vérifie les libellés « Serveur local connecté » et « Base locale à initialiser ou à migrer » à partir des réponses réelles de ces deux backends. Le frontend est construit avant le test. Les deux bases temporaires et les processus serveur sont nettoyés à la fin. En CI, une installation de navigateur impossible est une erreur ; en local hors CI, l'échec d'installation hors ligne affiche `SKIPPED`.
+Les tests backend excluent toujours `opt_in_real_data`. Les tests d'intégration sélectionnent le marqueur `integration`. Le smoke migre une base SQLite temporaire sous `/tmp`, démarre le backend sur le port de `SMOKE_API_PORT` puis vérifie la vraie chaîne navigateur → proxy Vite `/api` → backend. Il répète le test avec une base vide et le même port. Aucun health n'est simulé par Playwright. Le frontend est construit avant les deux scénarios ; les bases temporaires et les serveurs sont nettoyés à la fin. En CI, Chromium est installé avec ses dépendances système et son absence fait échouer le smoke. Hors CI, une installation impossible affiche `SKIPPED (navigateur indisponible)` explicitement.
 
 ## Sans GNU make
 
@@ -35,7 +35,9 @@ Les scripts `scripts/lint.sh`, `scripts/test_backend.sh`, `scripts/test_frontend
 
 GitHub Actions sépare backend, frontend, contrats, confidentialité et smoke E2E. Chaque suite utilise les fixtures synthétiques suivies sous `backend/tests/fixtures/` et des bases temporaires. Aucune étape ne définit `COMPTES_REAL_CSV`, ne lit `csv_references/` ou `data/`, et aucun artefact de test ou rapport n'est publié. Les tests marqués `opt_in_real_data` sont exclus explicitement des commandes pytest par défaut. Les permissions du workflow sont limitées à `contents: read` ; aucun secret n'est requis.
 
-Le garde `make privacy` appelle `scripts/check_no_private_data.sh --with-untracked`. Les tests `test_repo_guards.py` couvrent également les chemins interdits, l'usage SQL `INSERT OR REPLACE`, l'exclusion des tests réels par défaut et l'heuristique anti-float dans `backend/app`.
+Le garde `make privacy` appelle `scripts/check_no_private_data.sh --with-untracked`. Les tests `test_repo_guards.py` ajoutent des contrôles de chemins/extensions privés, IBAN et numéros de carte, `prefix_with("OR REPLACE")`, `on_conflict_do_update`, annotations `float`, divisions `/ 100` et références interdites dans les scripts/CI. Des sondes positives et négatives sont construites dans `tmp_path` avec des valeurs synthétiques. `scripts/check_no_private_data.sh` reste inchangé.
+
+Les jobs CI utilisent `uv sync --locked`. Les actions GitHub restent référencées par tag majeur accompagné d'un commentaire. L'épinglage par SHA n'a pas été vérifié dans cette revue hors ligne ; c'est un risque accepté à suivre avant de durcir la chaîne d'approvisionnement. Le contrôle des chemins suivis s'appuie sur Git : le test correspondant est ignoré avec un message explicite si la suite est lancée depuis une archive sans index Git. La cible `privacy` et les scripts shell qui inspectent l'index requièrent un dépôt Git.
 
 ## Durées indicatives et dépannage
 

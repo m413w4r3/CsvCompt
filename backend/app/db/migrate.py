@@ -105,18 +105,33 @@ def _ensure_database_location(database_path: Path | None) -> None:
             database_path.chmod(0o600)
 
 
-def _readonly_connection(database_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=5)
+def _harden_upgrade_permissions(database_path: Path, data_directory: Path) -> None:
+    """Applies private modes to the data directory and SQLite's live files."""
+    _ensure_private_directory(data_directory)
+    data_directory.chmod(0o700)
+    for path in (
+        database_path,
+        Path(f"{database_path}-wal"),
+        Path(f"{database_path}-shm"),
+    ):
+        if path.exists():
+            path.chmod(0o600)
+
+
+def _readonly_connection(database_path: Path, *, timeout_ms: int = 5000) -> sqlite3.Connection:
+    connection = sqlite3.connect(
+        f"{database_path.as_uri()}?mode=ro", uri=True, timeout=timeout_ms / 1000
+    )
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA recursive_triggers=ON")
     return connection
 
 
-def _has_schema_objects(database_path: Path | None) -> bool:
+def _has_schema_objects(database_path: Path | None, *, timeout_ms: int = 5000) -> bool:
     if database_path is None or not database_path.is_file() or database_path.stat().st_size == 0:
         return False
     try:
-        with closing(_readonly_connection(database_path)) as connection:
+        with closing(_readonly_connection(database_path, timeout_ms=timeout_ms)) as connection:
             row = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone()
@@ -125,13 +140,13 @@ def _has_schema_objects(database_path: Path | None) -> bool:
         raise MigrationError("Impossible de lire l'état SQLite avant la migration") from error
 
 
-def current_revision(database_url: str) -> str | None:
+def current_revision(database_url: str, *, timeout_ms: int = 5000) -> str | None:
     """Lit la révision sans créer le fichier ni la table Alembic."""
     database_path = database_file_path(database_url)
     if database_path is None or not database_path.is_file() or database_path.stat().st_size == 0:
         return None
     try:
-        with closing(_readonly_connection(database_path)) as connection:
+        with closing(_readonly_connection(database_path, timeout_ms=timeout_ms)) as connection:
             version_table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'"
             ).fetchone()
@@ -145,11 +160,11 @@ def current_revision(database_url: str) -> str | None:
     return None if not rows else str(rows[0][0])
 
 
-def _application_tables(database_path: Path | None) -> set[str]:
+def _application_tables(database_path: Path | None, *, timeout_ms: int = 5000) -> set[str]:
     if database_path is None or not database_path.is_file() or database_path.stat().st_size == 0:
         return set()
     try:
-        with closing(_readonly_connection(database_path)) as connection:
+        with closing(_readonly_connection(database_path, timeout_ms=timeout_ms)) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%' AND name <> 'alembic_version'"
@@ -159,8 +174,23 @@ def _application_tables(database_path: Path | None) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _is_busy_failure(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        code = getattr(current, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return True
+        if (
+            "database is locked" in str(current).lower()
+            or "database table is locked" in str(current).lower()
+        ):
+            return True
+        current = current.__cause__
+    return False
+
+
 def database_state(settings: Settings) -> tuple[str, str | None]:
-    """Renvoie ``ok``, ``not_initialized`` ou ``outdated`` et la révision lue."""
+    """Renvoie l'état du schéma; les verrous SQLite courts sont ``degraded``."""
     try:
         database_path = database_file_path(settings.database_url)
     except MigrationError:
@@ -168,16 +198,20 @@ def database_state(settings: Settings) -> tuple[str, str | None]:
     if database_path is None or not database_path.is_file():
         return "not_initialized", None
     try:
-        has_objects = _has_schema_objects(database_path)
-        tables = _application_tables(database_path)
-    except MigrationError:
+        has_objects = _has_schema_objects(database_path, timeout_ms=200)
+        tables = _application_tables(database_path, timeout_ms=200)
+    except MigrationError as error:
+        if _is_busy_failure(error):
+            return "degraded", None
         return "outdated", None
     if not has_objects:
         return "not_initialized", None
     try:
-        revision = current_revision(settings.database_url)
+        revision = current_revision(settings.database_url, timeout_ms=200)
         head = _head_revision(settings)
-    except MigrationError:
+    except MigrationError as error:
+        if _is_busy_failure(error):
+            return "degraded", None
         return "outdated", None
     if revision == head and set(Base.metadata.tables).issubset(tables):
         return "ok", revision
@@ -276,6 +310,8 @@ def upgrade_to_head(settings: Settings) -> UpgradeResult:
     if database_path is None:
         raise MigrationError("Une base SQLite fichier est requise pour appliquer des migrations")
     _ensure_database_location(database_path)
+    data_directory = settings.data_dir.expanduser()
+    _harden_upgrade_permissions(database_path, data_directory)
     head = _head_revision(settings)
     current = current_revision(settings.database_url)
     tables = _application_tables(database_path)
@@ -295,14 +331,25 @@ def upgrade_to_head(settings: Settings) -> UpgradeResult:
         )
 
     config = _alembic_config(settings)
+    config.attributes["operation"] = "upgrade"
+    config.attributes["pre_upgrade_backup_checked"] = True
     try:
         command.upgrade(config, "head")
     except Exception as error:
         if isinstance(error, MigrationError):
             raise
-        raise MigrationError(
-            "La migration Alembic a échoué; la sauvegarde vérifiée est conservée"
-        ) from error
+        if backup is None:
+            message = (
+                "La migration Alembic a échoué; aucune sauvegarde pré-migration n'a été créée."
+            )
+        else:
+            message = (
+                "La migration Alembic a échoué; la sauvegarde vérifiée est conservée: "
+                f"{backup.database_path.name}"
+            )
+        raise MigrationError(message) from error
+    finally:
+        _harden_upgrade_permissions(database_path, data_directory)
     final_revision = current_revision(settings.database_url)
     if final_revision != head:
         raise MigrationError("Alembic n'a pas atteint la révision attendue")
