@@ -10,7 +10,7 @@
 | G0 | Statut historique documenté, non réévalué ici | Revues G0 dans `docs/revues/` ; aucune nouvelle vérification menée dans cette réconciliation |
 | G1 | Statut historique documenté, non réévalué ici | `docs/revues/REVUE_G1.md` |
 | G2 | Statut historique documenté, non réévalué ici | `docs/revues/REVUE_G2.md`, `docs/revues/REVUE_G3.md` |
-| G3 | **En attente de revue indépendante** | `REVUE_G3_DURCISSEMENT_CONFIRMATION.md` avait bloqué sur M-G3C-01 ; correction locale faite, revue en attente. m-G3C-04..06 restent ouverts. CI-01 et formatage sont corrigés localement, non poussés. |
+| G3 | **PASS** (revue indépendante n°6, 0 bloquant, 0 majeur) | `docs/revues/REVUE_G3_DURCISSEMENT_CONFIRMATION_6.md` ; M-G3C-01 et M-G3C-09 corrigés (commits `10856f5`, `802b5dd`, `336105a`, `131c864`) ; 425 tests backend, Vitest 50, E2E import 3/3 et smoke 2/2, contrats et confidentialité verts ; CI GitHub verte sur `131c864`. Réserves ouvertes : m-G3C-04..06 (REGISTRE_RISQUES). |
 | G4 | **Non évalué** | T17 est engagé mais ses corrections N-1..N-6 attendent la revue indépendante ; T19 et T20 ne sont pas livrés. Voir les préconditions et l’ordre dans `docs/revues/RECONCILIATION_T17_T41.md`. |
 | G5 | Non évalué | Dépend de T19, T20 puis T21-T23 |
 | G6 | Non évalué | Dépend de T24-T26 |
@@ -32,7 +32,7 @@ Les identifiants de commit ci-dessous ont été vérifiés dans `git log --oneli
 | T12..T13 | Livrés et commités | `4359a48` | Durcissement G3 et revue de confirmation à rapprocher des réserves restantes |
 | T14..T15 | Livrés et commités | `aeb7b32` | T14b (delta entre exports consécutifs) reste à planifier selon ADR-030.6 |
 | T16 | Livré et commité | `4a3c7c4` | Revue indépendante G4 encore requise |
-| T17 | Base livrée dans le commit de référence ; correctifs ultérieurs présents localement, non commités | `1066748` ; état de travail courant | N-1, N-2, N-3, N-5 et N-6 corrigés ; N-4 partiellement traité, mutations de preuve encore manquantes. Contre-revue indépendante à faire avant évaluation G4. Tests ciblés : 53 passés ; détail dans le rapport de réconciliation. |
+| T17 | Livré et commité | `1066748` ; état de HEAD | N-1, N-2, N-3, N-5 et N-6 corrigés ; N-4 partiellement traité, mutations de preuve encore manquantes. Contre-revue indépendante à faire avant évaluation G4. Tests ciblés : 53 passés ; détail dans le rapport de réconciliation. |
 | T18 | Livré et commité | `7870c7b` | Revue indépendante G4 encore requise |
 | T19..T40 | À faire / non attestés comme livrés | — | Dépendances et ordre backlog dans le rapport de réconciliation |
 | T41 | Livré et commité dans l’intégration G3 | `644c286` | 28 tests sauvegarde/restauration passés ; les six majeurs de `REVUE_T41.md` sont corrigés. m-G3C-04..06 ouverts. |
@@ -41,12 +41,11 @@ Les identifiants de commit ci-dessous ont été vérifiés dans `git log --oneli
 
 ## Revues récentes et changements locaux
 
-- `REVUE_G3_DURCISSEMENT.md` et `REVUE_G3_DURCISSEMENT_CONFIRMATION.md` : le second rapport statuait BLOCK sur M-G3C-01 et relevait m-G3C-04..06. La correction de M-G3C-01 est maintenant présente localement ; elle attend une revue indépendante. m-G3C-04, m-G3C-05 et m-G3C-06 restent ouverts.
-- ADR-030 est acceptée et consignée dans `docs/DECISIONS.md` (lignes 221 et suivantes). Elle reste la référence des choix G3, dont le report de T14b.
-- M-G3C-01 : correction locale, revue indépendante en attente.
-- CI-01 : `changeOrigin: true` est présent localement dans `frontend/vite.config.ts`; les changements ne sont pas poussés.
-- Formatage : `uv run ruff format --check backend scripts` → `116 files already formatted`; changement local, non poussé.
-- G3 ne peut pas être déclaré validé tant que la revue indépendante attendue et les constats bloquants ne sont pas clos. G4 n’a pas été évalué.
+- `REVUE_G3_DURCISSEMENT_CONFIRMATION.md` : BLOCK sur M-G3C-01. Corrigé (pool dédié de 4 connexions, plafond 3 snapshots LRU, TTL 60 s, balayage actif, debounce UI, 503 contractuels). Les revues n°2 à n°5 ont successivement relevé M-G3C-09 (arrêt du balayage) ; la conception finale (store fermé sous verrou, aucune manipulation d'annulation) est validée PASS par la revue n°6.
+- ADR-030 et ADR-032 sont consignées dans `docs/DECISIONS.md`. T14b reste reportée (ADR-030.6).
+- CI-01 corrigé (`changeOrigin: true`, `frontend/vite.config.ts`) ; formatage ruff appliqué ; CI GitHub verte sur `131c864` (5 jobs).
+- Réserves ouvertes : m-G3C-04 (`.tmp` résiduel bloque la restauration), m-G3C-05 (inode du verrou), m-G3C-06 (purge de tout `*.bin`). N-4 (T17) : preuves par mutation encore partielles.
+- G4 n'est pas évalué : T19 et T20 non livrés.
 
 ## Preuves exécutées pour cette réconciliation
 
@@ -60,4 +59,4 @@ Ces tests utilisent uniquement des données et bases synthétiques. Aucun test o
 
 ## À faire
 
-Se reporter à la section « Tickets restants du backlog » de `docs/revues/RECONCILIATION_T17_T41.md` : elle liste les dépendances et les préconditions de G4 dans l’ordre recommandé. Les corrections T17 locales et les changements CI locaux ne sont pas encore poussés.
+Se reporter à la section « Tickets restants du backlog » de `docs/revues/RECONCILIATION_T17_T41.md` : elle liste les dépendances et les préconditions de G4 dans l’ordre recommandé. Tout est commité et poussé ; prochaine étape : T19 puis T20 (précondition G4).
