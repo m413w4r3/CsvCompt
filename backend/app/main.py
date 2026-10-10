@@ -44,20 +44,32 @@ async def _expire_transaction_snapshots(store: TransactionSnapshotStore) -> None
         await asyncio.sleep(store.sweep_interval_milliseconds / 1000)
         loop = asyncio.get_running_loop()
         sweep = loop.run_in_executor(None, store.expire_expired)
+        sweep.add_done_callback(_consume_sweep_result)
         try:
             await asyncio.shield(sweep)
         except asyncio.CancelledError:
             # Cancelling the asyncio wrapper cannot stop its worker thread. Wait
-            # briefly before lifespan cleanup disposes the engines it may use.
-            done, _pending = await asyncio.wait({sweep}, timeout=_SWEEP_SHUTDOWN_TIMEOUT_SECONDS)
-            if done:
-                _consume_sweep_result(sweep)
-            else:
+            # until the bounded shutdown deadline before disposing its engines.
+            deadline = loop.time() + _SWEEP_SHUTDOWN_TIMEOUT_SECONDS
+            current_task = asyncio.current_task()
+            while current_task is not None and current_task.cancelling() > 1:
+                current_task.uncancel()
+            while not sweep.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait({sweep}, timeout=remaining)
+                except asyncio.CancelledError:
+                    # Keep the original cancellation pending while absorbing any
+                    # repeated requests until the worker finishes or the deadline.
+                    while current_task is not None and current_task.cancelling() > 1:
+                        current_task.uncancel()
+            if not sweep.done():
                 logger.warning(
                     "transaction_snapshot_sweep_shutdown_timeout timeout_seconds=%s",
                     _SWEEP_SHUTDOWN_TIMEOUT_SECONDS,
                 )
-                sweep.add_done_callback(_consume_sweep_result)
             raise
         except Exception as error:
             logger.warning(
@@ -101,12 +113,25 @@ def create_app(
             try:
                 if sweeper is not None:
                     sweeper.cancel()
+                    current_task = asyncio.current_task()
+                    shutdown_cancelled = False
                     try:
-                        await sweeper
-                    except asyncio.CancelledError:
-                        current_task = asyncio.current_task()
-                        if current_task is not None and current_task.cancelling():
-                            raise
+                        while True:
+                            try:
+                                await asyncio.shield(sweeper)
+                                break
+                            except asyncio.CancelledError:
+                                if sweeper.done():
+                                    if shutdown_cancelled or (
+                                        current_task is not None and current_task.cancelling()
+                                    ):
+                                        raise
+                                    break
+                                # A repeated cancellation of the lifespan must not
+                                # interrupt the sweeper's own bounded worker wait.
+                                shutdown_cancelled = True
+                                while current_task is not None and current_task.cancelling():
+                                    current_task.uncancel()
                     except Exception:
                         pass
             finally:
