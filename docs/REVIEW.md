@@ -29,6 +29,14 @@ concordant, le service renvoie `UNDO_SNAPSHOT_INVALID` sans écriture. Les
 snapshots d'une exécution de règle sont aussi rapprochés de ceux de sa décision
 source ; une trace historique sans décision source est refusée sûrement.
 
+Cette vérification repose sur l'hypothèse de confiance de la v1 : application
+locale mono-utilisateur, avec le fichier SQLite traité comme un secret de
+confiance au même titre que les transactions. Les empreintes SHA-256 détectent
+les altérations isolées ou accidentelles et les incohérences entre snapshots ;
+elles n'authentifient pas un écrivain qui peut réécrire de façon cohérente les
+snapshots et leurs empreintes dans le fichier. Cette résistance est hors
+périmètre v1 (arbitrage accepté, ADR-035, risque R-26).
+
 Une application de règle retourne un `batch_id` UUIDv4. Le même ID regroupe
 ses exécutions, la version approuvée de la règle, l'empreinte de la portée,
 l'identifiant de la décision créée et la version de transaction après

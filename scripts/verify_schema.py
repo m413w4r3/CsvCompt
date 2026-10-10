@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from datetime import date, timedelta
 from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA = ROOT / "docs" / "examples" / "schema.sql"
@@ -2203,6 +2204,810 @@ def verify_review_undo_guards(schema_path: Path) -> None:
         report("T20 les décisions et exécutions sont protégées par des liens d'annulation isolés")
     finally:
         connection.close()
+
+
+class ReviewGuardPredicate(NamedTuple):
+    trigger: str
+    sql: str
+    semantic: str
+    root_index: int
+    child_index: int | None
+
+
+RULE_EXECUTION_UNDO_GUARD = "trg_rule_executions_update_guard"
+DECISION_UNDO_GUARD = "trg_classification_decisions_undo_guard"
+REVIEW_GUARD_IMMUTABLE_COLUMNS = {
+    RULE_EXECUTION_UNDO_GUARD: (
+        "rule_execution_id",
+        "rule_id",
+        "transaction_id",
+        "outcome",
+        "before_json",
+        "after_json",
+        "dry_run",
+        "audit_event_id",
+        "executed_at_utc",
+        "batch_id",
+        "rule_version",
+        "batch_scope_sha256",
+        "classification_decision_id",
+    ),
+    DECISION_UNDO_GUARD: (
+        "decision_id",
+        "transaction_id",
+        "suggestion_id",
+        "action",
+        "actor",
+        "before_json",
+        "after_json",
+        "before_json_sha256",
+        "after_json_sha256",
+        "transaction_version",
+        "created_at_utc",
+    ),
+}
+
+# These seven SQL terms are explicitly accounted for rather than silently
+# accepted as surviving mutants. See prove_review_guard_redundancy() below.
+REDUNDANT_REVIEW_GUARD_PREDICATES: dict[str, str] = {
+    "execution.link_required": (
+        "A NULL NEW link cannot satisfy the target NOT EXISTS subquery."
+    ),
+    "execution.source_required": (
+        "A NULL source id cannot satisfy the source NOT EXISTS subquery."
+    ),
+    "execution.source_id": (
+        "When classification_decision_id is non-NULL, foreign_keys=ON guarantees "
+        "the referenced source row exists; NULL is covered by source_required/NOT EXISTS."
+    ),
+    "execution.target_id": (
+        "undone_by_decision_id is an FK; when non-NULL, foreign_keys=ON "
+        "guarantees the referenced target row exists."
+    ),
+    "decision.link_required": (
+        "A NULL NEW link cannot satisfy the target NOT EXISTS subquery."
+    ),
+    "decision.target_id": (
+        "undone_by_decision_id is an FK; when non-NULL, foreign_keys=ON "
+        "guarantees the referenced target row exists."
+    ),
+    "decision.target_different_source": (
+        "The row identified by NEW.undone_by_decision_id cannot be OLD itself: "
+        "the same row cannot have OLD.action other than undo and undo.action=undo."
+    ),
+}
+
+
+def _split_sql_boolean(expression: str, operator: str) -> list[str]:
+    """Split a SQL boolean expression at operator tokens outside strings/parens."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    index = 0
+    upper = expression.upper()
+    while index < len(expression):
+        char = expression[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(expression) and expression[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            index += 1
+            continue
+        if char == "[":
+            quote = "]"
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if depth < 0:
+                raise VerificationError("expression SQL de trigger avec parenthèses déséquilibrées")
+            index += 1
+            continue
+        end = index + len(operator)
+        if (
+            depth == 0
+            and upper[index:end] == operator
+            and (index == 0 or not (upper[index - 1].isalnum() or upper[index - 1] == "_"))
+            and (end == len(expression) or not (upper[end].isalnum() or upper[end] == "_"))
+        ):
+            parts.append(expression[start:index].strip())
+            start = end
+            index = end
+            continue
+        index += 1
+    if depth != 0 or quote is not None:
+        raise VerificationError("expression SQL de trigger incomplète")
+    parts.append(expression[start:].strip())
+    return parts
+
+
+def _find_sql_keyword(expression: str, keyword: str, start: int = 0) -> int:
+    depth = 0
+    quote: str | None = None
+    index = start
+    upper = expression.upper()
+    while index < len(expression):
+        char = expression[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(expression) and expression[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            index += 1
+            continue
+        if char == "[":
+            quote = "]"
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        end = index + len(keyword)
+        if (
+            depth == 0
+            and upper[index:end] == keyword
+            and (index == 0 or not (upper[index - 1].isalnum() or upper[index - 1] == "_"))
+            and (end == len(expression) or not (upper[end].isalnum() or upper[end] == "_"))
+        ):
+            return index
+        index += 1
+    return -1
+
+
+def _matching_sql_paren(expression: str, opening: int) -> int:
+    depth = 0
+    quote: str | None = None
+    index = opening
+    while index < len(expression):
+        char = expression[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(expression) and expression[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "[":
+            quote = "]"
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise VerificationError("parenthèse SQL de trigger sans fermeture")
+
+
+def _normalize_sql_predicate(expression: str) -> str:
+    return " ".join(expression.split())
+
+
+def _semantic_review_predicate(trigger: str, expression: str) -> str:
+    normalized = _normalize_sql_predicate(expression)
+    immutable = re.fullmatch(r"NEW\.(\w+) IS NOT OLD\.\1", normalized, re.IGNORECASE)
+    if immutable:
+        prefix = "execution" if trigger == RULE_EXECUTION_UNDO_GUARD else "decision"
+        return f"{prefix}.immutable.{immutable.group(1)}"
+
+    direct: dict[tuple[str, str], str] = {
+        (RULE_EXECUTION_UNDO_GUARD, "OLD.undone_by_decision_id IS NOT NULL"):
+            "execution.already_linked",
+        (RULE_EXECUTION_UNDO_GUARD, "NEW.undone_by_decision_id IS NULL"):
+            "execution.link_required",
+        (RULE_EXECUTION_UNDO_GUARD, "OLD.outcome IS NOT 'applied'"):
+            "execution.applied_only",
+        (RULE_EXECUTION_UNDO_GUARD, "OLD.dry_run IS NOT 0"):
+            "execution.not_dry_run",
+        (RULE_EXECUTION_UNDO_GUARD, "OLD.classification_decision_id IS NULL"):
+            "execution.source_required",
+        (DECISION_UNDO_GUARD, "OLD.undone_by_decision_id IS NOT NULL"):
+            "decision.already_linked",
+        (DECISION_UNDO_GUARD, "NEW.undone_by_decision_id IS NULL"):
+            "decision.link_required",
+        (DECISION_UNDO_GUARD, "OLD.action = 'undo'"):
+            "decision.undo_source_forbidden",
+    }
+    if (trigger, normalized) in direct:
+        return direct[(trigger, normalized)]
+
+    unwrapped = normalized
+    while unwrapped.startswith("(") and unwrapped.endswith(")"):
+        try:
+            if _matching_sql_paren(unwrapped, 0) != len(unwrapped) - 1:
+                break
+        except VerificationError:
+            break
+        unwrapped = unwrapped[1:-1].strip()
+    if trigger == RULE_EXECUTION_UNDO_GUARD:
+        source_terms = {
+            "source.decision_id = OLD.classification_decision_id": "execution.source_id",
+            "source.transaction_id = OLD.transaction_id": "execution.source_transaction",
+            "source.action <> 'undo'": "execution.source_action",
+            "source.undone_by_decision_id IS NULL OR source.undone_by_decision_id = NEW.undone_by_decision_id":
+                "execution.source_active",
+        }
+        target_terms = {
+            "undo.decision_id = NEW.undone_by_decision_id": "execution.target_id",
+            "undo.transaction_id = NEW.transaction_id": "execution.target_transaction",
+            "undo.action = 'undo'": "execution.target_action",
+            "undo.undone_by_decision_id IS NULL": "execution.target_unlinked",
+        }
+        if unwrapped in source_terms:
+            return source_terms[unwrapped]
+        if unwrapped in target_terms:
+            return target_terms[unwrapped]
+    else:
+        target_terms = {
+            "undo.decision_id = NEW.undone_by_decision_id": "decision.target_id",
+            "undo.transaction_id = NEW.transaction_id": "decision.target_transaction",
+            "undo.action = 'undo'": "decision.target_action",
+            "undo.decision_id <> OLD.decision_id": "decision.target_different_source",
+            "undo.undone_by_decision_id IS NULL": "decision.target_unlinked",
+        }
+        if unwrapped in target_terms:
+            return target_terms[unwrapped]
+    raise VerificationError(f"prédicat SQL de garde T20 non classé: {normalized}")
+
+
+def extract_review_guard_predicates(schema_sql: str) -> list[ReviewGuardPredicate]:
+    predicates: list[ReviewGuardPredicate] = []
+    for trigger in (RULE_EXECUTION_UNDO_GUARD, DECISION_UNDO_GUARD):
+        match = re.search(rf"CREATE\s+TRIGGER\s+{trigger}\b", schema_sql, re.IGNORECASE)
+        if match is None:
+            raise VerificationError(f"trigger T20 absent du schéma: {trigger}")
+        end_match = re.search(r"\bEND\s*;?", schema_sql[match.start() :], re.IGNORECASE)
+        if end_match is None:
+            raise VerificationError(f"trigger T20 incomplet: {trigger}")
+        statement_end = match.start() + end_match.end()
+        trigger_sql = schema_sql[match.start() : statement_end]
+        when_match = re.search(r"\bWHEN\b", trigger_sql, re.IGNORECASE)
+        if when_match is None:
+            raise VerificationError(f"WHEN absent du trigger T20: {trigger}")
+        begin = _find_sql_keyword(trigger_sql, "BEGIN", when_match.end())
+        if begin < 0:
+            raise VerificationError(f"BEGIN absent du trigger T20: {trigger}")
+        expression_start = when_match.end()
+        while expression_start < begin and trigger_sql[expression_start].isspace():
+            expression_start += 1
+        expression_end = begin
+        while expression_end > expression_start and trigger_sql[expression_end - 1].isspace():
+            expression_end -= 1
+        expression = trigger_sql[expression_start:expression_end]
+        roots = _split_sql_boolean(expression, "OR")
+        for root_index, root in enumerate(roots):
+            if re.match(r"NOT\s+EXISTS\s*\(", root, re.IGNORECASE):
+                opening = root.find("(")
+                closing = _matching_sql_paren(root, opening)
+                where = re.search(r"\bWHERE\b", root[opening + 1 : closing], re.IGNORECASE)
+                if where is None:
+                    raise VerificationError(f"NOT EXISTS sans WHERE dans {trigger}")
+                where_start = opening + 1 + where.end()
+                where_end = closing
+                children = _split_sql_boolean(root[where_start:where_end], "AND")
+                for child_index, child in enumerate(children):
+                    predicates.append(
+                        ReviewGuardPredicate(
+                            trigger=trigger,
+                            sql=child,
+                            semantic=_semantic_review_predicate(trigger, child),
+                            root_index=root_index,
+                            child_index=child_index,
+                        )
+                    )
+            else:
+                predicates.append(
+                    ReviewGuardPredicate(
+                        trigger=trigger,
+                        sql=root,
+                        semantic=_semantic_review_predicate(trigger, root),
+                        root_index=root_index,
+                        child_index=None,
+                    )
+                )
+
+    expected: set[str] = set()
+    for column in REVIEW_GUARD_IMMUTABLE_COLUMNS[RULE_EXECUTION_UNDO_GUARD]:
+        expected.add(f"execution.immutable.{column}")
+    expected.update(
+        {
+            "execution.already_linked",
+            "execution.link_required",
+            "execution.applied_only",
+            "execution.not_dry_run",
+            "execution.source_required",
+            "execution.source_id",
+            "execution.source_transaction",
+            "execution.source_action",
+            "execution.source_active",
+            "execution.target_id",
+            "execution.target_transaction",
+            "execution.target_action",
+            "execution.target_unlinked",
+        }
+    )
+    for column in REVIEW_GUARD_IMMUTABLE_COLUMNS[DECISION_UNDO_GUARD]:
+        expected.add(f"decision.immutable.{column}")
+    expected.update(
+        {
+            "decision.already_linked",
+            "decision.link_required",
+            "decision.undo_source_forbidden",
+            "decision.target_id",
+            "decision.target_transaction",
+            "decision.target_action",
+            "decision.target_different_source",
+            "decision.target_unlinked",
+        }
+    )
+    actual = {predicate.semantic for predicate in predicates}
+    if len(predicates) != 45 or actual != expected:
+        raise VerificationError(
+            "M-03 inventaire SQL inattendu: "
+            f"{len(predicates)} prédicats, manquants={sorted(expected - actual)}, "
+            f"inconnus={sorted(actual - expected)}"
+        )
+    if len(actual) != len(predicates):
+        raise VerificationError("M-03 prédicats SQL T20 en double")
+    return predicates
+
+
+def remove_review_guard_predicate(schema_sql: str, predicate: ReviewGuardPredicate) -> str:
+    match = re.search(
+        rf"CREATE\s+TRIGGER\s+{predicate.trigger}\b", schema_sql, re.IGNORECASE
+    )
+    if match is None:
+        raise VerificationError(f"trigger absent pendant mutation: {predicate.trigger}")
+    end_match = re.search(r"\bEND\s*;?", schema_sql[match.start() :], re.IGNORECASE)
+    if end_match is None:
+        raise VerificationError(f"trigger incomplet pendant mutation: {predicate.trigger}")
+    statement_end = match.start() + end_match.end()
+    trigger_sql = schema_sql[match.start() : statement_end]
+    when_match = re.search(r"\bWHEN\b", trigger_sql, re.IGNORECASE)
+    begin = _find_sql_keyword(trigger_sql, "BEGIN", when_match.end())
+    expression_start = when_match.end()
+    while trigger_sql[expression_start].isspace():
+        expression_start += 1
+    expression_end = begin
+    while trigger_sql[expression_end - 1].isspace():
+        expression_end -= 1
+    expression = trigger_sql[expression_start:expression_end]
+    roots = _split_sql_boolean(expression, "OR")
+    if predicate.child_index is None:
+        del roots[predicate.root_index]
+    else:
+        root = roots[predicate.root_index]
+        opening = root.find("(")
+        closing = _matching_sql_paren(root, opening)
+        where = re.search(r"\bWHERE\b", root[opening + 1 : closing], re.IGNORECASE)
+        where_start = opening + 1 + where.end()
+        children = _split_sql_boolean(root[where_start:closing], "AND")
+        del children[predicate.child_index]
+        roots[predicate.root_index] = (
+            root[:where_start] + " " + " AND ".join(children) + root[closing:]
+        )
+    mutated_expression = " OR ".join(roots)
+    mutated_trigger = (
+        trigger_sql[:expression_start] + mutated_expression + trigger_sql[expression_end:]
+    )
+    return schema_sql[: match.start()] + mutated_trigger + schema_sql[statement_end:]
+
+
+def _insert_review_decision(
+    connection: sqlite3.Connection,
+    decision_id: str,
+    transaction_id: str,
+    *,
+    action: str = "confirm",
+    undone_by: str | None = None,
+    suggestion_id: str | None = None,
+) -> None:
+    connection.execute(
+        """INSERT INTO classification_decisions
+           (decision_id, transaction_id, suggestion_id, action, actor,
+            before_json, after_json, undone_by_decision_id, transaction_version)
+           VALUES (?, ?, ?, ?, 'verify-synthetic', '[]', '[]', ?, 1)""",
+        (decision_id, transaction_id, suggestion_id, action, undone_by),
+    )
+
+
+def _guard_probe_result(
+    schema_path: Path, predicate: ReviewGuardPredicate
+) -> str | None:
+    """Attempt one isolated DML mutation; return SQLite's rejection or None on success."""
+    semantic = predicate.semantic
+    connection = connect(schema_path)
+    try:
+        insert_account(connection)
+        seed_financial_categories(connection)
+        transaction_id = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-10-01", -101, "Garde T20 synthétique A"),
+            occurrence_rank=1,
+        )
+        other_transaction_id = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-10-02", -202, "Garde T20 synthétique B"),
+            occurrence_rank=1,
+        )
+        target_transaction_id = (
+            other_transaction_id
+            if semantic
+            in {
+                "execution.immutable.transaction_id",
+                "execution.target_transaction",
+                "decision.immutable.transaction_id",
+                "decision.target_transaction",
+            }
+            else transaction_id
+        )
+        decoy_id = new_id()
+        _insert_review_decision(connection, decoy_id, transaction_id)
+
+        source_id = new_id()
+        source_action = (
+            "undo"
+            if semantic in {"execution.source_action", "decision.undo_source_forbidden"}
+            else "confirm"
+        )
+        source_transaction_id = (
+            other_transaction_id
+            if semantic == "execution.source_transaction"
+            else transaction_id
+        )
+        source_undone_by = decoy_id if semantic == "execution.source_active" else None
+
+        suggestion_id: str | None = None
+        if semantic == "decision.immutable.suggestion_id":
+            suggestion_id = new_id()
+            connection.execute(
+                """INSERT INTO classification_suggestions
+                   (suggestion_id, transaction_id, proposed_flow_kind, category_id, method)
+                   VALUES (?, ?, 'expense', 'groceries', 'manual')""",
+                (suggestion_id, transaction_id),
+            )
+        source_reference: str | None = source_id
+        if semantic == "execution.source_required":
+            source_reference = None
+        if predicate.trigger == RULE_EXECUTION_UNDO_GUARD:
+            _insert_review_decision(
+                connection,
+                source_id,
+                source_transaction_id,
+                action=source_action,
+                undone_by=source_undone_by,
+            )
+        else:
+            _insert_review_decision(
+                connection,
+                source_id,
+                transaction_id,
+                action=source_action,
+                undone_by=decoy_id if semantic == "decision.already_linked" else None,
+                suggestion_id=suggestion_id,
+            )
+
+        target_id = new_id()
+        target_action = (
+            "confirm"
+            if semantic in {"execution.target_action", "decision.target_action"}
+            else "undo"
+        )
+        target_already_linked = semantic in {
+            "execution.target_unlinked",
+            "decision.target_unlinked",
+        }
+        _insert_review_decision(
+            connection,
+            target_id,
+            target_transaction_id,
+            action=target_action,
+            undone_by=decoy_id if target_already_linked else None,
+        )
+
+        old_link = decoy_id if semantic == "execution.already_linked" else None
+        expected_target_id: str | None = target_id
+        if semantic == "execution.link_required":
+            expected_target_id = None
+        if predicate.trigger == RULE_EXECUTION_UNDO_GUARD:
+            rule_id = new_id()
+            other_rule_id = new_id()
+            for current_rule_id in (rule_id, other_rule_id):
+                connection.execute(
+                    """INSERT INTO rules
+                       (rule_id, name, scope_kind, scope_json, flow_kind, category_id, effect_json)
+                       VALUES (?, 'Règle synthétique', 'exact_payee', '{}',
+                               'expense', 'groceries', '{}')""",
+                    (current_rule_id,),
+                )
+            audit_id = new_id()
+            other_audit_id = new_id()
+            for current_audit_id in (audit_id, other_audit_id):
+                connection.execute(
+                    """INSERT INTO audit_events
+                       (audit_event_id, target_type, target_id, action, actor)
+                       VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+                    (current_audit_id, transaction_id),
+                )
+            execution_id = new_id()
+            outcome = "skipped_manual" if semantic == "execution.applied_only" else "applied"
+            dry_run = 1 if semantic == "execution.not_dry_run" else 0
+            insert_guard = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='trg_rule_executions_insert_guard'"
+            ).fetchone()
+            if insert_guard is None or insert_guard[0] is None:
+                raise VerificationError("T20 sonde: trigger INSERT des exécutions absent")
+            connection.execute("DROP TRIGGER trg_rule_executions_insert_guard")
+            try:
+                connection.execute(
+                    """INSERT INTO rule_executions
+                       (rule_execution_id, rule_id, transaction_id, outcome, before_json,
+                        after_json, dry_run, audit_event_id, batch_id, rule_version,
+                        batch_scope_sha256, classification_decision_id, undone_by_decision_id)
+                       VALUES (?, ?, ?, ?, '[]', '[]', ?, ?, ?, 1, ?, ?, ?)""",
+                    (
+                        execution_id,
+                        rule_id,
+                        transaction_id,
+                        outcome,
+                        dry_run,
+                        audit_id,
+                        new_id(),
+                        hashlib.sha256(b"review-guard-probe").hexdigest(),
+                        source_reference,
+                        old_link,
+                    ),
+                )
+            finally:
+                connection.execute(insert_guard[0])
+
+            assignments: dict[str, object] = {}
+            if semantic.startswith("execution.immutable."):
+                column = semantic.rsplit(".", 1)[1]
+                assignments[column] = {
+                    "rule_execution_id": new_id(),
+                    "rule_id": other_rule_id,
+                    "transaction_id": other_transaction_id,
+                    "outcome": "skipped_manual",
+                    "before_json": '[{"synthetic":"changed"}]',
+                    "after_json": '[{"synthetic":"changed"}]',
+                    "dry_run": 1,
+                    "audit_event_id": other_audit_id,
+                    "executed_at_utc": "2026-10-11T00:00:00.000Z",
+                    "batch_id": new_id(),
+                    "rule_version": 2,
+                    "batch_scope_sha256": hashlib.sha256(b"changed-scope").hexdigest(),
+                    "classification_decision_id": new_id(),
+                }[column]
+                if column == "classification_decision_id":
+                    _insert_review_decision(
+                        connection, str(assignments[column]), transaction_id
+                    )
+            assignment_sql = ", ".join(f"{column}=?" for column in assignments)
+            parameters: list[object] = list(assignments.values())
+            if assignment_sql:
+                assignment_sql += ", "
+            assignment_sql += "undone_by_decision_id=?"
+            parameters.extend((expected_target_id, execution_id))
+            connection.execute(
+                f"UPDATE rule_executions SET {assignment_sql} WHERE rule_execution_id=?",
+                parameters,
+            )
+        else:
+            expected_target_id = None if semantic == "decision.link_required" else target_id
+            assignments = {}
+            if semantic.startswith("decision.immutable."):
+                column = semantic.rsplit(".", 1)[1]
+                assignments[column] = {
+                    "decision_id": new_id(),
+                    "transaction_id": other_transaction_id,
+                    "suggestion_id": suggestion_id,
+                    "action": "edit",
+                    "actor": "verify-synthetic-changed",
+                    "before_json": '[{"synthetic":"changed"}]',
+                    "after_json": '[{"synthetic":"changed"}]',
+                    "before_json_sha256": "a" * 64,
+                    "after_json_sha256": "b" * 64,
+                    "transaction_version": 2,
+                    "created_at_utc": "2026-10-11T00:00:00.000Z",
+                }[column]
+                if column == "suggestion_id":
+                    # The new FK value must exist; the original is NULL.
+                    replacement_suggestion_id = new_id()
+                    connection.execute(
+                        """INSERT INTO classification_suggestions
+                           (suggestion_id, transaction_id, proposed_flow_kind, category_id, method)
+                           VALUES (?, ?, 'expense', 'groceries', 'manual')""",
+                        (replacement_suggestion_id, transaction_id),
+                    )
+                    assignments[column] = replacement_suggestion_id
+            assignment_sql = ", ".join(f"{column}=?" for column in assignments)
+            parameters = list(assignments.values())
+            if assignment_sql:
+                assignment_sql += ", "
+            assignment_sql += "undone_by_decision_id=?, version=version+1"
+            parameters.extend((expected_target_id, source_id))
+            connection.execute(
+                f"UPDATE classification_decisions SET {assignment_sql} WHERE decision_id=?",
+                parameters,
+            )
+        return None
+    except sqlite3.IntegrityError as error:
+        return str(error)
+    finally:
+        connection.close()
+
+
+def review_guard_trigger_sql(schema_path: Path) -> str:
+    """Return the installed SQL, including when the caller supplies a migrated DB."""
+    connection = connect(schema_path)
+    try:
+        names = (RULE_EXECUTION_UNDO_GUARD, DECISION_UNDO_GUARD)
+        rows = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN (?, ?)", names
+        ).fetchall()
+        triggers = {str(name): str(sql) for name, sql in rows if sql is not None}
+        if set(triggers) != set(names):
+            raise VerificationError("M-03 impossible de lire les deux triggers installés")
+        return "\n\n".join(triggers[name] for name in names)
+    finally:
+        connection.close()
+
+
+def prove_review_guard_redundancy(
+    schema_path: Path,
+    predicate: ReviewGuardPredicate,
+    *,
+    mutant_schema_path: Path | None = None,
+) -> None:
+    reason = REDUNDANT_REVIEW_GUARD_PREDICATES.get(predicate.semantic)
+    if reason is None:
+        raise VerificationError(f"M-03 échappement sans justification: {predicate.semantic}")
+    if predicate.semantic in {"execution.source_id", "execution.target_id", "decision.target_id"}:
+        connection = connect(schema_path)
+        try:
+            if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
+                raise VerificationError("M-03 preuve FK invalide: foreign_keys n'est pas activé")
+            expected_fk = {
+                "execution.source_id": (
+                    "rule_executions",
+                    "classification_decision_id",
+                ),
+                "execution.target_id": ("rule_executions", "undone_by_decision_id"),
+                "decision.target_id": ("classification_decisions", "undone_by_decision_id"),
+            }[predicate.semantic]
+            table, column = expected_fk
+            fks = connection.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            if not any(row[2] == "classification_decisions" and row[3] == column for row in fks):
+                raise VerificationError(
+                    f"M-03 FK attendue absente pour la redondance {predicate.semantic}"
+                )
+        finally:
+            connection.close()
+    elif predicate.semantic in {"execution.link_required", "decision.link_required"}:
+        result = _guard_probe_result(mutant_schema_path or schema_path, predicate)
+        expected = (
+            "rule_execution_immutable"
+            if predicate.trigger == RULE_EXECUTION_UNDO_GUARD
+            else "classification_decision_undo_link_invalid"
+        )
+        if result != expected:
+            raise VerificationError(
+                f"M-03 preuve de redondance du lien NULL échouée: {predicate.semantic}: {result}"
+            )
+    elif predicate.semantic == "execution.source_required":
+        result = _guard_probe_result(mutant_schema_path or schema_path, predicate)
+        if result != "rule_execution_immutable":
+            raise VerificationError(
+                f"M-03 source NULL non rejetée par la clause EXISTS restante: {result}"
+            )
+    elif predicate.semantic == "decision.target_different_source":
+        semantics = {
+            item.semantic for item in extract_review_guard_predicates(review_guard_trigger_sql(schema_path))
+        }
+        if not {
+            "decision.undo_source_forbidden",
+            "decision.target_id",
+            "decision.target_action",
+        }.issubset(semantics):
+            raise VerificationError("M-03 preuve logique de cible distincte incomplète")
+    else:
+        raise VerificationError(f"M-03 preuve de redondance inconnue: {predicate.semantic}")
+    report(f"M-03 redondance prouvée {predicate.semantic}: {reason}")
+
+
+def verify_review_guard_predicate_oracle(schema_path: Path) -> None:
+    predicates = extract_review_guard_predicates(review_guard_trigger_sql(schema_path))
+    tested = 0
+    proven = 0
+    for predicate in predicates:
+        if predicate.semantic in REDUNDANT_REVIEW_GUARD_PREDICATES:
+            prove_review_guard_redundancy(schema_path, predicate)
+            proven += 1
+            continue
+        result = _guard_probe_result(schema_path, predicate)
+        expected = (
+            "rule_execution_immutable"
+            if predicate.trigger == RULE_EXECUTION_UNDO_GUARD
+            else "classification_decision_undo_link_invalid"
+        )
+        if result != expected:
+            raise VerificationError(
+                f"M-03 oracle: garde non exercée pour {predicate.semantic}, résultat={result!r}"
+            )
+        tested += 1
+    report(
+        f"M-03 oracle SQL: {len(predicates)}/{len(predicates)} prédicats couverts "
+        f"({tested} sondes DML, {proven} redondances démontrées)"
+    )
+
+
+def verify_review_guard_predicate_mutations(schema_path: Path) -> None:
+    source = schema_path.read_text(encoding="utf-8")
+    predicates = extract_review_guard_predicates(source)
+    killed = 0
+    proven = 0
+    with tempfile.TemporaryDirectory(prefix="verify-review-guard-mutants-") as temp_dir:
+        root = Path(temp_dir)
+        for number, predicate in enumerate(predicates, start=1):
+            mutant = root / f"review-guard-{number:02d}.sql"
+            mutant.write_text(remove_review_guard_predicate(source, predicate), encoding="utf-8")
+            if predicate.semantic in REDUNDANT_REVIEW_GUARD_PREDICATES:
+                prove_review_guard_redundancy(
+                    schema_path,
+                    predicate,
+                    mutant_schema_path=mutant,
+                )
+                proven += 1
+                continue
+            expected = (
+                "rule_execution_immutable"
+                if predicate.trigger == RULE_EXECUTION_UNDO_GUARD
+                else "classification_decision_undo_link_invalid"
+            )
+            original_result = _guard_probe_result(schema_path, predicate)
+            if original_result != expected:
+                raise VerificationError(
+                    f"M-03 mutant {predicate.semantic}: schéma original mal exercé: "
+                    f"{original_result!r}"
+                )
+            mutant_result = _guard_probe_result(mutant, predicate)
+            if mutant_result is not None:
+                raise VerificationError(
+                    f"M-03 mutant échappé {predicate.semantic}: {mutant_result!r}"
+                )
+            killed += 1
+    total = len(predicates)
+    if killed + proven != total:
+        raise VerificationError(
+            f"M-03 couverture incomplète: {killed} détectés + {proven} prouvés / {total}"
+        )
+    report(
+        f"M-03 mutation des gardes SQL: {killed}/{total} mutants détectés, "
+        f"{proven}/{total} redondances prouvées; "
+        f"{killed + proven}/{total} mutants expliqués (100 %)"
+    )
 
 
 def verify_transaction_flow_not_stored(schema_path: Path) -> None:
@@ -4706,6 +5511,8 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
                     f"preuve de régression {name}: le test est resté vert sans sa contrainte"
                 )
 
+    verify_review_guard_predicate_mutations(schema_path)
+
     script_source = Path(__file__).read_text(encoding="utf-8")
     binder_start = script_source.index("def require_cents(")
     binder_end = script_source.index("\n\ndef insert_account(", binder_start)
@@ -4768,6 +5575,7 @@ def verify_schema(
         verify_noop_and_committed_hash,
         verify_rule_audit_foreign_key,
         verify_review_undo_guards,
+        verify_review_guard_predicate_oracle,
         verify_transaction_flow_not_stored,
         verify_allocations,
         verify_refund_links,

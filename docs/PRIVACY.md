@@ -39,6 +39,12 @@ de supprimer les données. Les opérations, décisions et audits n'expirent pas
 automatiquement. Les fichiers CSV que vous avez téléchargés restent également
 à l'emplacement choisi par votre navigateur ou votre système.
 
+`rules.scope_json` contient le motif de règle et sa raison. Ce sont des données
+utilisateur fonctionnelles, de la même classe de confidentialité que les
+libellés de transactions ; elles restent dans la base et sont présentes dans
+les sauvegardes complètes. Les journaux d'audit, exécutions de règles, erreurs
+et logs ne contiennent jamais ces valeurs en clair.
+
 ## Appel du modèle de langage, uniquement sur demande
 
 Pour utiliser les suggestions, activez explicitement le modèle dans la
