@@ -7,6 +7,8 @@ import re
 from app.importers.types import AnomalyCode
 
 _GROUPING_SPACES = " \u00a0\u202f\u2009"
+MAX_AMOUNT_CENTS = 10**13
+_MAX_EUROS_TEXT = "100000000000"
 _AMOUNT_RE = re.compile(
     rf"^(?P<sign>[+-]?)(?P<euros>[0-9]+|[0-9]{{1,3}}(?:[{_GROUPING_SPACES}][0-9]{{3}})+)"
     r"(?:,(?P<cents>[0-9]{2}))?$"
@@ -30,10 +32,19 @@ def parse_french_amount(value: str) -> int | AnomalyCode:
         if len(separators) != 1:
             return AnomalyCode.NON_NUMERIC_AMOUNT
         euros_text = euros_text.translate(str.maketrans("", "", _GROUPING_SPACES))
+    significant_euros = euros_text.lstrip("0") or "0"
+    cents_text = match.group("cents") or "00"
+    if len(significant_euros) > len(_MAX_EUROS_TEXT) or (
+        len(significant_euros) == len(_MAX_EUROS_TEXT)
+        and (significant_euros > _MAX_EUROS_TEXT or cents_text != "00")
+    ):
+        return AnomalyCode.AMOUNT_OUT_OF_RANGE
     try:
-        cents = int(euros_text) * 100 + int(match.group("cents") or "00")
+        cents = int(significant_euros) * 100 + int(cents_text)
     except (ValueError, OverflowError):
         return AnomalyCode.NON_NUMERIC_AMOUNT
+    if cents > MAX_AMOUNT_CENTS:
+        return AnomalyCode.AMOUNT_OUT_OF_RANGE
     return -cents if match.group("sign") == "-" else cents
 
 

@@ -9,12 +9,12 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
 MAX_LABEL_CHARS = 20_000
-"""Maximum characters processed into a normalized label representation."""
+"""Maximum NFC characters accepted by the T09 parser for an operation label."""
 
 
 class LabelWarning(StrEnum):
@@ -22,7 +22,6 @@ class LabelWarning(StrEnum):
 
     CF_CHARACTER = "CF_CHARACTER"
     INVALID_INPUT = "INVALID_INPUT"
-    LABEL_TRUNCATED = "LABEL_TRUNCATED"
 
 
 class _WarnedText(str):
@@ -52,9 +51,9 @@ class SearchLabel(_WarnedText):
 class NormalizedLabel:
     """Keep the exact source object beside the two derived representations."""
 
-    raw_label: str
-    identity_label: IdentityLabel
-    search_label: SearchLabel
+    raw_label: str = field(repr=False)
+    identity_label: IdentityLabel = field(repr=False)
+    search_label: SearchLabel = field(repr=False)
     warnings: tuple[str, ...]
 
 
@@ -163,14 +162,13 @@ def raw_label(raw: str) -> str:
 def identity_label(raw: str) -> IdentityLabel:
     """Apply the strict import identity rule: NFC, Unicode White_Space, trim.
 
-    Inputs above ``MAX_LABEL_CHARS`` are clipped and carry ``LABEL_TRUNCATED``.
-    This bound is visible to callers and prevents unbounded normalization work.
-    Unicode category ``Cf`` is preserved and reported as ``CF_CHARACTER``.
+    The T09 parser enforces raw and NFC bounds before this function is used for
+    persisted identities. This function never clips an identity. Unicode
+    category ``Cf`` is preserved and reported as ``CF_CHARACTER``.
     """
 
     source, warnings = _source_and_warnings(raw)
-    bounded, warnings = _bounded_source(source, warnings)
-    normalized = unicodedata.normalize("NFC", bounded)
+    normalized = unicodedata.normalize("NFC", source)
     chars: list[str] = []
     previous_was_space = False
     for character in normalized:
@@ -182,7 +180,6 @@ def identity_label(raw: str) -> IdentityLabel:
             chars.append(character)
             previous_was_space = False
     value = "".join(chars).strip(" ")
-    value, warnings = _bounded_value(value, warnings)
     return IdentityLabel(value, warnings)
 
 
@@ -190,8 +187,7 @@ def search_label(raw: str) -> SearchLabel:
     """Return a lossy, human-search representation; never use as identity."""
 
     source, warnings = _source_and_warnings(raw)
-    bounded, warnings = _bounded_source(source, warnings)
-    decomposed = unicodedata.normalize("NFKD", bounded.casefold())
+    decomposed = unicodedata.normalize("NFKD", source.casefold())
     chars: list[str] = []
     previous_was_space = False
     for character in decomposed:
@@ -206,7 +202,6 @@ def search_label(raw: str) -> SearchLabel:
             chars.append(character)
             previous_was_space = False
     value = "".join(chars).strip(" ")
-    value, warnings = _bounded_value(value, warnings)
     return SearchLabel(value, warnings)
 
 
@@ -228,8 +223,7 @@ def parse_ca_label(raw: str) -> LabelParts:
     """
 
     source, warnings = _source_and_warnings(raw)
-    bounded, warnings = _bounded_source(source, warnings)
-    lines = bounded.splitlines()
+    lines = source.splitlines()
     type_index: int | None = None
     operation_type = "unknown"
     for index, line in enumerate(lines):
@@ -265,9 +259,6 @@ def parse_ca_label(raw: str) -> LabelParts:
                         display = after_date[display_separator.end() :].strip()
                         if display:
                             merchant_display_hint = display
-            merchant_key_source = merchant_raw_hint or merchant_display_hint
-            if merchant_key_source:
-                merchant_key_candidate = f"card:{identity_label(merchant_key_source)}"
 
     if operation_type == "Prélèvement":
         creditor_line_index = next(
@@ -289,10 +280,17 @@ def parse_ca_label(raw: str) -> LabelParts:
                     reference_present = True
             if any(_looks_like_reference(line) for line in lines[creditor_line_index + 1 :]):
                 reference_present = True
-        if creditor_hint:
-            merchant_key_candidate = f"creditor:{identity_label(creditor_hint)}"
+    merchant_raw_hint = _safe_hint(merchant_raw_hint)
+    merchant_display_hint = _safe_hint(merchant_display_hint)
+    creditor_hint = _safe_hint(creditor_hint)
+    if operation_type == "Paiement par carte":
+        merchant_key_source = merchant_raw_hint or merchant_display_hint
+        if merchant_key_source:
+            merchant_key_candidate = f"card:{identity_label(merchant_key_source)}"
+    elif operation_type == "Prélèvement" and creditor_hint:
+        merchant_key_candidate = f"creditor:{identity_label(creditor_hint)}"
 
-    full_search = str(search_label(bounded))
+    full_search = str(search_label(source))
     intermediary_candidate = _contains_configured_phrase(full_search, INTERMEDIARY_SIGNAL_TOKENS)
     ambiguous_marketplace = _contains_configured_phrase(full_search, AMBIGUOUS_MARKETPLACE_TOKENS)
     loan_candidate = operation_type == "Remboursement de prêt" or _contains_configured_phrase(
@@ -356,20 +354,17 @@ def _source_and_warnings(raw: object) -> tuple[str, tuple[str, ...]]:
     return source, tuple(dict.fromkeys(warnings))
 
 
-def _bounded_source(source: str, warnings: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    if len(source) <= MAX_LABEL_CHARS:
-        return source, warnings
-    return source[:MAX_LABEL_CHARS], tuple(
-        dict.fromkeys((*warnings, LabelWarning.LABEL_TRUNCATED.value))
-    )
+def _safe_hint(value: str | None) -> str | None:
+    """Hide hints containing IBAN-like values or long digit sequences."""
 
-
-def _bounded_value(value: str, warnings: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    if len(value) <= MAX_LABEL_CHARS:
-        return value, warnings
-    return value[:MAX_LABEL_CHARS], tuple(
-        dict.fromkeys((*warnings, LabelWarning.LABEL_TRUNCATED.value))
+    if value is None:
+        return None
+    compact = "".join(
+        character for character in value if not _is_white_space(character) and character not in "-"
     )
+    if _LONG_NUMBER_RE.search(compact) or _IBAN_RE.search(compact):
+        return None
+    return value
 
 
 def _is_white_space(character: str) -> bool:

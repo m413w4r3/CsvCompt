@@ -152,6 +152,42 @@ def test_parse_ca_label_extracts_only_safe_hints_and_reference_presence() -> Non
     assert "MANDAT-SYNTHETIQUE-2026" not in repr(exported)
 
 
+def test_parse_ca_label_masks_iban_and_long_number_hints() -> None:
+    long_number = " ".join(
+        "".join(chr(digit) for digit in group)
+        for group in ((49, 50, 51, 52), (53, 54, 55, 56), (57, 48, 49, 50))
+    )
+    iban = "".join((chr(70), chr(82), chr(55), chr(54), " ")) + " ".join(
+        "".join(chr(digit) for digit in group)
+        for group in (
+            (51, 48, 48, 48),
+            (54, 48, 48, 48),
+            (48, 49, 49, 50),
+            (51, 52, 53, 54),
+            (55, 56, 57, 48),
+            (49, 56, 57),
+        )
+    )
+    compact_iban = "".join(character for character in iban if character != " ")
+    card_iban = parse_ca_label(f"Paiement par carte\nX6020 {iban} 12/04 - BOUTIQUE SYNTHÉTIQUE")
+    card_number = parse_ca_label(
+        f"Paiement par carte\nX6020 {long_number} 12/04 - BOUTIQUE SYNTHÉTIQUE"
+    )
+    creditor_iban = parse_ca_label(f"Prélèvement\n{iban} - CRÉANCIER SYNTHÉTIQUE")
+
+    for parts in (card_iban, card_number, creditor_iban):
+        rendered = repr(parts)
+        assert iban not in rendered
+        assert long_number not in rendered
+        assert compact_iban not in rendered
+    assert card_iban.merchant_raw_hint is None
+    assert card_iban.merchant_display_hint == "BOUTIQUE SYNTHÉTIQUE"
+    assert card_iban.merchant_key_candidate == "card:BOUTIQUE SYNTHÉTIQUE"
+    assert card_number.merchant_raw_hint is None
+    assert creditor_iban.creditor_hint is None
+    assert creditor_iban.merchant_key_candidate is None
+
+
 def test_parse_ca_label_recognizes_withdrawal_and_loan_only_as_signals() -> None:
     withdrawal = parse_ca_label("Retrait au distributeur\nDAB SYNTHÉTIQUE 05/04")
     loan = parse_ca_label("Remboursement de prêt\nÉCHÉANCE PRÊT SYNTHÉTIQUE")
@@ -189,18 +225,28 @@ def test_parse_ca_label_unknown_fields_remain_empty_and_malformed_text_is_safe()
     assert LabelWarning.INVALID_INPUT.value in identity_label(None).warnings
 
 
-def test_long_label_is_bounded_and_truncation_is_reported() -> None:
+def test_long_label_normalization_never_truncates_identity_or_search_text() -> None:
     raw = "A" * 100_000 + "\u200b"
     identity = identity_label(raw)
     search = search_label(raw)
     parts = parse_ca_label(raw)
 
-    assert len(identity) <= MAX_LABEL_CHARS
-    assert len(search) <= MAX_LABEL_CHARS
-    assert LabelWarning.LABEL_TRUNCATED.value in identity.warnings
-    assert LabelWarning.LABEL_TRUNCATED.value in search.warnings
-    assert LabelWarning.LABEL_TRUNCATED.value in parts.warnings
+    assert len(identity) == len(raw)
+    assert identity.endswith("\u200b")
+    assert len(search) > MAX_LABEL_CHARS
+    assert "LABEL_TRUNCATED" not in identity.warnings
+    assert "LABEL_TRUNCATED" not in search.warnings
+    assert "LABEL_TRUNCATED" not in parts.warnings
     assert LabelWarning.CF_CHARACTER.value in identity.warnings
+
+
+def test_normalized_label_repr_redacts_all_label_fields() -> None:
+    raw = "LIBELLE_SECRET_SYNTHETIQUE"
+    normalized = normalize_label(raw)
+
+    assert raw not in repr(normalized)
+    assert str(normalized.identity_label) not in repr(normalized)
+    assert str(normalized.search_label) not in repr(normalized)
 
 
 def test_card_suffix_does_not_absorb_other_digits_in_merchant_hint() -> None:

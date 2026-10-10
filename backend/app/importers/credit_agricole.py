@@ -14,13 +14,14 @@ from app.importers.account_identity import (
     CanonicalAccountNumber,
     canonicalize_account_number,
 )
-from app.importers.amounts import parse_debit_credit, parse_french_amount
+from app.importers.amounts import MAX_AMOUNT_CENTS, parse_debit_credit, parse_french_amount
 from app.importers.encoding import (
     DEFAULT_MAX_BYTES,
     DecodedExport,
     decode_export_bytes,
     normalize_line_endings,
 )
+from app.importers.normalize import MAX_LABEL_CHARS
 from app.importers.types import (
     Anomaly,
     AnomalyCode,
@@ -33,11 +34,13 @@ from app.importers.types import (
 DEFAULT_MAX_FIELD_CHARS = 10_000
 _ABSOLUTE_MAX_FIELD_CHARS = 100_000
 _LONG_LABEL_WARNING_CHARS = 5_000
+_MIN_PLAUSIBLE_BOOKED_ON = date(2000, 1, 1)
+_COVERAGE_TAIL_GAP_DAYS = 31
 _DATE_RE = re.compile(r"^([0-9]{2})/([0-9]{2})/([0-9]{4})$")
 _DATE_LIKE_RE = re.compile(r"^[0-9]{1,4}[/.-]")
 _DOWNLOAD_RE = re.compile(r"^Téléchargement du\s+(.+?)\s*$", re.IGNORECASE)
 _ACCOUNT_SECTION_RE = re.compile(r"^Compte\b", re.IGNORECASE)
-_ACCOUNT_NUMBER_RE = re.compile(r"^Compte\b.*?\bn°\s*(.*?)\s*$", re.IGNORECASE)
+_ACCOUNT_NUMBER_RE = re.compile(r"^Compte\b.*?\bn[°º](.*)$", re.IGNORECASE)
 _BALANCE_RE = re.compile(r"^Solde au\s+([^\s]+)\s+(.+?)\s*$", re.IGNORECASE)
 _PERIOD_RE = re.compile(
     r"^Liste des opérations du compte entre le\s+(.+?)\s+et\s+(?:le\s+)?(.+?)\s*$",
@@ -46,8 +49,13 @@ _PERIOD_RE = re.compile(
 _HEADER = ("date", "libellé", "débit euros", "crédit euros")
 
 _MESSAGES: dict[AnomalyCode, str] = {
+    AnomalyCode.AMOUNT_OUT_OF_RANGE: "Un montant ou total dépasse la borne autorisée.",
     AnomalyCode.BAD_FIELD_COUNT: "Une ligne ne contient pas le nombre de champs attendu.",
     AnomalyCode.BOTH_AMOUNTS: "Les colonnes débit et crédit sont renseignées simultanément.",
+    AnomalyCode.COVERAGE_TAIL_GAP: (
+        "La dernière opération est nettement antérieure à la fin déclarée."
+    ),
+    AnomalyCode.DATE_IMPLAUSIBLE: "La date de l’opération est antérieure à la borne plausible.",
     AnomalyCode.DUPLICATE_ACCOUNT_SECTION: (
         "Le même compte apparaît dans plusieurs sections du fichier."
     ),
@@ -55,11 +63,21 @@ _MESSAGES: dict[AnomalyCode, str] = {
     AnomalyCode.EMPTY_FILE: "Le fichier ne contient aucune donnée exploitable.",
     AnomalyCode.FIELD_TOO_LONG: "Un champ dépasse la longueur maximale autorisée.",
     AnomalyCode.FILE_TOO_LARGE: "Le fichier dépasse la taille maximale autorisée.",
+    AnomalyCode.FUTURE_DATED_ROW: (
+        "La date de l’opération est postérieure à la génération du fichier."
+    ),
+    AnomalyCode.GENERATION_DATE_INCONSISTENT: (
+        "Les dates de génération et de période sont incohérentes."
+    ),
     AnomalyCode.INTERLEAVED_BLANK_LINES: "Des lignes vides sont intercalées entre des opérations.",
     AnomalyCode.INVALID_ACCOUNT_NUMBER: "Le numéro de compte ne respecte pas le format attendu.",
     AnomalyCode.INVALID_DATE: "Une date ne respecte pas le calendrier ou le format attendu.",
     AnomalyCode.INVALID_ENCODING: "L’encodage du fichier n’est pas valide.",
     AnomalyCode.LONG_LABEL: "Un libellé dépasse la longueur recommandée.",
+    AnomalyCode.LABEL_TOO_LONG: "Un libellé dépasse la longueur maximale autorisée.",
+    AnomalyCode.MISSING_ACCOUNT_NUMBER: (
+        "Le numéro de compte de la section est absent ou inexploitable."
+    ),
     AnomalyCode.MISSING_HEADER: "L’en-tête des opérations est absent.",
     AnomalyCode.MISSING_PERIOD: "La période déclarée de la section est absente.",
     AnomalyCode.NEGATIVE_AMOUNT: "Un montant de colonne ne peut pas être négatif.",
@@ -253,16 +271,27 @@ def _parse_export_impl(
     candidate_idx: dict[int, int] = {}
     sections_by_number: dict[str, int] = {}
     pending_blanks: dict[int, list[int]] = {}
+    generation_date_values: list[date | None] = []
 
     def start_section(raw_number: str | None, line_no: int) -> ParsedSection:
         ordinal = len(result.sections) + 1
         canonical_number: CanonicalAccountNumber | None = None
-        if raw_number is not None:
+        if raw_number is None:
+            result.anomalies.append(
+                _anomaly(
+                    AnomalyCode.MISSING_ACCOUNT_NUMBER,
+                    "blocking",
+                    section=ordinal,
+                    line=line_no,
+                    field="account_number",
+                )
+            )
+        else:
             canonical = canonicalize_account_number(raw_number)
             if isinstance(canonical, AnomalyCode):
                 result.anomalies.append(
                     _anomaly(
-                        canonical,
+                        AnomalyCode.MISSING_ACCOUNT_NUMBER,
                         "blocking",
                         section=ordinal,
                         line=line_no,
@@ -355,7 +384,10 @@ def _parse_export_impl(
             if current is not None and header_seen[current.ordinal]:
                 pending_blanks[current.ordinal].append(record.line_start)
             continue
-        if any(len(cell) > max_field_chars for cell in row):
+        first_raw = normalize_line_endings(row[0]).lstrip("\ufeff") if row else ""
+        first = first_raw.strip()
+        in_data_zone = current is not None and header_seen.get(current.ordinal, False)
+        if not in_data_zone and any(len(cell) > max_field_chars for cell in row):
             result.anomalies.append(
                 _anomaly(
                     AnomalyCode.FIELD_TOO_LONG,
@@ -367,36 +399,61 @@ def _parse_export_impl(
             )
             continue
 
-        first = normalize_line_endings(row[0]).strip().lstrip("\ufeff") if row else ""
         download_match = _DOWNLOAD_RE.fullmatch(first)
         if download_match:
             generated = _parse_date(download_match.group(1))
-            if generated is None:
+            if current is not None:
                 result.anomalies.append(
                     _anomaly(
-                        AnomalyCode.INVALID_DATE,
+                        AnomalyCode.GENERATION_DATE_INCONSISTENT,
                         "blocking",
-                        section=current.ordinal if current else None,
+                        section=current.ordinal,
                         line=record.line_start,
                         field="generated_on",
                     )
                 )
-                result.generated_on = None
-                result.generation_date_source = "missing"
-            elif result.generated_on is None:
-                result.generated_on = generated
-                result.generation_date_source = "preamble"
-            continue
+                if not in_data_zone:
+                    continue
+            else:
+                if generated is None:
+                    result.anomalies.append(
+                        _anomaly(
+                            AnomalyCode.INVALID_DATE,
+                            "blocking",
+                            line=record.line_start,
+                            field="generated_on",
+                        )
+                    )
+                if not generation_date_values:
+                    generation_date_values.append(generated)
+                    if generated is not None:
+                        result.generated_on = generated
+                        result.generation_date_source = "preamble"
+                else:
+                    if generated != generation_date_values[0]:
+                        result.anomalies.append(
+                            _anomaly(
+                                AnomalyCode.GENERATION_DATE_INCONSISTENT,
+                                "blocking",
+                                line=record.line_start,
+                                field="generated_on",
+                            )
+                        )
+                continue
 
-        account_number_match = _ACCOUNT_NUMBER_RE.fullmatch(first)
-        if _ACCOUNT_SECTION_RE.match(first):
+        account_prefix = first_raw.lstrip(" \t\u00a0\u202f\u2009")
+        account_number_match = _ACCOUNT_NUMBER_RE.fullmatch(account_prefix)
+        account_boundary = _ACCOUNT_SECTION_RE.match(first) and (
+            not in_data_zone or (len(row) == 2 and not row[1].strip())
+        )
+        if account_boundary:
             close_header_check(current)
             raw_number = account_number_match.group(1) if account_number_match else None
             current = start_section(raw_number, record.line_start)
             continue
 
         balance_match = _BALANCE_RE.fullmatch(first)
-        if balance_match and current is not None:
+        if balance_match and current is not None and not in_data_zone:
             expected_period_line[current.ordinal] = record.line_start + 2
             balance_date = _parse_date(balance_match.group(1))
             if balance_date is None:
@@ -430,7 +487,7 @@ def _parse_export_impl(
             continue
 
         period_match = _PERIOD_RE.fullmatch(first)
-        if period_match and current is not None:
+        if period_match and current is not None and not in_data_zone:
             period_phrase_seen[current.ordinal] = True
             expected_header_line[current.ordinal] = record.line_start + 2
             period_from = _parse_date(period_match.group(1))
@@ -452,15 +509,10 @@ def _parse_export_impl(
 
         if _header_matches(row):
             if current is None:
-                current = ParsedSection(ordinal=1, account_number_canonical=None)
-                result.sections.append(current)
+                current = start_section(None, record.line_start)
                 section_start_line[current.ordinal] = record.line_start
                 expected_header_line[current.ordinal] = record.line_start + 1
                 expected_period_line[current.ordinal] = record.line_start + 1
-                period_phrase_seen[current.ordinal] = False
-                header_seen[current.ordinal] = False
-                candidate_idx[current.ordinal] = 0
-                pending_blanks[current.ordinal] = []
             if header_seen[current.ordinal]:
                 result.anomalies.append(
                     _anomaly(
@@ -475,7 +527,7 @@ def _parse_export_impl(
                 header_seen[current.ordinal] = True
             continue
 
-        if _is_metadata_line(first):
+        if _is_metadata_line(first) and not in_data_zone:
             continue
 
         if current is None:
@@ -518,11 +570,50 @@ def _parse_export_impl(
             )
             continue
 
+        raw_label = row[1]
+        label_nfc_length = len(unicodedata.normalize("NFC", raw_label))
+        if len(raw_label) > DEFAULT_MAX_FIELD_CHARS or label_nfc_length > MAX_LABEL_CHARS:
+            result.anomalies.append(
+                _anomaly(
+                    AnomalyCode.LABEL_TOO_LONG,
+                    "blocking",
+                    section=current.ordinal,
+                    row=logical_row_idx,
+                    line=record.line_start,
+                    field="raw_label",
+                )
+            )
+            continue
+        if any(len(cell) > max_field_chars for cell in row):
+            result.anomalies.append(
+                _anomaly(
+                    AnomalyCode.FIELD_TOO_LONG,
+                    "blocking",
+                    section=current.ordinal,
+                    row=logical_row_idx,
+                    line=record.line_start,
+                    field="row",
+                )
+            )
+            continue
+
         booked_on = _parse_date(row[0])
         if booked_on is None:
             result.anomalies.append(
                 _anomaly(
                     AnomalyCode.INVALID_DATE,
+                    "blocking",
+                    section=current.ordinal,
+                    row=logical_row_idx,
+                    line=record.line_start,
+                    field="booked_on",
+                )
+            )
+            continue
+        if booked_on < _MIN_PLAUSIBLE_BOOKED_ON:
+            result.anomalies.append(
+                _anomaly(
+                    AnomalyCode.DATE_IMPLAUSIBLE,
                     "blocking",
                     section=current.ordinal,
                     row=logical_row_idx,
@@ -546,7 +637,6 @@ def _parse_export_impl(
             )
             continue
 
-        raw_label = row[1]
         if len(raw_label) > _LONG_LABEL_WARNING_CHARS:
             result.anomalies.append(
                 _anomaly(
@@ -597,18 +687,6 @@ def _parse_export_impl(
                     field="booked_on",
                 )
             )
-        if result.generated_on is not None and booked_on >= result.generated_on:
-            result.anomalies.append(
-                _anomaly(
-                    AnomalyCode.PROVISIONAL_DAY,
-                    "warning",
-                    section=current.ordinal,
-                    row=logical_row_idx,
-                    line=record.line_start,
-                    field="booked_on",
-                )
-            )
-
     close_header_check(current)
     if not result.sections:
         result.anomalies.append(
@@ -628,6 +706,43 @@ def _parse_export_impl(
                     field="period",
                 )
             )
+        if (
+            result.generated_on is not None
+            and section.period_from is not None
+            and result.generated_on < section.period_from
+        ):
+            result.anomalies.append(
+                _anomaly(
+                    AnomalyCode.GENERATION_DATE_INCONSISTENT,
+                    "blocking",
+                    section=section.ordinal,
+                    line=section_start_line.get(section.ordinal),
+                    field="generated_on",
+                )
+            )
+        for parsed_row in section.rows:
+            if result.generated_on is not None and parsed_row.booked_on > result.generated_on:
+                result.anomalies.append(
+                    _anomaly(
+                        AnomalyCode.FUTURE_DATED_ROW,
+                        "blocking",
+                        section=section.ordinal,
+                        row=parsed_row.logical_row_idx,
+                        line=parsed_row.line_start,
+                        field="booked_on",
+                    )
+                )
+            elif result.generated_on is not None and parsed_row.booked_on == result.generated_on:
+                result.anomalies.append(
+                    _anomaly(
+                        AnomalyCode.PROVISIONAL_DAY,
+                        "warning",
+                        section=section.ordinal,
+                        row=parsed_row.logical_row_idx,
+                        line=parsed_row.line_start,
+                        field="booked_on",
+                    )
+                )
         if section.period_to is None:
             section.complete_through = None
         elif result.generated_on is not None:
@@ -651,6 +766,58 @@ def _parse_export_impl(
                     )
         else:
             section.complete_through = None
+
+        if section.period_to is not None and section.rows:
+            latest = max(row.booked_on for row in section.rows)
+            gap_days = (section.period_to - latest).days
+            section_has_blocking_anomaly = any(
+                item.severity == "blocking" and item.section_ordinal == section.ordinal
+                for item in result.anomalies
+            )
+            if gap_days >= _COVERAGE_TAIL_GAP_DAYS and not section_has_blocking_anomaly:
+                result.anomalies.append(
+                    _anomaly(
+                        AnomalyCode.COVERAGE_TAIL_GAP,
+                        "warning",
+                        section=section.ordinal,
+                        row=max(section.rows, key=lambda item: item.booked_on).logical_row_idx,
+                        line=max(section.rows, key=lambda item: item.booked_on).line_start,
+                        field="period_to",
+                    )
+                )
+
+    all_rows = [row for section in result.sections for row in section.rows]
+    total_fields = {
+        "debit_total_cents": sum(-row.amount_cents for row in all_rows if row.amount_cents < 0),
+        "credit_total_cents": sum(row.amount_cents for row in all_rows if row.amount_cents > 0),
+        "net_total_cents": sum(row.amount_cents for row in all_rows),
+    }
+    for field_name, total in total_fields.items():
+        if abs(total) > MAX_AMOUNT_CENTS:
+            result.anomalies.append(
+                _anomaly(AnomalyCode.AMOUNT_OUT_OF_RANGE, "blocking", field=field_name)
+            )
+    for section in result.sections:
+        section_rows = section.rows
+        section_totals = {
+            "debit_total_cents": sum(
+                -row.amount_cents for row in section_rows if row.amount_cents < 0
+            ),
+            "credit_total_cents": sum(
+                row.amount_cents for row in section_rows if row.amount_cents > 0
+            ),
+            "net_total_cents": sum(row.amount_cents for row in section_rows),
+        }
+        for field_name, total in section_totals.items():
+            if abs(total) > MAX_AMOUNT_CENTS:
+                result.anomalies.append(
+                    _anomaly(
+                        AnomalyCode.AMOUNT_OUT_OF_RANGE,
+                        "blocking",
+                        section=section.ordinal,
+                        field=field_name,
+                    )
+                )
     return result
 
 

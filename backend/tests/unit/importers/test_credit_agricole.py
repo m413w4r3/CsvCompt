@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import unicodedata
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,27 @@ def _codes(result: Any) -> set[str]:
 
 def _fixture_bytes(name: str) -> bytes:
     return (FIXTURES_DIR / name).read_bytes()
+
+
+def _single_section_export(
+    *rows: str,
+    account_line: str | None = "Compte de Dépôt carte n° 123;",
+    generated_lines: tuple[str, ...] = ("Téléchargement du 10/01/2026;",),
+    period_start: str = "01/01/2026",
+    period_end: str = "31/01/2026",
+    balance: str = "10,00",
+) -> str:
+    lines = [*generated_lines]
+    if account_line is not None:
+        lines.extend((account_line, f"Solde au 09/01/2026 {balance} €;"))
+    lines.extend(
+        (
+            f"Liste des opérations du compte entre le {period_start} et le {period_end};",
+            "Date;Libellé;Débit euros;Crédit euros;",
+            *rows,
+        )
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _cents_to_fr(cents: int) -> str:
@@ -115,7 +137,12 @@ def test_CSV_03_parses_multiple_sections_without_counting_metadata() -> None:
     assert [section.section_operation_count for section in result.sections] == [5, 3]
     assert all(section.balance_as_of is not None for section in result.sections)
     assert result.operation_count == 8
-    assert not result.has_blocking_anomalies
+    assert "MISSING_ACCOUNT_NUMBER" in _codes(result)
+    assert any(
+        item.section_ordinal == 2
+        for item in result.anomalies
+        if item.code.value == "MISSING_ACCOUNT_NUMBER"
+    )
 
 
 def test_CSV_04_manifest_recounts_all_34_synthetic_fixtures() -> None:
@@ -151,11 +178,25 @@ def test_CSV_04_manifest_recounts_all_34_synthetic_fixtures() -> None:
             continue
 
         assert len(result.sections) == len(expected["sections"]), name
-        assert actual_codes == {
+        expected_codes = {
             item["code"]
             for item in expected.get("anomalies", [])
             if item.get("expected_behavior") != "accepté"
-        }, name
+        }
+        if name == "ca_2026_multi_sections.csv":
+            # ADR-026.2/.6/.7 supersede this fixture's accepted status: its
+            # second section has no account number and late preamble rows.
+            expected_codes.update(
+                {
+                    "MISSING_ACCOUNT_NUMBER",
+                    "GENERATION_DATE_INCONSISTENT",
+                    "BAD_FIELD_COUNT",
+                }
+            )
+        elif name == "adversarial/same_account_two_sections.csv":
+            # The adversarial section also places a download line after data began.
+            expected_codes.update({"GENERATION_DATE_INCONSISTENT", "BAD_FIELD_COUNT"})
+        assert actual_codes == expected_codes, name
         for section, section_expected in zip(result.sections, expected["sections"], strict=True):
             rows = section.rows
             assert len(rows) == section_expected["operation_count"], name
@@ -225,6 +266,104 @@ def test_CSV_04_debit_credit_signs_and_rejections(
     assert parse_debit_credit(debit, credit) == expected
 
 
+def test_CSV_04_amounts_are_bounded_before_large_integer_conversion() -> None:
+    assert parse_french_amount("100000000000,00") == 10**13
+    assert parse_french_amount("100000000000,01") == AnomalyCode.AMOUNT_OUT_OF_RANGE
+    assert parse_french_amount("-100000000000,01") == AnomalyCode.AMOUNT_OUT_OF_RANGE
+    assert parse_french_amount("9" * 4299 + ",00") == AnomalyCode.AMOUNT_OUT_OF_RANGE
+
+    huge_row = parse_export(
+        _single_section_export(f"09/01/2026;Opération synthétique;{'9' * 4299},00;;").encode()
+    )
+    assert "AMOUNT_OUT_OF_RANGE" in _codes(huge_row)
+    assert huge_row.operation_count == 0
+    assert huge_row.has_blocking_anomalies
+
+
+def test_CSV_04_account_number_required_and_n_ordinal_supported() -> None:
+    no_preamble = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;", account_line=None
+        ).encode()
+    )
+    missing_number = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;",
+            account_line="Compte espèce PEA;",
+        ).encode()
+    )
+    ordinal_marker = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;",
+            account_line="Compte de Dépôt nº ０００1;",
+        ).encode()
+    )
+    forbidden_edge_space = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;",
+            account_line="Compte de Dépôt carte n° 123\u3000;",
+        ).encode()
+    )
+
+    assert "MISSING_ACCOUNT_NUMBER" in _codes(no_preamble)
+    assert "MISSING_ACCOUNT_NUMBER" in _codes(missing_number)
+    assert no_preamble.has_blocking_anomalies and missing_number.has_blocking_anomalies
+    assert ordinal_marker.sections[0].account_number_canonical is not None
+    assert ordinal_marker.sections[0].account_number_canonical.value == "0001"
+    assert "MISSING_ACCOUNT_NUMBER" not in _codes(ordinal_marker)
+    assert "MISSING_ACCOUNT_NUMBER" in _codes(forbidden_edge_space)
+
+
+def test_CSV_04_label_limits_include_nfc_expansion_and_identity_is_never_clipped() -> None:
+    from app.importers.normalize import normalize_label
+
+    prefix = _single_section_export().split("Date;", maxsplit=1)[0] + "Date;"
+    header = "Libellé;Débit euros;Crédit euros;\n"
+    raw_over_limit = "X" * 10_001
+    raw_nfc_over_limit = "\ufb2c" * 6667 + "A"
+    same_prefix_different_end = "\ufb2c" * 6667 + "B"
+    normalized_left = normalize_label(raw_nfc_over_limit)
+    normalized_right = normalize_label(same_prefix_different_end)
+
+    assert len(raw_nfc_over_limit) <= 10_000
+    assert len(unicodedata.normalize("NFC", raw_nfc_over_limit)) > 20_000
+    assert normalized_left.identity_label != normalized_right.identity_label
+    assert normalized_left.identity_label.endswith("A")
+    assert normalized_right.identity_label.endswith("B")
+    assert "LABEL_TRUNCATED" not in normalized_left.warnings
+
+    for label in (raw_over_limit, raw_nfc_over_limit, same_prefix_different_end):
+        result = parse_export((prefix + header + f'09/01/2026;"{label}";1,00;;\n').encode())
+        assert "LABEL_TOO_LONG" in _codes(result)
+        assert result.operation_count == 0
+        assert result.has_blocking_anomalies
+
+
+def test_CSV_04_header_balances_and_totals_share_the_amount_bound() -> None:
+    balance = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;", balance="100000000000,01"
+        ).encode()
+    )
+    total = parse_export(
+        _single_section_export(
+            "09/01/2026;Crédit synthétique;;60000000000,00;",
+            "08/01/2026;Crédit synthétique;;60000000000,00;",
+        ).encode()
+    )
+
+    assert "AMOUNT_OUT_OF_RANGE" in _codes(balance)
+    assert balance.has_blocking_anomalies
+    assert total.operation_count == 2
+    assert any(
+        item.code == AnomalyCode.AMOUNT_OUT_OF_RANGE
+        and item.field == "credit_total_cents"
+        and item.severity == "blocking"
+        for item in total.anomalies
+    )
+    assert total.has_blocking_anomalies
+
+
 @settings(max_examples=2500, derandomize=True, deadline=None)
 @example(1)
 @example(-1)
@@ -284,6 +423,79 @@ def test_CSV_04_unknown_rows_after_header_are_never_silently_ignored() -> None:
     assert "INVALID_DATE" in _codes(invalid_date)
     assert invalid_date.operation_count == 0
     assert invalid_date.has_blocking_anomalies
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ("Madame Dupont;Libellé synthétique;1,00;;", "INVALID_DATE"),
+        ("Solde initial;Libellé synthétique;1,00;;", "INVALID_DATE"),
+        ("Téléchargement du 11/01/2026;", "BAD_FIELD_COUNT"),
+    ],
+)
+def test_CSV_04_metadata_like_rows_in_data_zone_are_candidates(row: str, expected: str) -> None:
+    result = parse_export(_single_section_export(row).encode())
+
+    assert expected in _codes(result)
+    if row.startswith("Téléchargement"):
+        assert "GENERATION_DATE_INCONSISTENT" in _codes(result)
+    assert result.operation_count == 0
+    assert result.has_blocking_anomalies
+
+
+def test_CSV_04_generation_and_operation_dates_are_consistent_and_plausible() -> None:
+    generated_before_period = parse_export(
+        _single_section_export(
+            "09/02/2026;Opération synthétique;1,00;;",
+            generated_lines=("Téléchargement du 01/01/2026;",),
+            period_start="01/02/2026",
+            period_end="28/02/2026",
+        ).encode()
+    )
+    divergent_generations = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;",
+            generated_lines=("Téléchargement du 10/01/2026;", "Téléchargement du 11/01/2026;"),
+        ).encode()
+    )
+    generation_after_section = parse_export(
+        _single_section_export(
+            "09/01/2026;Opération synthétique;1,00;;",
+            "Téléchargement du 11/01/2026;",
+        ).encode()
+    )
+    future = parse_export(
+        _single_section_export("11/01/2026;Opération synthétique;1,00;;").encode()
+    )
+    implausible = parse_export(
+        _single_section_export("31/12/1999;Opération synthétique;1,00;;").encode()
+    )
+    same_generation_day = parse_export(
+        _single_section_export("10/01/2026;Opération synthétique;1,00;;").encode()
+    )
+
+    assert "GENERATION_DATE_INCONSISTENT" in _codes(generated_before_period)
+    assert "GENERATION_DATE_INCONSISTENT" in _codes(divergent_generations)
+    assert "GENERATION_DATE_INCONSISTENT" in _codes(generation_after_section)
+    assert "FUTURE_DATED_ROW" in _codes(future)
+    assert "PROVISIONAL_DAY" not in _codes(future)
+    assert "DATE_IMPLAUSIBLE" in _codes(implausible)
+    assert implausible.operation_count == 0
+    assert "PROVISIONAL_DAY" in _codes(same_generation_day)
+    assert not same_generation_day.has_blocking_anomalies
+
+
+def test_CSV_04_coverage_tail_gap_is_a_warning_for_clean_sections() -> None:
+    result = parse_export(
+        _single_section_export(
+            "01/01/2026;Opération synthétique;1,00;;",
+            period_start="01/01/2026",
+            period_end="31/03/2026",
+        ).encode()
+    )
+
+    assert "COVERAGE_TAIL_GAP" in _codes(result)
+    assert not result.has_blocking_anomalies
 
 
 def test_CSV_04_limits_and_empty_inputs_return_anomalies() -> None:
@@ -365,6 +577,7 @@ def test_CSV_04_parse_is_deterministic_and_repr_redacts_accounts() -> None:
     second = parse_export(source)
     assert first == second
     assert "<redacted>" in repr(first)
+    assert all(row.raw_label not in repr(first) for row in first.rows)
     assert all(
         section.account_number_canonical is None
         or section.account_number_canonical.value not in repr(first)

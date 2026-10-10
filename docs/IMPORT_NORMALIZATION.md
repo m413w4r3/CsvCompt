@@ -10,11 +10,20 @@ Le module `backend/app/importers/normalize.py` est pur et déterministe. Il reç
 | `identity_label(raw)` | NFC, chaque suite Unicode `White_Space` devient une espace ASCII, trim des espaces ASCII. Casse, accents, ponctuation, chiffres, ordre des mots et `Cf` sont conservés. | Identité stricte d'import, conformément au contrat et à ADR-011/019.g. |
 | `search_label(raw)` | `casefold`, décomposition NFKD, suppression des marques, ponctuation et contrôles remplacés par des espaces, puis réduction des espaces. | Recherche humaine et détection de paires à auditer seulement. |
 
-`IdentityLabel` et `SearchLabel` sont des sous-classes de `str` : elles se manipulent comme du texte, et exposent aussi `.value` et `.warnings`. `normalize_label` rassemble les trois valeurs sans transformer le brut. Ainsi, `"CAFÉ, Rue"` et `"cafe rue"` ont des identités différentes mais une représentation de recherche identique. Cette égalité floue n'autorise aucune fusion (INV-03).
+`IdentityLabel` et `SearchLabel` sont des sous-classes de `str` : elles se manipulent comme du texte, et exposent aussi `.value` et `.warnings`. `normalize_label` rassemble les trois valeurs sans transformer le brut. Ainsi, `"CAFÉ, Rue"` et `"cafe rue"` ont des identités différentes mais une représentation de recherche identique. Cette égalité floue n'autorise aucune fusion (INV-03). Le `repr` de `NormalizedLabel` masque `raw_label`, `identity_label` et `search_label`.
 
-Les caractères Unicode de catégorie `Cf`, par exemple un espace sans chasse (ZWSP) ou un BOM interne, restent dans `identity_label` et ajoutent l'avertissement fixe `CF_CHARACTER`. Le parseur ne renvoie jamais le texte source dans un message d'erreur : les avertissements sont des codes constants.
+Les caractères Unicode de catégorie `Cf`, par exemple un espace sans chasse (ZWSP) ou un BOM interne, restent dans `identity_label` et ajoutent l'avertissement fixe `CF_CHARACTER`. Le parseur ne renvoie jamais le texte source dans un message d'erreur : les avertissements sont des codes constants. Les hints de marchand/créancier contenant un IBAN ou une séquence d'au moins huit chiffres (y compris groupés par espaces ou tirets) sont masqués, ainsi que leur clé candidate.
 
-La normalisation est bornée à `MAX_LABEL_CHARS = 20_000` caractères. Au-delà, les représentations dérivées utilisent le préfixe borné et portent `LABEL_TRUNCATED`; `raw_label` garde tout le texte d'origine. Le code appelant doit traiter cet avertissement avant toute persistance d'identité. La recherche comme l'extraction de signaux ne traitent que ce même préfixe. Cette borne évite une normalisation sans limite tout en rendant la troncature visible.
+La normalisation ne tronque jamais aucune représentation, en particulier `identity_label`. Le parseur T09 borne en amont le libellé brut à 10 000 caractères et sa forme NFC à `MAX_LABEL_CHARS = 20_000`; au-delà, il rejette la ligne avec `LABEL_TOO_LONG` bloquant. Ainsi, deux libellés bruts distincts ne peuvent pas entrer en collision par troncature après expansion NFC. Les fonctions de normalisation restent pures et déterministes.
+
+## Codes de normalisation
+
+| Code | Niveau | Sens |
+|---|---|---|
+| `CF_CHARACTER` | avertissement | Un caractère Unicode de catégorie `Cf` est conservé dans l'identité. |
+| `INVALID_INPUT` | avertissement | Une fonction de normalisation reçoit une valeur qui n'est pas du texte ; elle renvoie une valeur vide et un code fixe. |
+
+`LABEL_TRUNCATED` n'est plus émis : les identités ne sont jamais tronquées et le parseur rejette les champs trop longs avant normalisation.
 
 ## Indices CA prudents
 
@@ -26,6 +35,7 @@ La normalisation est bornée à `MAX_LABEL_CHARS = 20_000` caractères. Au-delà
 - `creditor_hint` pour un prélèvement, limité au texte avant le premier séparateur ` - ` ; `reference_present` donne uniquement la présence probable d'une référence, jamais sa valeur ;
 - des booléens de signaux `is_intermediary_candidate`, `is_cash_withdrawal_candidate`, `is_loan_payment_candidate` et `ambiguous_marketplace` ;
 - `merchant_key_candidate`, candidat de comparaison exact préfixé par sa source (`card:` ou `creditor:`), pas un alias ni une clé de fusion.
+- Les hints contenant un motif d'IBAN ou un numéro long sont remplacés par `None` avant d'être retournés. Les références restent signalées uniquement par `reference_present`.
 
 La constante `INTERMEDIARY_SIGNAL_TOKENS` contrôle les motifs d'intermédiaires/crédit ; `AMBIGUOUS_MARKETPLACE_TOKENS` contrôle les noms dont le rapprochement global serait ambigu (dont `AMAZON` et `VINTED`). Ces listes sont des signaux révisables. Un signal n'est ni une catégorie, ni un `flow_kind`, ni une classification, ni une preuve que deux contreparties sont identiques (INV-13).
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import threading
@@ -58,9 +59,36 @@ class ImportPreviewStore:
                     if expiry <= now:
                         path.unlink(missing_ok=True)
                         path.with_suffix(".bin").unlink(missing_ok=True)
-                except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    json.JSONDecodeError,
+                ):
                     path.unlink(missing_ok=True)
                     path.with_suffix(".bin").unlink(missing_ok=True)
+            stale_before = now - timedelta(seconds=self.ttl_seconds)
+            stale_before_ns = (
+                calendar.timegm(stale_before.utctimetuple()) * 1_000_000_000
+                + stale_before.microsecond * 1_000
+            )
+            for path in self.directory.glob("*.bin"):
+                if path.with_suffix(".json").exists():
+                    continue
+                self._unlink_if_stale(path, stale_before_ns)
+            for path in self.directory.iterdir():
+                if path.name.startswith(".") and path.name.endswith(".tmp"):
+                    self._unlink_if_stale(path, stale_before_ns)
+
+    @staticmethod
+    def _unlink_if_stale(path: Path, stale_before_ns: int) -> None:
+        try:
+            if path.stat().st_mtime_ns <= stale_before_ns:
+                path.unlink(missing_ok=True)
+        except OSError:
+            return
 
     def create(self, payload: dict[str, Any], raw_bytes: bytes) -> dict[str, Any]:
         with self._lock:
@@ -81,11 +109,18 @@ class ImportPreviewStore:
                 .replace("+00:00", "Z"),
                 expires_at_utc=expiry.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             )
-            self._atomic_write(self.directory / f"{preview_id}.bin", raw_bytes)
-            self._atomic_write(
-                self.directory / f"{preview_id}.json",
-                json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
             )
+            binary_path = self.directory / f"{preview_id}.bin"
+            json_path = self.directory / f"{preview_id}.json"
+            try:
+                self._atomic_write(binary_path, raw_bytes)
+                self._atomic_write(json_path, serialized)
+            except BaseException:
+                binary_path.unlink(missing_ok=True)
+                json_path.unlink(missing_ok=True)
+                raise
             return value
 
     def _atomic_write(self, final_path: Path, data: bytes) -> None:
