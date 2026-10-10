@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_api_key: SecretStr | None = None
     data_dir: Path = Path("data")
+    max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    preview_ttl_seconds: int = Field(default=1800, ge=1)
+    preview_dir: Path | None = None
     version: str = Field(default="0.1.0", validation_alias="APP_VERSION")
 
     @field_validator("database_url")
@@ -68,6 +71,22 @@ class Settings(BaseSettings):
     def anchor_data_dir(cls, value: str | Path) -> Path:
         path = Path(value).expanduser()
         return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+    @field_validator("preview_dir", mode="before")
+    @classmethod
+    def anchor_preview_dir(cls, value: str | Path | None) -> Path | None:
+        if value is None:
+            return None
+        return Path(value).expanduser()
+
+    @property
+    def effective_preview_dir(self) -> Path:
+        """Return the private preview directory anchored below ``data_dir`` by default."""
+        if self.preview_dir is None:
+            return self.data_dir / "import-previews"
+        return (
+            self.preview_dir if self.preview_dir.is_absolute() else self.data_dir / self.preview_dir
+        )
 
     @field_validator("app_host")
     @classmethod
