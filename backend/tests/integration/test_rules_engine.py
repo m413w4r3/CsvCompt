@@ -943,10 +943,14 @@ def test_RULE_14_exceptions_are_durable_and_never_apply(tmp_path: Path) -> None:
             )
             assert len(audit_rows) == 2
             assert '"actor":"reviewer"' in (audit_rows[0].after_json or "")
-            assert '"reason":"Exclure cette occurrence choisie."' in (
+            reason = "Exclure cette occurrence choisie."
+            assert f'"reason_length":{len(reason)}' in (audit_rows[0].after_json or "")
+            assert f'"reason_sha256":"{sha256(reason.encode()).hexdigest()}"' in (
                 audit_rows[0].after_json or ""
             )
+            assert reason not in (audit_rows[0].after_json or "")
             assert '"actor":"second-reviewer"' in (audit_rows[1].after_json or "")
+            assert "Conserver le motif corrigé." not in (audit_rows[1].after_json or "")
         simulation = simulate_rule(engine, changed, SimulationScope(page_size=10))
         assert tuple(row.transaction_id for row in simulation.rows) == (ids[1],)
         result = apply_rule(

@@ -11,12 +11,23 @@ Chaque décision d'allocation conserve son acteur, son action, son horodatage
 UTC, et les allocations complètes avant et après : flux, catégorie, centimes
 signés, provenance et dimensions de revue. Les décisions et événements
 d'audit sont append-only ; une annulation crée une nouvelle décision `undo`
-et relie cette décision à la décision annulée. Les instantanés et événements
-créés par T20 ne copient ni le libellé bancaire, ni le libellé normalisé, ni le
-motif de règle, ni un extrait de transaction. Les événements de création de
-règle hérités de T19 peuvent encore conserver un motif littéral dans leur
-`before_json`/`after_json`; ce risque préexistant est consigné dans
-`docs/revues/REVUE_T19.md` et reste à traiter dans le périmètre approprié.
+et relie cette décision à la décision annulée. Les snapshots de règle écrits
+après le correctif T20 ne contiennent que l'identifiant et la version de règle,
+la longueur et l'empreinte SHA-256 du motif, ainsi que les métadonnées métier
+nécessaires ; les motifs et raisons libres d'exception y sont aussi résumés par
+longueur et empreinte, sans texte brut. Les anciennes traces T19 ne sont pas
+réécrites ; elles peuvent encore contenir des motifs dans leur audit historique.
+
+La migration 0004 ajoute une empreinte SHA-256 canonique pour chacun des deux
+snapshots de décision écrits par l'application. Avant une restitution, le
+service revérifie les empreintes, rapproche `before` de l'état `after` de la
+décision auditée précédente lorsqu'il est contigu, puis vérifie que parts
+restaurées et résidu couvrent le montant signé de l'opération. Les décisions
+historiques gardent des empreintes nulles : elles ne sont annulables que si
+`before` concorde avec la décision auditée précédente ; sans précédent
+concordant, le service renvoie `UNDO_SNAPSHOT_INVALID` sans écriture. Les
+snapshots d'une exécution de règle sont aussi rapprochés de ceux de sa décision
+source ; une trace historique sans décision source est refusée sûrement.
 
 Une application de règle retourne un `batch_id` UUIDv4. Le même ID regroupe
 ses exécutions, la version approuvée de la règle, l'empreinte de la portée,
@@ -53,6 +64,13 @@ reconstituer son ancien regroupement.
 - Une décision `undo` ne peut pas être annulée à nouveau par ce service. Une
   correction ultérieure doit être enregistrée comme une nouvelle décision
   humaine.
+- L'annulation en chaîne d'une décision antérieure n'est permise que si son
+  `after` correspond à l'état courant et que sa version enregistrée est la
+  version courante. Une annulation précédente avance la version : l'annulation
+  de la décision plus ancienne échoue alors avec `UNDO_STATE_DIVERGED`, même si
+  son contenu `after` a été restauré. Il faut enregistrer une nouvelle décision
+  humaine pour corriger cet état ; l'ordre inverse n'est pas rejoué
+  automatiquement.
 
 ## Erreurs contractuelles
 

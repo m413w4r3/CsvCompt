@@ -218,6 +218,13 @@
   4. Le retrait auditable d'allocation (ADR-027.1) est refusé tant qu'un lien proposé/confirmé la référence en source ou en cible.
 - **Conséquences** : migration `0002_t17_refund_safety` matérialise les parts et leurs gardes SQL sans modifier 0001 ; IDs de tests MONEY-11..14, KPI-03/KPI-07 dans `docs/MATRICE_TESTS_ADDENDUM.md`.
 
+## ADR-029 — Atomicité par opération et reprise des lots de règles
+
+- **Date** : 2026-10-11 · **Statut** : acceptée par l'orchestrateur (commit `da34ec3`).
+- **Contexte** : une application de règle peut traiter plusieurs transactions et échouer après qu'une opération a déjà été appliquée.
+- **Décision** : chaque opération et ses traces restent atomiques dans une transaction SQLite. Les opérations précédemment appliquées restent commitées si une opération suivante échoue ; le lot expose ses exécutions et peut être repris avec le même `batch_id` sans doublon, puis annulé à partir des exécutions réellement appliquées.
+- **Conséquences** : T20 conserve l'application partielle par opération comme politique métier ; l'atomicité globale d'un lot n'est pas promise. L'appelant fournit un `batch_id` stable avant l'appel s'il doit retrouver ou reprendre un lot après une exception.
+
 ## ADR-030 — Durcissement G3 : archives orphelines, OUT_OF_PERIOD, `not_started`, alias
 
 - **Date** : 2026-10-10 · **Statut** : acceptée (arbitrage orchestrateur, revue G3 MAJ-01, MAJ-02, m-01..m-11)
@@ -311,3 +318,9 @@
   par mutation dans `scripts/verify_schema.py` sont obligatoires. Aucun
   libellé bancaire ou motif de règle n'est ajouté aux snapshots T20. Les
   routes REST et leur contrat HTTP restent au ticket T21.
+
+## ADR-035 — Empreintes de snapshots et gardes de liens d'annulation T20
+
+- **Date** : 2026-10-11 · **Statut** : acceptée pour le correctif de revue T20.
+- **Décision** : une nouvelle migration additive `0004` ajoute les empreintes SHA-256 canoniques de `before_json` et `after_json` aux décisions créées après migration et recrée les triggers de lien d'annulation avec les contrôles de source, d'action, de transaction, d'exécution appliquée et d'absence de cycle. Les anciennes décisions gardent des empreintes `NULL` ; leur annulation exige une concordance avec l'état audité de la décision précédente, sinon elle échoue avec `UNDO_SNAPSHOT_INVALID` sans écriture.
+- **Conséquences** : `0001`–`0003` restent inchangées ; la parité migration/modèles/`schema.sql`, les migrations et downgrades avec sauvegardes vérifiées, et les preuves par mutation isolant chaque garde sont requises.

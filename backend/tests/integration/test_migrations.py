@@ -58,10 +58,10 @@ def test_T06_IMP_06_upgrade_is_idempotent_and_migration_revision_is_stable(
     second = upgrade_to_head(settings)
     snapshot_after_second = _schema_snapshot(database)
 
-    assert first.revision == second.revision == "0003_t20_review"
+    assert first.revision == second.revision == "0004_t20_snapshot_guards"
     assert first.backup is None and second.backup is None
     assert snapshot_after_first == snapshot_after_second
-    assert migrate.current_revision(settings.database_url) == "0003_t20_review"
+    assert migrate.current_revision(settings.database_url) == "0004_t20_snapshot_guards"
 
 
 @pytest.mark.integration
@@ -137,7 +137,7 @@ def test_M06_data_loss_flag_never_disables_foreign_keys_during_upgrade(
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     database = tmp_path / "upgrade-with-downgrade-flag.sqlite"
     result = upgrade_to_head(_settings(database, tmp_path / "data"))
-    assert result.revision == "0003_t20_review"
+    assert result.revision == "0004_t20_snapshot_guards"
 
 
 @pytest.mark.integration
@@ -243,11 +243,11 @@ def test_T06_downgrade_refuses_business_data_without_explicit_backup(
     monkeypatch.delenv("COMPTES_DOWNGRADE_BACKUP", raising=False)
     with pytest.raises(
         RuntimeError,
-        match="downgrade T20 refusé.*COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1.*sauvegarde vérifiée",
+        match="downgrade T20-0004 refusé.*COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1.*sauvegarde vérifiée",
     ):
         command.downgrade(_alembic_config(settings, operation="downgrade"), "base")
 
-    assert migrate.current_revision(settings.database_url) == "0003_t20_review"
+    assert migrate.current_revision(settings.database_url) == "0004_t20_snapshot_guards"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM accounts").fetchone() == (1,)
 
@@ -274,10 +274,15 @@ def test_T06_downgrade_succeeds_only_with_explicit_verified_backup(
         engine.dispose()
 
     backup_t20 = create_verified_backup(
-        database, settings.data_dir / "backups", source_revision="0003_t20_review"
+        database, settings.data_dir / "backups", source_revision="0004_t20_snapshot_guards"
     )
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t20.database_path))
+    command.downgrade(_alembic_config(settings, operation="downgrade"), "0003_t20_review")
+    backup_t20_review = create_verified_backup(
+        database, settings.data_dir / "backups", source_revision="0003_t20_review"
+    )
+    monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t20_review.database_path))
     command.downgrade(_alembic_config(settings, operation="downgrade"), "0002_t17_refund_safety")
     backup_t17 = create_verified_backup(
         database, settings.data_dir / "backups", source_revision="0002_t17_refund_safety"
@@ -353,7 +358,7 @@ def test_T06_health_reports_initialization_schema_age_and_revision(tmp_path: Pat
     assert current["api_version"] == "1"
     assert current["storage_status"] == "ok"
     assert current["llm_enabled"] is False
-    assert current["database"] == {"status": "ok", "revision": "0003_t20_review"}
+    assert current["database"] == {"status": "ok", "revision": "0004_t20_snapshot_guards"}
 
 
 @pytest.mark.integration

@@ -112,9 +112,9 @@ def test_MIG_0003_existing_0002_rule_trace_is_preserved_and_backfilled(tmp_path:
         )
 
     result = upgrade_to_head(settings)
-    assert result.revision == "0003_t20_review"
+    assert result.revision == "0004_t20_snapshot_guards"
     assert result.backup is not None
-    assert current_revision(settings.database_url) == "0003_t20_review"
+    assert current_revision(settings.database_url) == "0004_t20_snapshot_guards"
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             """SELECT rule_execution_id, transaction_id, before_json, after_json,

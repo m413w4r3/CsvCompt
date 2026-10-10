@@ -6,6 +6,7 @@ small, bounded glob-like language where ``*`` separates literal fragments.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -565,18 +566,24 @@ def _audit(
 
 
 def _rule_snapshot(record: RuleRecord) -> dict[str, object]:
+    pattern = record.condition.label_pattern
     return {
         "rule_id": record.rule_id,
         "version": record.version,
         "status": record.status,
-        "condition": _condition_document(record.condition),
+        "label_pattern_length": None if pattern is None else len(pattern),
+        "label_pattern_sha256": (
+            None if pattern is None else hashlib.sha256(pattern.encode("utf-8")).hexdigest()
+        ),
         "effect": _effect_document(record.action),
+        "flow_kind": str(record.action.flow_kind),
         "priority": record.priority,
         "application_scope": record.application_scope,
         "exceptions": [
             {
                 "transaction_id": item.transaction_id,
-                "reason": item.reason,
+                "reason_length": len(item.reason),
+                "reason_sha256": hashlib.sha256(item.reason.encode("utf-8")).hexdigest(),
                 "actor": item.actor,
                 "created_at_utc": item.created_at_utc.isoformat(),
             }

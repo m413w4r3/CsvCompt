@@ -437,6 +437,8 @@ class ClassificationDecision(VersionedMixin, CreatedAtMixin, Base):
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     before_json: Mapped[str | None] = mapped_column(Text)
     after_json: Mapped[str | None] = mapped_column(Text)
+    before_json_sha256: Mapped[str | None] = mapped_column(Text)
+    after_json_sha256: Mapped[str | None] = mapped_column(Text)
     undone_by_decision_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("classification_decisions.decision_id", ondelete="RESTRICT")
     )

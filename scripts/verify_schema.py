@@ -1969,9 +1969,238 @@ def verify_review_undo_guards(schema_path: Path) -> None:
             ),
             "rule_execution_immutable",
         )
-        report(
-            "T20 les exécutions et décisions sont versionnées, append-only et annulables une fois"
+
+        def seed_decision(decision_key: str, transaction_key: str, action: str = "confirm") -> None:
+            connection.execute(
+                """INSERT INTO classification_decisions
+                   (decision_id, transaction_id, action, actor, before_json, after_json,
+                    transaction_version)
+                   VALUES (?, ?, ?, 'verify-synthetic', '[]', '[]', 1)""",
+                (decision_key, transaction_key, action),
+            )
+
+        def seed_audit(audit_key: str, transaction_key: str) -> None:
+            connection.execute(
+                """INSERT INTO audit_events
+                   (audit_event_id, target_type, target_id, action, actor)
+                   VALUES (?, 'transaction', ?, 'rule.applied', 'verify-synthetic')""",
+                (audit_key, transaction_key),
+            )
+
+        def seed_execution(
+            execution_key: str,
+            transaction_key: str,
+            source_decision_key: str,
+            *,
+            outcome: str = "applied",
+            dry_run: int = 0,
+        ) -> None:
+            audit_key = new_id()
+            seed_audit(audit_key, transaction_key)
+            connection.execute(
+                """INSERT INTO rule_executions
+                   (rule_execution_id, rule_id, transaction_id, outcome, dry_run,
+                    audit_event_id, batch_id, rule_version, batch_scope_sha256,
+                    classification_decision_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (
+                    execution_key,
+                    rule_id,
+                    transaction_key,
+                    outcome,
+                    dry_run,
+                    audit_key,
+                    new_id(),
+                    scope_digest,
+                    source_decision_key,
+                ),
+            )
+
+        delete_probe_id = new_id()
+        seed_decision(delete_probe_id, transaction_id, "reject")
+        expect_integrity_error(
+            "T20 classification_decisions append-only sans suppression",
+            lambda: connection.execute(
+                "DELETE FROM classification_decisions WHERE decision_id=?", (delete_probe_id,)
+            ),
+            "classification_decision_immutable",
         )
+
+        bad_action_target = new_id()
+        bad_action_link = new_id()
+        seed_decision(bad_action_target, transaction_id)
+        seed_decision(bad_action_link, transaction_id, "confirm")
+        expect_integrity_error(
+            "T20 lien de décision exige une cible action=undo",
+            lambda: connection.execute(
+                "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+                "WHERE decision_id=?",
+                (bad_action_link, bad_action_target),
+            ),
+            "classification_decision_undo_link_invalid",
+        )
+
+        bad_transaction_target = new_id()
+        seed_decision(bad_transaction_target, transaction_id)
+        second_transaction_id = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-03-15", -300, "T20 autre opération synthétique"),
+            occurrence_rank=1,
+        )
+        wrong_transaction_undo = new_id()
+        seed_decision(wrong_transaction_undo, second_transaction_id, "undo")
+        expect_integrity_error(
+            "T20 lien de décision exige la même transaction",
+            lambda: connection.execute(
+                "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+                "WHERE decision_id=?",
+                (wrong_transaction_undo, bad_transaction_target),
+            ),
+            "classification_decision_undo_link_invalid",
+        )
+
+        cycle_undo_id = new_id()
+        seed_decision(cycle_undo_id, transaction_id, "undo")
+        expect_integrity_error(
+            "T20 une décision undo ne peut pas être liée comme source",
+            lambda: connection.execute(
+                "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+                "WHERE decision_id=?",
+                (cycle_undo_id, undo_id),
+            ),
+            "classification_decision_undo_link_invalid",
+        )
+
+        already_linked_target = new_id()
+        seed_decision(already_linked_target, transaction_id)
+        first_link = new_id()
+        second_link = new_id()
+        seed_decision(first_link, transaction_id, "undo")
+        seed_decision(second_link, transaction_id, "undo")
+        connection.execute(
+            "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+            "WHERE decision_id=?",
+            (first_link, already_linked_target),
+        )
+        expect_integrity_error(
+            "T20 une décision déjà annulée ne peut pas recevoir un second lien",
+            lambda: connection.execute(
+                "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+                "WHERE decision_id=?",
+                (second_link, already_linked_target),
+            ),
+            "classification_decision_undo_link_invalid",
+        )
+
+        skipped_source = new_id()
+        seed_decision(skipped_source, transaction_id)
+        skipped_execution = new_id()
+        seed_execution(skipped_execution, transaction_id, skipped_source, outcome="skipped_manual")
+        skipped_undo = new_id()
+        seed_decision(skipped_undo, transaction_id, "undo")
+        expect_integrity_error(
+            "T20 annulation d'exécution exige outcome=applied",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (skipped_undo, skipped_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        dry_source = new_id()
+        seed_decision(dry_source, transaction_id)
+        dry_execution = new_id()
+        seed_execution(dry_execution, transaction_id, dry_source, dry_run=1)
+        dry_undo = new_id()
+        seed_decision(dry_undo, transaction_id, "undo")
+        expect_integrity_error(
+            "T20 annulation d'exécution exige dry_run=0",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (dry_undo, dry_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        wrong_execution_action = new_id()
+        seed_decision(wrong_execution_action, transaction_id)
+        action_execution_source = new_id()
+        seed_decision(action_execution_source, transaction_id)
+        action_execution = new_id()
+        seed_execution(action_execution, transaction_id, action_execution_source)
+        expect_integrity_error(
+            "T20 lien d'exécution exige une cible action=undo",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (wrong_execution_action, action_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        wrong_execution_transaction = new_id()
+        seed_decision(wrong_execution_transaction, second_transaction_id, "undo")
+        transaction_execution_source = new_id()
+        seed_decision(transaction_execution_source, transaction_id)
+        transaction_execution = new_id()
+        seed_execution(transaction_execution, transaction_id, transaction_execution_source)
+        expect_integrity_error(
+            "T20 lien d'exécution exige la même transaction",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (wrong_execution_transaction, transaction_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        stale_source = new_id()
+        seed_decision(stale_source, transaction_id)
+        stale_execution = new_id()
+        seed_execution(stale_execution, transaction_id, stale_source)
+        stale_source_undo = new_id()
+        stale_link_attempt = new_id()
+        seed_decision(stale_source_undo, transaction_id, "undo")
+        seed_decision(stale_link_attempt, transaction_id, "undo")
+        connection.execute(
+            "UPDATE classification_decisions SET undone_by_decision_id=?, version=version+1 "
+            "WHERE decision_id=?",
+            (stale_source_undo, stale_source),
+        )
+        expect_integrity_error(
+            "T20 exécution source déjà annulée par une autre décision refusée",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (stale_link_attempt, stale_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        undo_source_decision = new_id()
+        seed_decision(undo_source_decision, transaction_id)
+        undo_source_execution = new_id()
+        seed_execution(undo_source_execution, transaction_id, undo_source_decision)
+        original_decision_guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='trg_classification_decisions_undo_guard'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER trg_classification_decisions_undo_guard")
+        connection.execute(
+            "UPDATE classification_decisions SET action='undo', version=version+1 "
+            "WHERE decision_id=?",
+            (undo_source_decision,),
+        )
+        connection.execute(original_decision_guard)
+        undo_source_link = new_id()
+        seed_decision(undo_source_link, transaction_id, "undo")
+        expect_integrity_error(
+            "T20 exécution source ne peut pas être une décision undo",
+            lambda: connection.execute(
+                "UPDATE rule_executions SET undone_by_decision_id=? WHERE rule_execution_id=?",
+                (undo_source_link, undo_source_execution),
+            ),
+            "rule_execution_immutable",
+        )
+
+        report("T20 les décisions et exécutions sont protégées par des liens d'annulation isolés")
     finally:
         connection.close()
 
@@ -4328,6 +4557,136 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             "contrainte absente ou non appliquée : T20 snapshot de décision immuable lors de "
             "son annulation",
         ),
+        (
+            "decision delete forbidden",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_classification_decisions_delete_forbidden"
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 classification_decisions append-only "
+            "sans suppression",
+        ),
+        (
+            "decision undo action predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_classification_decisions_undo_guard",
+                "     AND undo.action = 'undo'\n",
+                "",
+                "decision undo target action predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 lien de décision exige une cible action=undo",
+        ),
+        (
+            "decision undo transaction predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_classification_decisions_undo_guard",
+                "           AND undo.transaction_id = NEW.transaction_id\n",
+                "",
+                "decision undo transaction predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 lien de décision exige la même transaction",
+        ),
+        (
+            "decision undo source predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_classification_decisions_undo_guard",
+                "     OLD.action = 'undo' OR\n",
+                "",
+                "decision undo source action predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 une décision undo ne peut pas être liée comme source",
+        ),
+        (
+            "decision undo source active predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_classification_decisions_undo_guard",
+                "WHEN OLD.undone_by_decision_id IS NOT NULL OR\n",
+                "WHEN ",
+                "decision already-undone predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 une décision déjà annulée ne peut pas recevoir un second lien",
+        ),
+        (
+            "rule execution undo action predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "           AND undo.action = 'undo'\n",
+                "",
+                "rule execution undo target action predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 lien d'exécution exige une cible action=undo",
+        ),
+        (
+            "rule execution undo transaction predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "           AND undo.transaction_id = NEW.transaction_id\n",
+                "",
+                "rule execution undo transaction predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 lien d'exécution exige la même transaction",
+        ),
+        (
+            "rule execution outcome predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "     OLD.outcome IS NOT 'applied' OR\n",
+                "",
+                "rule execution applied outcome predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 annulation d'exécution exige outcome=applied",
+        ),
+        (
+            "rule execution dry run predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "     OLD.dry_run IS NOT 0 OR\n",
+                "",
+                "rule execution non-dry-run predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 annulation d'exécution exige dry_run=0",
+        ),
+        (
+            "rule execution source action predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "           AND source.action <> 'undo'\n",
+                "",
+                "rule execution source action predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 exécution source ne peut pas être une décision undo",
+        ),
+        (
+            "rule execution source active predicate",
+            lambda s: mutate_trigger_clause(
+                s,
+                "trg_rule_executions_update_guard",
+                "           AND (source.undone_by_decision_id IS NULL OR\n"
+                "                source.undone_by_decision_id = NEW.undone_by_decision_id)\n",
+                "",
+                "rule execution source active predicate",
+            ),
+            verify_review_undo_guards,
+            "contrainte absente ou non appliquée : T20 exécution source déjà annulée par une autre décision refusée",
+        ),
     ]
     with tempfile.TemporaryDirectory(prefix="verify-schema-proof-") as temp_dir:
         root = Path(temp_dir)
@@ -4433,7 +4792,7 @@ def verify_migration_history_and_head_schema() -> None:
         actual = hashlib.sha256((ROOT / relative_path).read_bytes()).hexdigest()
         if actual != expected_digest:
             raise VerificationError(
-                f"MIG-FREEZE-01 migration gelée, créer 0003 : {relative_path} a changé"
+                f"MIG-FREEZE-01 migration gelée, créer une nouvelle révision : {relative_path} a changé"
             )
     report("MIG-FREEZE-01 les deux fichiers de 0001 sont gelés")
 
@@ -4460,8 +4819,8 @@ def verify_migration_history_and_head_schema() -> None:
             config.attributes["operation"] = "upgrade"
             command.upgrade(config, "0001_initial")
             result = upgrade_to_head(settings)
-            if result.revision != "0003_t20_review" or result.backup is None:
-                raise VerificationError("MIG-0003 chaîne 0001 → 0003 ou sauvegarde absente")
+            if result.revision != "0004_t20_snapshot_guards" or result.backup is None:
+                raise VerificationError("MIG-0004 chaîne 0001 → 0004 ou sauvegarde absente")
 
             expected = connect(DEFAULT_SCHEMA)
             migrated = sqlite3.connect(database)
@@ -4489,13 +4848,13 @@ def verify_migration_history_and_head_schema() -> None:
 
                 if normalized_objects(migrated) != normalized_objects(expected):
                     raise VerificationError(
-                        "MIG-0003 sqlite_master après 0001 → 0003 diverge de schema.sql"
+                        "MIG-0004 sqlite_master après 0001 → 0004 diverge de schema.sql"
                     )
                 integrity = migrated.execute("PRAGMA integrity_check").fetchone()
                 foreign_keys = migrated.execute("PRAGMA foreign_key_check").fetchall()
                 if integrity != ("ok",) or foreign_keys:
                     raise VerificationError(
-                        "MIG-0003 migrated database integrity_check/foreign_key_check invalide"
+                        "MIG-0004 migrated database integrity_check/foreign_key_check invalide"
                     )
             finally:
                 expected.close()
@@ -4503,8 +4862,8 @@ def verify_migration_history_and_head_schema() -> None:
     except VerificationError:
         raise
     except Exception as error:
-        raise VerificationError(f"MIG-0003 échec de migration temporaire : {error}") from error
-    report("MIG-0003 la chaîne 0001 → 0003 égale docs/examples/schema.sql")
+        raise VerificationError(f"MIG-0004 échec de migration temporaire : {error}") from error
+    report("MIG-0004 la chaîne 0001 → 0004 égale docs/examples/schema.sql")
 
 
 def main() -> int:

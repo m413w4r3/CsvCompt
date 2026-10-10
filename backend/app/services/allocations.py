@@ -34,6 +34,7 @@ from app.domain.types import (
     FlowKind,
     Origin,
 )
+from app.services.snapshot_integrity import canonical_json, canonical_sha256
 
 AllocationMode = Literal["complete", "partial"]
 AllocationOrigin = Literal["manual", "rule", "history", "llm"]
@@ -452,16 +453,8 @@ def _write_decision_and_audit(
     after: list[dict[str, str | int]] | None,
     audit_event_id: str,
 ) -> str:
-    before_json = (
-        None
-        if before is None
-        else json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
-    after_json = (
-        None
-        if after is None
-        else json.dumps(after, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
+    before_json = None if before is None else canonical_json(before)
+    after_json = None if after is None else canonical_json(after)
     decision_id = str(uuid.uuid4())
     session.add(
         ClassificationDecision(
@@ -472,6 +465,8 @@ def _write_decision_and_audit(
             transaction_version=transaction_version,
             before_json=before_json,
             after_json=after_json,
+            before_json_sha256=canonical_sha256(before),
+            after_json_sha256=canonical_sha256(after),
         )
     )
     session.add(

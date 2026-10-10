@@ -380,7 +380,7 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
         rows_before = _snapshot_rows(database)
 
         result = upgrade_to_head(settings)
-        assert result.revision == "0003_t20_review"
+        assert result.revision == "0004_t20_snapshot_guards"
         assert result.backup is not None
         assert stat.S_IMODE(result.backup.database_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(result.backup.manifest_path.stat().st_mode) == 0o600
@@ -393,7 +393,7 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
         assert rows_after == rows_before
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "0003_t20_review",
+                "0004_t20_snapshot_guards",
             )
             assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -513,7 +513,7 @@ def test_MIG_0002_downgrade_requires_explicit_verified_backup(
     settings = Settings(
         database_url=f"sqlite:///{database}", data_dir=tmp_path / "private-data", _env_file=None
     )
-    assert upgrade_to_head(settings).revision == "0003_t20_review"
+    assert upgrade_to_head(settings).revision == "0004_t20_snapshot_guards"
     config = Config(str(ROOT / "alembic.ini"))
     config.attributes["settings"] = settings
     config.attributes["operation"] = "downgrade"
@@ -521,15 +521,22 @@ def test_MIG_0002_downgrade_requires_explicit_verified_backup(
     monkeypatch.delenv("COMPTES_DOWNGRADE_BACKUP", raising=False)
     with pytest.raises(RuntimeError, match="COMPTES_ALLOW_DATA_LOSS_DOWNGRADE=1"):
         command.downgrade(config, "0001_initial")
-    assert current_revision(settings.database_url) == "0003_t20_review"
+    assert current_revision(settings.database_url) == "0004_t20_snapshot_guards"
 
     backup_t20 = create_verified_backup(
         database,
         tmp_path / "verified-backups",
-        source_revision="0003_t20_review",
+        source_revision="0004_t20_snapshot_guards",
     )
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t20.database_path))
+    command.downgrade(config, "0003_t20_review")
+    backup_t20_review = create_verified_backup(
+        database,
+        tmp_path / "verified-backups",
+        source_revision="0003_t20_review",
+    )
+    monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup_t20_review.database_path))
     command.downgrade(config, "0002_t17_refund_safety")
     backup_t17 = create_verified_backup(
         database,

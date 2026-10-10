@@ -32,6 +32,7 @@ from app.services.allocations import (
     _reject_proposed_links_after_allocation_change,
     _state_in_session,
 )
+from app.services.snapshot_integrity import canonical_json, snapshot_sha256
 
 _HUMAN_ACTIONS = frozenset({"confirm", "edit", "split", "reject", "clear"})
 _ALLOCATION_ORIGINS = frozenset({"manual", "rule", "history", "llm"})
@@ -100,7 +101,7 @@ def _uuid4(value: object, field: str) -> str:
 
 
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return canonical_json(value)
 
 
 def _parse_allocations(raw: str | None, *, wrapped: bool = False) -> tuple[dict[str, Any], ...]:
@@ -201,6 +202,130 @@ def _rows_signature(rows: list[Allocation]) -> tuple[tuple[object, ...], ...]:
             key=repr,
         )
     )
+
+
+def _previous_audited_decision(
+    session: Session, decision: ClassificationDecision
+) -> ClassificationDecision | None:
+    statement = select(ClassificationDecision).where(
+        ClassificationDecision.transaction_id == decision.transaction_id,
+        ClassificationDecision.decision_id != decision.decision_id,
+    )
+    if decision.transaction_version is not None:
+        statement = statement.where(
+            ClassificationDecision.transaction_version < decision.transaction_version
+        ).order_by(
+            ClassificationDecision.transaction_version.desc(),
+            ClassificationDecision.created_at_utc.desc(),
+            ClassificationDecision.decision_id.desc(),
+        )
+    else:
+        statement = statement.where(
+            ClassificationDecision.created_at_utc < decision.created_at_utc
+        ).order_by(
+            ClassificationDecision.created_at_utc.desc(), ClassificationDecision.decision_id.desc()
+        )
+    return session.scalar(statement.limit(1))
+
+
+def _verify_decision_snapshots(
+    session: Session,
+    transaction: Transaction,
+    decision: ClassificationDecision,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Verify decision hashes and reconcile legacy snapshots with prior audit state."""
+    before_hash = decision.before_json_sha256
+    after_hash = decision.after_json_sha256
+    if (before_hash is None) != (after_hash is None):
+        raise _fail("UNDO_SNAPSHOT_INVALID", "Les empreintes de décision sont incomplètes.", 500)
+    has_fingerprints = before_hash is not None and after_hash is not None
+    if has_fingerprints:
+        try:
+            actual_before = snapshot_sha256(decision.before_json)
+            actual_after = snapshot_sha256(decision.after_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise _fail(
+                "UNDO_SNAPSHOT_INVALID", "L'instantané de décision est illisible.", 500
+            ) from error
+        if actual_before != before_hash or actual_after != after_hash:
+            raise _fail("UNDO_SNAPSHOT_INVALID", "L'empreinte d'un instantané est invalide.", 500)
+
+    before_parts = _parse_allocations(decision.before_json)
+    after_parts = _parse_allocations(decision.after_json)
+    previous = _previous_audited_decision(session, decision)
+    previous_parts: tuple[dict[str, Any], ...] | None = None
+    reconcile_previous = False
+    if previous is not None:
+        try:
+            if (
+                previous.before_json_sha256 is not None
+                and snapshot_sha256(previous.before_json) != previous.before_json_sha256
+            ):
+                raise ValueError("empreinte précédente avant invalide")
+            if (
+                previous.after_json_sha256 is not None
+                and snapshot_sha256(previous.after_json) != previous.after_json_sha256
+            ):
+                raise ValueError("empreinte précédente après invalide")
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise _fail(
+                "UNDO_SNAPSHOT_INVALID", "L'état de la décision précédente est invalide.", 500
+            ) from error
+        previous_parts = _parse_allocations(previous.after_json)
+        contiguous = (
+            decision.transaction_version is None
+            or previous.transaction_version is None
+            or previous.transaction_version == decision.transaction_version - 1
+        )
+        reconcile_previous = contiguous or not has_fingerprints
+        if contiguous and _business_signature(before_parts) != _business_signature(previous_parts):
+            raise _fail(
+                "UNDO_SNAPSHOT_INVALID",
+                "L'instantané ne correspond pas à l'état audité précédent.",
+                500,
+            )
+    elif not has_fingerprints:
+        raise _fail(
+            "UNDO_SNAPSHOT_INVALID",
+            "Une décision historique sans empreinte n'a pas d'état audité précédent.",
+            500,
+        )
+
+    if not has_fingerprints and (
+        previous_parts is None
+        or _business_signature(before_parts) != _business_signature(previous_parts)
+    ):
+        raise _fail(
+            "UNDO_SNAPSHOT_INVALID",
+            "Une décision historique sans empreinte ne concorde pas avec l'état précédent.",
+            500,
+        )
+
+    _validate_restore_parts(session, transaction, before_parts)
+    _validate_restore_parts(session, transaction, after_parts)
+    restored_total = sum(part["amount_cents"] for part in before_parts)
+    residual = transaction.amount_cents - restored_total
+    if restored_total + residual != transaction.amount_cents:
+        raise _fail(
+            "UNDO_SNAPSHOT_INVALID",
+            "Les allocations et le résidu ne couvrent pas l'opération.",
+            500,
+        )
+    if previous_parts is not None and reconcile_previous:
+        prior_total = sum(part["amount_cents"] for part in previous_parts)
+        prior_residual = transaction.amount_cents - prior_total
+        if (
+            restored_total != prior_total
+            or residual != prior_residual
+            or restored_total + residual != transaction.amount_cents
+            or prior_total + prior_residual != transaction.amount_cents
+        ):
+            raise _fail(
+                "UNDO_SNAPSHOT_INVALID",
+                "Le total restauré ne correspond pas à l'état audité précédent.",
+                500,
+            )
+    return before_parts, after_parts
 
 
 def _has_active_refund_link(session: Session, transaction_id: str) -> bool:
@@ -381,6 +506,8 @@ def _apply_inverse_in_session(
         transaction_version=transaction.version + 1,
         before_json=_json(before),
         after_json=_json(after),
+        before_json_sha256=snapshot_sha256(_json(before)),
+        after_json_sha256=snapshot_sha256(_json(after)),
     )
     event = AuditEvent(
         audit_event_id=audit_event_id,
@@ -484,6 +611,7 @@ def undo_decision(
         transaction = session.get(Transaction, target.transaction_id)
         if transaction is None:
             raise _fail("DECISION_NOT_FOUND", "Transaction de décision introuvable.", 404)
+        before_parts, after_parts = _verify_decision_snapshots(session, transaction, target)
         if target.undone_by_decision_id is not None:
             undo_decision = session.get(ClassificationDecision, target.undone_by_decision_id)
             if undo_decision is None:
@@ -498,10 +626,6 @@ def undo_decision(
             )
         _check_transaction_version(transaction, expected)
         current = _current_allocations(session, transaction.transaction_id)
-        before_parts = _parse_allocations(target.before_json)
-        after_parts = _parse_allocations(target.after_json)
-        _validate_restore_parts(session, transaction, before_parts)
-        _validate_restore_parts(session, transaction, after_parts)
         if _has_active_refund_link(session, transaction.transaction_id):
             raise _fail(
                 "UNDO_REFUND_LINK_ACTIVE",
@@ -558,8 +682,34 @@ def _undo_rule_execution_in_session(
     if transaction is None:
         raise _fail("UNDO_SNAPSHOT_INVALID", "La transaction de l'exécution est absente.", 500)
     _check_transaction_version(transaction, expected_version)
-    before_parts = _parse_allocations(execution.before_json, wrapped=True)
-    after_parts = _parse_allocations(execution.after_json, wrapped=True)
+    source_decision = (
+        session.get(ClassificationDecision, execution.classification_decision_id)
+        if execution.classification_decision_id
+        else None
+    )
+    if source_decision is None or source_decision.action == "undo":
+        raise _fail(
+            "UNDO_SNAPSHOT_INVALID",
+            "L'exécution historique n'est pas rapprochée d'une décision source.",
+            500,
+        )
+    if source_decision.undone_by_decision_id is not None:
+        raise _fail("RULE_BATCH_UNDO_INCOMPLETE", "La décision du lot est déjà annulée.")
+    source_before_parts, source_after_parts = _verify_decision_snapshots(
+        session, transaction, source_decision
+    )
+    execution_before_parts = _parse_allocations(execution.before_json, wrapped=True)
+    execution_after_parts = _parse_allocations(execution.after_json, wrapped=True)
+    if _business_signature(execution_before_parts) != _business_signature(
+        source_before_parts
+    ) or _business_signature(execution_after_parts) != _business_signature(source_after_parts):
+        raise _fail(
+            "UNDO_SNAPSHOT_INVALID",
+            "Les snapshots d'exécution divergent de la décision auditée.",
+            500,
+        )
+    before_parts = source_before_parts
+    after_parts = source_after_parts
     if execution.rule_version is not None:
         for raw in (execution.before_json, execution.after_json):
             try:
@@ -570,26 +720,15 @@ def _undo_rule_execution_in_session(
                 ) from error
             if isinstance(value, dict) and value.get("rule_version") != execution.rule_version:
                 raise _fail("UNDO_SNAPSHOT_INVALID", "La version du lot ne correspond pas.", 500)
-    _validate_restore_parts(session, transaction, before_parts)
-    _validate_restore_parts(session, transaction, after_parts)
     current = _current_allocations(session, transaction.transaction_id)
-    source_decision = (
-        session.get(ClassificationDecision, execution.classification_decision_id)
-        if execution.classification_decision_id
-        else None
-    )
-    if source_decision is not None and source_decision.undone_by_decision_id is not None:
-        raise _fail("RULE_BATCH_UNDO_INCOMPLETE", "La décision du lot est déjà annulée.")
-    cutoff = (
-        source_decision.created_at_utc if source_decision is not None else execution.executed_at_utc
-    )
+    cutoff = source_decision.created_at_utc
     later = _later_human_decisions(
         session,
         transaction.transaction_id,
-        exclude_decision_id=source_decision.decision_id if source_decision is not None else None,
+        exclude_decision_id=source_decision.decision_id,
         not_before=cutoff,
     )
-    recorded_version = source_decision.transaction_version if source_decision is not None else None
+    recorded_version = source_decision.transaction_version
     if _has_active_refund_link(session, transaction.transaction_id):
         raise _fail(
             "UNDO_REFUND_LINK_ACTIVE",

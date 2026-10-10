@@ -17,6 +17,7 @@ from app.classification.rule_store import (
     RuleDraft,
     approve_rule,
     create_rule,
+    exclude_transaction_from_rule,
 )
 from app.core.config import Settings
 from app.core.errors import AppError
@@ -25,6 +26,7 @@ from app.db.models import (
     Account,
     AuditEvent,
     ClassificationDecision,
+    Rule,
     RuleExecution,
     Transaction,
 )
@@ -35,6 +37,7 @@ from app.services import review as review_service
 from app.services.allocations import AllocationPart, allocate
 from app.services.categories import sync_taxonomy
 from app.services.review import undo_decision, undo_rule_application
+from app.services.snapshot_integrity import canonical_sha256
 
 
 def _engine(tmp_path: Path):
@@ -158,6 +161,7 @@ def test_RULE_04_manual_reventilation_undo_restores_exact_cents_and_is_idempoten
         with session_scope(engine) as session:
             transaction = session.get(Transaction, transaction_id)
             target = session.get(ClassificationDecision, corrected.decision_id)
+            undo_record = session.get(ClassificationDecision, undone.undo_decision_id)
             audit = session.scalar(
                 select(AuditEvent)
                 .where(
@@ -169,6 +173,16 @@ def test_RULE_04_manual_reventilation_undo_restores_exact_cents_and_is_idempoten
             )
             assert transaction is not None and transaction.amount_cents == -10_000
             assert target is not None and target.undone_by_decision_id == undone.undo_decision_id
+            assert target.before_json is not None and target.after_json is not None
+            assert target.before_json_sha256 == canonical_sha256(json.loads(target.before_json))
+            assert target.after_json_sha256 == canonical_sha256(json.loads(target.after_json))
+            assert undo_record is not None
+            assert undo_record.before_json_sha256 == canonical_sha256(
+                json.loads(undo_record.before_json)
+            )
+            assert undo_record.after_json_sha256 == canonical_sha256(
+                json.loads(undo_record.after_json)
+            )
             assert audit is not None and audit.actor == "reviewer-synthetic"
             assert "CONFIDENTIAL-REVIEW-SYNTHETIC" not in (audit.before_json or "")
             assert "CONFIDENTIAL-REVIEW-SYNTHETIC" not in (audit.after_json or "")
@@ -291,6 +305,265 @@ def test_RULE_04_invalid_snapshot_returns_contract_error_without_writes(tmp_path
 
         assert failure.value.code == "UNDO_SNAPSHOT_INVALID"
         assert _table_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_04_plausible_legacy_snapshot_must_match_previous_audit_state(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    try:
+        (transaction_id,) = _transactions(engine, (-4_000,))
+        first = allocate(
+            engine,
+            transaction_id,
+            _parts("groceries", -4_000),
+            mode="complete",
+            origin="manual",
+            actor="reviewer-synthetic",
+            expected_version=1,
+        )
+        corrected = allocate(
+            engine,
+            transaction_id,
+            _parts("clothing", -4_000),
+            mode="complete",
+            origin="manual",
+            actor="reviewer-synthetic",
+            expected_version=first.version,
+        )
+        assert corrected.decision_id is not None
+
+        with write_transaction(engine) as session:
+            row = session.get(ClassificationDecision, corrected.decision_id)
+            assert row is not None
+            snapshot = json.loads(row.before_json)
+            snapshot[0]["amount_cents"] = -1_000
+            trigger_sql = (
+                session.connection()
+                .exec_driver_sql(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name='trg_classification_decisions_undo_guard'"
+                )
+                .scalar_one()
+            )
+            connection = session.connection()
+            connection.exec_driver_sql("DROP TRIGGER trg_classification_decisions_undo_guard")
+            connection.exec_driver_sql(
+                "UPDATE classification_decisions SET before_json=?, before_json_sha256=NULL, "
+                "after_json_sha256=NULL, version=version+1 WHERE decision_id=?",
+                (
+                    json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+                    corrected.decision_id,
+                ),
+            )
+            connection.exec_driver_sql(trigger_sql)
+
+        before = _table_snapshot(engine)
+        with pytest.raises(AppError) as failure:
+            undo_decision(
+                engine,
+                corrected.decision_id,
+                expected_version=corrected.version,
+                actor="reviewer-synthetic",
+            )
+
+        assert failure.value.code == "UNDO_SNAPSHOT_INVALID"
+        assert _table_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_04_legacy_snapshot_without_previous_audit_is_refused_without_writes(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    try:
+        (transaction_id,) = _transactions(engine, (-2_000,))
+        state = allocate(
+            engine,
+            transaction_id,
+            _parts("groceries", -2_000),
+            mode="complete",
+            origin="manual",
+            actor="reviewer-synthetic",
+            expected_version=1,
+        )
+        assert state.decision_id is not None
+        with write_transaction(engine) as session:
+            row = session.get(ClassificationDecision, state.decision_id)
+            assert row is not None
+            trigger_sql = (
+                session.connection()
+                .exec_driver_sql(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name='trg_classification_decisions_undo_guard'"
+                )
+                .scalar_one()
+            )
+            connection = session.connection()
+            connection.exec_driver_sql("DROP TRIGGER trg_classification_decisions_undo_guard")
+            connection.exec_driver_sql(
+                "UPDATE classification_decisions SET before_json_sha256=NULL, "
+                "after_json_sha256=NULL, version=version+1 WHERE decision_id=?",
+                (state.decision_id,),
+            )
+            connection.exec_driver_sql(trigger_sql)
+
+        before = _table_snapshot(engine)
+        with pytest.raises(AppError) as failure:
+            undo_decision(
+                engine,
+                state.decision_id,
+                expected_version=state.version,
+                actor="reviewer-synthetic",
+            )
+        assert failure.value.code == "UNDO_SNAPSHOT_INVALID"
+        assert _table_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_04_undo_chain_stops_when_prior_decision_version_is_stale(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        (transaction_id,) = _transactions(engine, (-10_001,))
+        first = allocate(
+            engine,
+            transaction_id,
+            (
+                AllocationPart(flow_kind="expense", category_id="groceries", amount_cents=-4_000),
+                AllocationPart(flow_kind="expense", category_id="clothing", amount_cents=-6_001),
+            ),
+            mode="complete",
+            origin="manual",
+            actor="reviewer-synthetic",
+            expected_version=1,
+        )
+        second = allocate(
+            engine,
+            transaction_id,
+            _parts("groceries", -10_001),
+            mode="complete",
+            origin="manual",
+            actor="reviewer-synthetic",
+            expected_version=first.version,
+        )
+        assert first.decision_id is not None and second.decision_id is not None
+
+        restored = undo_decision(
+            engine,
+            second.decision_id,
+            expected_version=second.version,
+            actor="reviewer-synthetic",
+        )
+        assert sorted(
+            (row.category_id, row.amount_cents) for row in restored.state.allocations
+        ) == [("clothing", -6_001), ("groceries", -4_000)]
+        assert sum(row.amount_cents for row in restored.state.allocations) == -10_001
+        before = _table_snapshot(engine)
+
+        with pytest.raises(AppError) as failure:
+            undo_decision(
+                engine,
+                first.decision_id,
+                expected_version=restored.state.version,
+                actor="reviewer-synthetic",
+            )
+
+        assert failure.value.code == "UNDO_STATE_DIVERGED"
+        assert _table_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_RULE_04_rule_motif_is_hashed_in_audit_and_not_exposed_in_errors_or_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = _engine(tmp_path)
+    marker = "REVIEW-SYNTHETIC"
+    try:
+        (transaction_id,) = _transactions(engine, (-3_000,))
+        rule = _approved_rule(engine)
+        batch_id = str(uuid4())
+        applied = apply_rule(
+            engine,
+            rule.rule_id,
+            scope="selection",
+            selection=(transaction_id,),
+            expected_version=rule.version,
+            actor="reviewer-synthetic",
+            batch_id=batch_id,
+        )
+        exclude_transaction_from_rule(
+            engine,
+            rule.rule_id,
+            transaction_id,
+            expected_version=rule.version,
+            actor="reviewer-synthetic",
+            reason=marker,
+        )
+        with session_scope(engine) as session:
+            audit_json = " ".join(
+                (row.before_json or "") + (row.after_json or "")
+                for row in session.scalars(select(AuditEvent))
+            )
+            execution_json = " ".join(
+                (row.before_json or "") + (row.after_json or "")
+                for row in session.scalars(select(RuleExecution))
+            )
+            rule_row = session.get(Rule, rule.rule_id)
+            assert rule_row is not None
+            assert marker in rule_row.scope_json
+            assert '"label_pattern_length":18' in audit_json
+            assert (
+                f'"label_pattern_sha256":"{hashlib.sha256(f"*{marker}*".encode()).hexdigest()}"'
+                in audit_json
+            )
+            assert f'"reason_sha256":"{hashlib.sha256(marker.encode()).hexdigest()}"' in audit_json
+        assert marker not in audit_json
+        assert marker not in execution_json
+        assert marker not in caplog.text
+
+        with write_transaction(engine) as session:
+            execution = session.scalar(
+                select(RuleExecution).where(RuleExecution.batch_id == batch_id)
+            )
+            assert execution is not None and execution.classification_decision_id is not None
+            decision = session.get(ClassificationDecision, execution.classification_decision_id)
+            assert decision is not None
+            trigger_sql = (
+                session.connection()
+                .exec_driver_sql(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name='trg_classification_decisions_undo_guard'"
+                )
+                .scalar_one()
+            )
+            connection = session.connection()
+            connection.exec_driver_sql("DROP TRIGGER trg_classification_decisions_undo_guard")
+            connection.exec_driver_sql(
+                "UPDATE classification_decisions SET before_json=?, version=version+1 "
+                "WHERE decision_id=?",
+                (json.dumps([{"label": marker}], separators=(",", ":")), decision.decision_id),
+            )
+            connection.exec_driver_sql(trigger_sql)
+
+        with pytest.raises(AppError) as failure:
+            undo_rule_application(
+                engine,
+                batch_id,
+                expected_versions={transaction_id: applied.allocation_states[0].version},
+                actor="reviewer-synthetic",
+            )
+        assert failure.value.code == "UNDO_SNAPSHOT_INVALID"
+        assert marker not in str(failure.value)
+        assert marker not in caplog.text
     finally:
         engine.dispose()
 

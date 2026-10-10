@@ -2,7 +2,7 @@
 
 ## Source de vérité
 
-`backend/app/db/migrations/sql/0001_initial.sql` et `versions/0001_initial.py` sont gelées au commit `1066748` (SHA-256 vérifiés par `MIG-FREEZE-01`). La révision `0002_t17_refund_safety` porte les évolutions T17 et `0003_t20_review` ajoute les liens d'annulation versionnés. `docs/examples/schema.sql` représente désormais la tête `0001 + 0002 + 0003`; les tests comparent le résultat Alembic à tous les objets tables, index et triggers de cette référence.
+`backend/app/db/migrations/sql/0001_initial.sql` et `versions/0001_initial.py` sont gelées au commit `1066748` (SHA-256 vérifiés par `MIG-FREEZE-01`). La révision `0002_t17_refund_safety` porte les évolutions T17, `0003_t20_review` ajoute les liens d'annulation versionnés et `0004_t20_snapshot_guards` ajoute les empreintes canoniques des snapshots et durcit les liens d'annulation. `docs/examples/schema.sql` représente désormais la tête `0001 + 0002 + 0003 + 0004`; les tests comparent le résultat Alembic à tous les objets tables, index et triggers de cette référence.
 
 `0002` reconstruit uniquement `classification_decisions` (copie de toutes les
 lignes et colonnes, avec `clear` ajouté à l'ensemble des actions), ajoute

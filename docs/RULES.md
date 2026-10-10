@@ -88,6 +88,13 @@ aux redémarrages et aux relectures ; elle ne modifie pas la transaction.
 Le nombre d'exceptions est plafonné à 10 000 par règle ; dépasser ce plafond
 renvoie `RULE_EXCEPTION_LIMIT` sans changer la règle.
 
+Les événements d'audit de règle conservent son ID, sa version et les données
+métier nécessaires. Un `label_pattern` n'y apparaît qu'en longueur et empreinte
+SHA-256 ; les raisons libres d'exception sont résumées de la même manière. Le
+motif et les raisons restent dans `rules.scope_json`. Les `rule_executions`
+gardent des snapshots d'allocations limités aux catégories, centimes et
+dimensions de revue, sans texte de transaction ni motif.
+
 ## Simulation et application
 
 `simulate_rule()` n'appelle que `session_scope()` (SQLite `query_only=ON`). Elle
@@ -114,7 +121,7 @@ L'allocation, sa décision/audit et les lignes `rule_executions` et
 contiennent la version de règle. Si la trace échoue, l'allocation est annulée;
 un rejeu après succès retrouve l'exécution et ne touche pas l'allocation.
 
-### Limite transactionnelle du lot (proposition ADR-029)
+### Limite transactionnelle du lot (ADR-029 acceptée)
 
 Chaque opération traitée et sa trace forment une unité atomique, mais une
 application portant sur plusieurs transactions n'est pas un commit unique. Si
@@ -128,8 +135,8 @@ décision produite sur chaque exécution, ainsi que la version transactionnelle
 de cette décision. Le code conserve l'atomicité par opération déjà décrite
 ci-dessus et rend chaque lot annulable dans une transaction SQLite. Un rejeu
 avec le même `batch_id` reprend les opérations non encore exécutées et n'ajoute
-pas de trace en double. L'acceptation métier de l'application partielle entre
-opérations, proposée par ADR-029, reste à arbitrer par l'orchestrateur.
+pas de trace en double. L'application partielle entre opérations est la
+politique métier acceptée par ADR-029 ; l'atomicité reste assurée par opération.
 Pour pouvoir rejouer ou annuler un appel qui échoue après un commit d'opération,
 l'appelant doit générer puis fournir un `batch_id` stable avant l'appel. Si le
 service le génère lui-même, cet ID n'est disponible que dans le résultat d'un
