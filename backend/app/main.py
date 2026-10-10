@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -30,13 +30,35 @@ from app.services.import_preview_store import ImportPreviewStore
 from app.services.transactions import TransactionSnapshotStore
 
 logger = logging.getLogger(__name__)
+_SWEEP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _consume_sweep_result(future: asyncio.Future[int]) -> None:
+    """Retrieve a late worker exception after a shutdown timeout."""
+    with suppress(asyncio.CancelledError):
+        future.exception()
 
 
 async def _expire_transaction_snapshots(store: TransactionSnapshotStore) -> None:
     while True:
         await asyncio.sleep(store.sweep_interval_milliseconds / 1000)
+        loop = asyncio.get_running_loop()
+        sweep = loop.run_in_executor(None, store.expire_expired)
         try:
-            await asyncio.to_thread(store.expire_expired)
+            await asyncio.shield(sweep)
+        except asyncio.CancelledError:
+            # Cancelling the asyncio wrapper cannot stop its worker thread. Wait
+            # briefly before lifespan cleanup disposes the engines it may use.
+            done, _pending = await asyncio.wait({sweep}, timeout=_SWEEP_SHUTDOWN_TIMEOUT_SECONDS)
+            if done:
+                _consume_sweep_result(sweep)
+            else:
+                logger.warning(
+                    "transaction_snapshot_sweep_shutdown_timeout timeout_seconds=%s",
+                    _SWEEP_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+                sweep.add_done_callback(_consume_sweep_result)
+            raise
         except Exception as error:
             logger.warning(
                 "transaction_snapshot_sweep_failed exception_type=%s correlation_id=%s",

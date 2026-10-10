@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import threading
@@ -445,6 +446,59 @@ def test_IMP_14_snapshot_sweeper_error_does_not_block_shutdown_cleanup(
 
         assert failed.wait(timeout=2)
 
+    assert store.snapshot_count == 0
+    assert snapshot_engine.pool.checkedout() == 0
+    assert db_engine.pool.checkedout() == 0
+
+
+@pytest.mark.integration
+def test_IMP_14_snapshot_sweeper_waits_for_running_worker_before_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-cancel")
+    store = app.state.transaction_snapshot_store
+    store._ttl_milliseconds = 100
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    def block_expiration() -> int:
+        worker_started.set()
+        try:
+            if not release_worker.wait(timeout=10):
+                raise RuntimeError("synthetic worker release timeout")
+            return 0
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(store, "expire_expired", block_expiration)
+    snapshot_engine = app.state.transaction_snapshot_engine
+    db_engine = app.state.db_engine
+    store.create(snapshot_engine, datetime.now(UTC).isoformat())
+
+    async def cancel_lifespan() -> None:
+        async def serve() -> None:
+            async with app.router.lifespan_context(app):
+                await asyncio.Event().wait()
+
+        lifespan_task = asyncio.create_task(serve())
+        started = await asyncio.to_thread(worker_started.wait, 2)
+        assert started, "sweep worker did not start"
+
+        lifespan_task.cancel()
+        await asyncio.sleep(0.05)
+        assert not lifespan_task.done(), "lifespan returned while sweep worker was blocked"
+
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await lifespan_task
+
+    try:
+        asyncio.run(cancel_lifespan())
+    finally:
+        release_worker.set()
+
+    assert worker_finished.is_set()
     assert store.snapshot_count == 0
     assert snapshot_engine.pool.checkedout() == 0
     assert db_engine.pool.checkedout() == 0
