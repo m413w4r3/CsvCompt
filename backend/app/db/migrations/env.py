@@ -68,8 +68,7 @@ def run_migrations_online() -> None:
                 head_revision = ScriptDirectory.from_config(config).get_current_head()
                 version_table_exists = (
                     dbapi_connection.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' "
-                        "AND name='alembic_version'"
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'"
                     ).fetchone()
                     is not None
                 )

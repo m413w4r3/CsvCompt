@@ -19,6 +19,7 @@ from app.db.models import Transaction
 from app.db.session import session_scope
 from app.main import create_app
 from app.services import import_commit
+from app.services.transactions import TransactionSnapshotStore
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -111,12 +112,8 @@ def test_IMP_14_transaction_search_uses_normalized_punctuation(tmp_path: Path) -
         _commit(client, _ready_preview(client, raw))
 
         plain = client.get("/api/v1/transactions", params={"q": "OPERATION", "limit": 100})
-        punctuated = client.get(
-            "/api/v1/transactions", params={"q": "OPERATION%", "limit": 100}
-        )
-        separators_only = client.get(
-            "/api/v1/transactions", params={"q": "%_-", "limit": 100}
-        )
+        punctuated = client.get("/api/v1/transactions", params={"q": "OPERATION%", "limit": 100})
+        separators_only = client.get("/api/v1/transactions", params={"q": "%_-", "limit": 100})
         unfiltered = client.get("/api/v1/transactions", params={"limit": 100})
 
     responses = (plain, punctuated, separators_only, unfiltered)
@@ -232,6 +229,26 @@ def test_IMP_14_transaction_snapshot_excludes_commit_finalized_after_page_one(
         assert first_page.status_code == 200, first_page.text
         first = first_page.json()
         assert first["next_cursor"]
+        held_cursors = [(first["next_cursor"], {}, first["total_count"])]
+        held_filters = [
+            {"q": "OPERATION%"},
+            {"q": "opération"},
+        ]
+        for index in range(2):
+            filters = held_filters[index]
+            pinned_page = client.get(
+                "/api/v1/transactions",
+                params={"limit": 1, **filters},
+            )
+            assert pinned_page.status_code == 200, pinned_page.text
+            assert pinned_page.json()["next_cursor"]
+            held_cursors.append(
+                (
+                    pinned_page.json()["next_cursor"],
+                    filters,
+                    pinned_page.json()["total_count"],
+                )
+            )
 
         release.set()
         worker.join(timeout=20)
@@ -239,20 +256,237 @@ def test_IMP_14_transaction_snapshot_excludes_commit_finalized_after_page_one(
         assert "error" not in outcome
         assert outcome["response"]["status"] == "committed"  # type: ignore[index]
 
-        next_page = client.get(
-            "/api/v1/transactions",
-            params={"limit": 100, "cursor": first["next_cursor"]},
-        )
-        assert next_page.status_code == 200, next_page.text
-        payload = next_page.json()
-        assert payload["total_count"] == first["total_count"]
-        assert all(
-            not (
-                row["booked_on"] == "2026-01-01"
-                and "NOUVELLE OPERATION" in row["raw_label_preview"]
+        for held_cursor, filters, expected_total in held_cursors:
+            next_page = client.get(
+                "/api/v1/transactions",
+                params={"limit": 100, "cursor": held_cursor, **filters},
             )
-            for row in payload["items"]
+            assert next_page.status_code == 200, next_page.text
+            payload = next_page.json()
+            assert payload["total_count"] == expected_total
+            assert all(
+                not (
+                    row["booked_on"] == "2026-01-01"
+                    and "NOUVELLE OPERATION" in row["raw_label_preview"]
+                )
+                for row in payload["items"]
+            )
+
+
+@pytest.mark.integration
+def test_IMP_14_transaction_snapshot_pool_lru_handles_33_pages_and_rapid_filters(
+    tmp_path: Path,
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-pool-lru")
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        pending_commit = _ready_preview(client, raw)
+        store = client.app.state.transaction_snapshot_store
+        snapshot_engine = client.app.state.transaction_snapshot_engine
+        main_engine = client.app.state.db_engine
+        first_cursor: str | None = None
+
+        for _index in range(33):
+            started = time.perf_counter()
+            response = client.get("/api/v1/transactions", params={"limit": 1})
+            elapsed = time.perf_counter() - started
+            assert response.status_code == 200, response.text
+            assert elapsed < 1
+            assert response.json()["next_cursor"]
+            if first_cursor is None:
+                first_cursor = response.json()["next_cursor"]
+            assert store.snapshot_count <= 3
+
+        assert store.snapshot_count == 3
+        assert snapshot_engine.pool.checkedout() == 3
+        assert main_engine.pool.checkedout() == 0
+        stale = client.get("/api/v1/transactions", params={"limit": 1, "cursor": first_cursor})
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "CURSOR_STALE"
+
+        for index in range(50):
+            response = client.get(
+                "/api/v1/transactions",
+                params={
+                    "limit": 1,
+                    "q": "OPERATION%" if index % 2 == 0 else "opération",
+                    "classification": "all" if index % 2 == 0 else "unclassified",
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["next_cursor"]
+            assert store.snapshot_count <= 3
+
+        started = time.perf_counter()
+        listed = client.get("/api/v1/transactions", params={"limit": 1})
+        assert listed.status_code == 200, listed.text
+        assert time.perf_counter() - started < 1
+
+        started = time.perf_counter()
+        committed = client.post(
+            f"/api/v1/imports/{pending_commit['preview_id']}/commit",
+            headers={"Idempotency-Key": str(uuid4())},
+            json={"expected_version": pending_commit["version"]},
         )
+        assert committed.status_code == 200, committed.text
+        assert time.perf_counter() - started < 1
+
+        started = time.perf_counter()
+        accounts = client.get("/api/v1/accounts")
+        assert accounts.status_code == 200, accounts.text
+        assert time.perf_counter() - started < 1
+        assert snapshot_engine.pool.checkedout() == 3
+        assert main_engine.pool.checkedout() == 0
+
+
+@pytest.mark.integration
+def test_IMP_14_expired_snapshot_closes_without_navigation_and_allows_wal_truncate(
+    tmp_path: Path,
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-expiry")
+    app.state.transaction_snapshot_store = TransactionSnapshotStore(
+        ttl_milliseconds=150, max_snapshots=3
+    )
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        store = client.app.state.transaction_snapshot_store
+        snapshot_engine = client.app.state.transaction_snapshot_engine
+        database_engine = client.app.state.db_engine
+        first = client.get("/api/v1/transactions", params={"limit": 1})
+        assert first.status_code == 200, first.text
+        cursor = first.json()["next_cursor"]
+        assert cursor
+        assert store.snapshot_count == 1
+        assert snapshot_engine.pool.checkedout() == 1
+
+        deadline = time.monotonic() + 1.5
+        while store.snapshot_count and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert store.snapshot_count == 0
+        assert snapshot_engine.pool.checkedout() == 0
+
+        stale = client.get("/api/v1/transactions", params={"limit": 1, "cursor": cursor})
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "CURSOR_STALE"
+        invalid = client.get("/api/v1/transactions", params={"cursor": "invalid"})
+        assert invalid.status_code == 422
+        assert invalid.json()["error"]["code"] == "CURSOR_INVALID"
+
+        with database_engine.connect() as connection:
+            checkpoint = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+        assert checkpoint[0] == 0
+        assert snapshot_engine.pool.checkedout() == 0
+
+
+@pytest.mark.integration
+def test_IMP_14_snapshot_sweeper_recovers_after_repeated_expiration_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-recovery")
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+    store = app.state.transaction_snapshot_store
+    store._ttl_milliseconds = 300
+    original_expire = store.expire_expired
+    calls = 0
+    recovered = threading.Event()
+
+    def fail_twice_then_expire() -> int:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise RuntimeError("synthetic sweep failure")
+        recovered.set()
+        return original_expire()
+
+    monkeypatch.setattr(store, "expire_expired", fail_twice_then_expire)
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        first = client.get("/api/v1/transactions", params={"limit": 1})
+        assert first.status_code == 200, first.text
+        assert first.json()["next_cursor"]
+        assert store.snapshot_count == 1
+
+        deadline = time.monotonic() + 3
+        while store.snapshot_count and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert calls >= 3
+        assert recovered.is_set()
+        assert store.snapshot_count == 0
+
+
+@pytest.mark.integration
+def test_IMP_14_snapshot_sweeper_error_does_not_block_shutdown_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-shutdown")
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+    store = app.state.transaction_snapshot_store
+    store._ttl_milliseconds = 100
+    failed = threading.Event()
+
+    def fail_expiration() -> int:
+        failed.set()
+        raise RuntimeError("synthetic shutdown sweep failure")
+
+    monkeypatch.setattr(store, "expire_expired", fail_expiration)
+    snapshot_engine = app.state.transaction_snapshot_engine
+    db_engine = app.state.db_engine
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        first = client.get("/api/v1/transactions", params={"limit": 1})
+        assert first.status_code == 200, first.text
+        assert store.snapshot_count == 1
+        assert snapshot_engine.pool.checkedout() == 1
+
+        assert failed.wait(timeout=2)
+
+    assert store.snapshot_count == 0
+    assert snapshot_engine.pool.checkedout() == 0
+    assert db_engine.pool.checkedout() == 0
+
+
+@pytest.mark.integration
+def test_IMP_14_transaction_snapshot_saturation_is_retryable_503(tmp_path: Path) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-saturation")
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        store = client.app.state.transaction_snapshot_store
+        snapshot_engine = client.app.state.transaction_snapshot_engine
+        locks: list[threading.Lock] = []
+        for _ in range(3):
+            store.create(snapshot_engine, "2026-10-10T12:00:00.000Z")
+        for entry in store._entries.values():
+            entry.lock.acquire()
+            locks.append(entry.lock)
+
+        try:
+            response = client.get("/api/v1/transactions", params={"limit": 1})
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "DATABASE_BUSY"
+        finally:
+            for lock in locks:
+                lock.release()
+            store.close_all()
+
+        assert snapshot_engine.pool.checkedout() == 0
+
+        held_connections = [snapshot_engine.connect() for _ in range(4)]
+        try:
+            pool_busy = client.get("/api/v1/transactions", params={"limit": 1})
+            assert pool_busy.status_code == 503
+            assert pool_busy.json()["error"]["code"] == "DATABASE_BUSY"
+        finally:
+            for connection in held_connections:
+                connection.close()
+
+        assert snapshot_engine.pool.checkedout() == 0
 
 
 def test_M_03_transaction_summary_never_returns_unsafe_cent_total() -> None:

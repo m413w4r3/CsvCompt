@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -41,7 +42,15 @@ class ImportArchive:
 
         descriptor = self._open_lifecycle_lock()
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_SH)
+            _archive_flock(descriptor, fcntl.LOCK_SH)
+        except ArchiveLockUnavailable as error:
+            os.close(descriptor)
+            raise AppError(
+                "ARCHIVE_LOCK_UNAVAILABLE",
+                503,
+                "Le système de fichiers ne permet pas de verrouiller l’archive; "
+                "réessayez ailleurs.",
+            ) from error
         except BaseException:
             os.close(descriptor)
             raise
@@ -50,7 +59,14 @@ class ImportArchive:
     @staticmethod
     def release_commit_reservation(descriptor: int) -> None:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _archive_flock(descriptor, fcntl.LOCK_UN)
+        except ArchiveLockUnavailable as error:
+            raise AppError(
+                "ARCHIVE_LOCK_UNAVAILABLE",
+                503,
+                "Le système de fichiers ne permet pas de verrouiller l’archive; "
+                "réessayez ailleurs.",
+            ) from error
         finally:
             os.close(descriptor)
 
@@ -123,7 +139,7 @@ def purge_orphaned_archives(
     lock_descriptor = archive._open_lifecycle_lock()
     try:
         try:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _archive_flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
 
@@ -189,6 +205,21 @@ def purge_orphaned_archives(
         return removed
     finally:
         try:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            _archive_flock(lock_descriptor, fcntl.LOCK_UN)
+        except ArchiveLockUnavailable:
+            pass
         finally:
             os.close(lock_descriptor)
+
+
+class ArchiveLockUnavailable(RuntimeError):
+    """The filesystem cannot provide the lock required for archive safety."""
+
+
+def _archive_flock(descriptor: int, operation: int) -> None:
+    try:
+        fcntl.flock(descriptor, operation)
+    except OSError as error:
+        if error.errno == errno.ENOLCK:
+            raise ArchiveLockUnavailable("Archive lifecycle locking is unavailable.") from error
+        raise

@@ -8,15 +8,14 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.db.errors import (
-    DatabaseBusyError,
-)
-from app.db.errors import (
-    VersionConflictError as DatabaseVersionConflictError,
-)
+from app.db.errors import DatabaseBusyError
+from app.db.errors import VersionConflictError as DatabaseVersionConflictError
+from app.db.session import is_sqlite_busy_error
 
 logger = logging.getLogger("comptes_familiaux.api")
 
@@ -105,6 +104,30 @@ def install_error_handlers(app: FastAPI) -> None:
             "La base est occupée; réessayez dans un instant.",
             {"retryable": True},
         )
+
+    @app.exception_handler(SQLAlchemyTimeoutError)
+    async def database_pool_timeout_handler(
+        _request: Request, _exc: SQLAlchemyTimeoutError
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            "DATABASE_BUSY",
+            "La base est occupée; réessayez dans un instant.",
+            {"retryable": True},
+        )
+
+    @app.exception_handler(OperationalError)
+    async def database_operational_error_handler(
+        _request: Request, exc: OperationalError
+    ) -> JSONResponse:
+        if is_sqlite_busy_error(exc):
+            return _error_response(
+                503,
+                "DATABASE_BUSY",
+                "La base est occupée; réessayez dans un instant.",
+                {"retryable": True},
+            )
+        raise exc
 
     @app.exception_handler(DatabaseVersionConflictError)
     async def version_conflict_handler(

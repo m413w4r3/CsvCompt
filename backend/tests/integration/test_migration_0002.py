@@ -309,12 +309,15 @@ def test_MIG_0002_nonempty_0001_upgrade_preserves_rows_and_guards(tmp_path: Path
             assert connection.execute(
                 "SELECT sum(amount_cents) FROM refund_link_allocation_parts"
             ).fetchone() == (1_000,)
-            assert connection.execute(
-                "SELECT count(*) FROM refund_link_allocation_parts"
-            ).fetchone()[0] >= 2
-            assert connection.execute(
-                "SELECT count(*) FROM source_rows"
-            ).fetchone() == (len(specs),)
+            assert (
+                connection.execute("SELECT count(*) FROM refund_link_allocation_parts").fetchone()[
+                    0
+                ]
+                >= 2
+            )
+            assert connection.execute("SELECT count(*) FROM source_rows").fetchone() == (
+                len(specs),
+            )
 
             # Les gardes de parts et d'états sont actives sur le fichier migré.
             confirmed_link = connection.execute(
@@ -441,9 +444,7 @@ def test_MIG_0002_downgrade_requires_explicit_verified_backup(
     base_reference = tmp_path / "frozen-base.sqlite"
     with sqlite3.connect(base_reference) as connection:
         connection.executescript(
-            (ROOT / "backend/app/db/migrations/sql/0001_initial.sql").read_text(
-                encoding="utf-8"
-            )
+            (ROOT / "backend/app/db/migrations/sql/0001_initial.sql").read_text(encoding="utf-8")
         )
     assert _objects(database) == _objects(base_reference)
     with sqlite3.connect(database) as connection:

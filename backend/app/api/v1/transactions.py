@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, date
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
@@ -35,18 +33,7 @@ from app.services.transactions import (
     transaction_statement,
 )
 
-
-@asynccontextmanager
-async def _transaction_lifespan(application: Any) -> AsyncIterator[None]:
-    yield
-    store = getattr(application.state, "transaction_snapshot_store", None)
-    if isinstance(store, TransactionSnapshotStore):
-        store.close_all()
-
-
-router = APIRouter(
-    prefix="/transactions", tags=["transactions"], lifespan=_transaction_lifespan
-)
+router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
 class TransactionSummary(BaseModel):
@@ -184,8 +171,7 @@ def list_transactions(
     )
     store = getattr(request.app.state, "transaction_snapshot_store", None)
     if not isinstance(store, TransactionSnapshotStore):
-        store = TransactionSnapshotStore()
-        request.app.state.transaction_snapshot_store = store
+        raise AppError("DATABASE_BUSY", 503, "La pagination locale est momentanément occupée.")
     snapshot_id: str
     last_date: str | None = None
     last_id: str | None = None
@@ -207,7 +193,9 @@ def list_transactions(
         created_snapshot = False
     else:
         snapshot_at = now
-        snapshot_id, _read_session = store.create(request.app.state.db_engine, snapshot_at)
+        snapshot_id, _read_session = store.create(
+            request.app.state.transaction_snapshot_engine, snapshot_at
+        )
         created_snapshot = True
 
     try:

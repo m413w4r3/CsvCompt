@@ -11,21 +11,36 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.pool import QueuePool
 
 from app.db.errors import DatabaseBusyError, VersionConflictError
 
 
-def create_sqlite_engine(url: str, *, busy_timeout_ms: int = 5000) -> Engine:
+def create_sqlite_engine(
+    url: str,
+    *,
+    busy_timeout_ms: int = 5000,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
+    pool_timeout: int | None = None,
+) -> Engine:
     """Crée un moteur SQLite configuré avec les PRAGMA requis à chaque connexion."""
     parsed = make_url(url)
     if parsed.get_backend_name() != "sqlite":
         raise ValueError("Seules les URL SQLite sont acceptées par create_sqlite_engine")
     if busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms doit être positif ou nul")
-    engine = create_engine(
-        url,
-        connect_args={"check_same_thread": False, "timeout": busy_timeout_ms / 1000},
-    )
+    engine_options: dict[str, object] = {
+        "connect_args": {"check_same_thread": False, "timeout": busy_timeout_ms / 1000}
+    }
+    if pool_size is not None:
+        engine_options["poolclass"] = QueuePool
+        engine_options["pool_size"] = pool_size
+    if max_overflow is not None:
+        engine_options["max_overflow"] = max_overflow
+    if pool_timeout is not None:
+        engine_options["pool_timeout"] = pool_timeout
+    engine = create_engine(url, **engine_options)
 
     @event.listens_for(engine, "connect")
     def configure_connection(dbapi_connection: object, _connection_record: object) -> None:
@@ -49,6 +64,18 @@ def create_sqlite_engine(url: str, *, busy_timeout_ms: int = 5000) -> Engine:
             connection.exec_driver_sql("BEGIN")
 
     return engine
+
+
+def create_sqlite_snapshot_engine(url: str) -> Engine:
+    """Use a small, isolated pool for pinned transaction read snapshots."""
+
+    return create_sqlite_engine(
+        url,
+        busy_timeout_ms=1000,
+        pool_size=4,
+        max_overflow=0,
+        pool_timeout=0,
+    )
 
 
 @contextmanager
@@ -95,7 +122,7 @@ def session_scope(engine: Engine) -> Iterator[Session]:
                 raise
 
 
-def _is_database_busy(error: OperationalError) -> bool:
+def is_sqlite_busy_error(error: OperationalError) -> bool:
     """Recognizes SQLITE_BUSY/LOCKED, including their extended SQLite codes."""
     original = error.orig
     code = getattr(original, "sqlite_errorcode", None)
@@ -129,7 +156,7 @@ def write_transaction(engine: Engine) -> Iterator[Session]:
     except StaleDataError as error:
         raise VersionConflictError() from error
     except OperationalError as error:
-        if _is_database_busy(error):
+        if is_sqlite_busy_error(error):
             raise DatabaseBusyError() from error
         raise
 

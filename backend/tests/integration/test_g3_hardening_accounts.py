@@ -106,7 +106,7 @@ def test_M_03_balance_checks_neutralize_unsafe_cents_in_api(
         },
     ]
     transactions = [
-        {"account_id": account_id, "booked_on": date(2026, 1, 2), "amount_cents": -10**13}
+        {"account_id": account_id, "booked_on": date(2026, 1, 2), "amount_cents": -(10**13)}
         for _ in range(1_000)
     ]
     monkeypatch.setattr(

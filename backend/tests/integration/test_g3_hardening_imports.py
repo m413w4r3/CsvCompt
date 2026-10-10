@@ -119,9 +119,7 @@ def test_IMP_12_out_of_period_api_lists_strict_candidates_and_link_keeps_rank(
         assert result.status_code == 200, result.text
         assert result.json()["created_transaction_count"] == 0
         assert result.json()["new_source_row_count"] == 1
-        rejections = client.get(
-            f"/api/v1/imports/{result.json()['import_file_id']}/rejections"
-        )
+        rejections = client.get(f"/api/v1/imports/{result.json()['import_file_id']}/rejections")
         assert rejections.status_code == 200, rejections.text
         assert rejections.json()["items"][0]["resolution_status"] == "resolved"
 
@@ -347,9 +345,12 @@ def test_IMP_06_MAJ_02_orphan_sweep_uses_ctime_when_mtime_is_old(
 
     assert purge_orphaned_archives(app.state.db_engine, data_dir) == 0
     assert orphan.exists() and recent.exists()
-    assert purge_orphaned_archives(
-        app.state.db_engine, data_dir, now=datetime.now(UTC) + timedelta(hours=26)
-    ) == 2
+    assert (
+        purge_orphaned_archives(
+            app.state.db_engine, data_dir, now=datetime.now(UTC) + timedelta(hours=26)
+        )
+        == 2
+    )
     assert not orphan.exists()
     assert not recent.exists()
 

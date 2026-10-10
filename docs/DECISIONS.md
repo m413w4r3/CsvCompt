@@ -240,6 +240,18 @@
   4. Les tests n'ouvrent jamais `data/` : bases temporaires uniquement.
 - **Conséquences** : delta T17 → migration `0002` ; `rule_executions.batch_id/rule_version` (proposition T19) → `0003` (T20) ; l'index unique `lower(alias)` (ADR-030.4) → migration dédiée.
 
+## ADR-032 — Snapshots de pagination isolés, bornés et expirés activement
+
+- **Date** : 2026-10-10 · **Statut** : décision d'implémentation proposée au propriétaire T15.
+- **Contexte** : chaque première page inachevée maintient une lecture WAL ouverte jusqu'à la fin du parcours ou l'expiration. Le pool partagé de 15 connexions pouvait être bloqué après 14 premières pages; l'expiration paresseuse retenait aussi un lecteur WAL sans requête suivante.
+- **Décision** :
+  1. Les lectures épinglées utilisent un moteur SQLite distinct avec `QueuePool(pool_size=4, max_overflow=0, pool_timeout=0)`; le pool partagé de l'application garde ses 15 connexions pour les routes ordinaires. Le magasin accepte au plus **3 snapshots**, strictement moins que les 4 connexions dédiées, ce qui conserve une connexion de réserve. Au plafond, il ferme le snapshot non utilisé depuis le plus longtemps (LRU). Si tous les snapshots sont simultanément utilisés, la nouvelle première page répond `503 DATABASE_BUSY` sans attendre le délai du pool.
+  2. Le TTL est de **60 secondes**. Un balayage de tâche de fond ferme les entrées expirées au plus une seconde après le TTL; les requêtes continuent aussi de purger les entrées expirées. Le curseur expiré ou évincé garde le contrat `409 CURSOR_STALE`; un curseur mal formé ou modifié garde `422 CURSOR_INVALID`.
+  3. La recherche UI est retardée de **300 ms**; une nouvelle frappe ou un nouveau filtre annule le fetch précédent et ignore toute réponse obsolète. La borne côté serveur demeure nécessaire pour les clients non navigateur.
+  4. Les limites de pool, d'attente ou de snapshots sont exposées comme `503 DATABASE_BUSY`.
+  5. Si `flock` retourne `ENOLCK`, un commit répond `503 ARCHIVE_LOCK_UNAVAILABLE`; au démarrage, l'application journalise ce code et saute la purge d'archives, sans rendre l'API indisponible. La purge reste interdite sans verrou.
+- **Conséquences** : une nouvelle navigation borne les anciens snapshots par LRU; le balayage libère la transaction de lecture pour laisser SQLite tronquer le WAL. Une navigation continuée après 60 secondes peut demander un nouveau départ. Le stockage d'archives doit être sur un système où `flock` fonctionne pour permettre les commits.
+
 ## Proposition d'ADR — Répartition prorata bornée (numéro à attribuer)
 
 - **Statut** : proposition T17, numérotation et arbitrage réservés à l'orchestrateur.

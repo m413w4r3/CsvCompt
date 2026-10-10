@@ -174,9 +174,7 @@ def _link_candidates(
     ]
 
 
-def refresh_link_candidates(
-    preview: dict[str, Any], raw_bytes: bytes, engine: Engine
-) -> None:
+def refresh_link_candidates(preview: dict[str, Any], raw_bytes: bytes, engine: Engine) -> None:
     """Recompute available OUT_OF_PERIOD targets after a mapping change."""
 
     parsed = parse_export(raw_bytes)

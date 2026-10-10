@@ -126,6 +126,7 @@ test('UI-05 reste accessible sur la page et pendant l’aperçu en clair et somb
     if (theme === 'sombre') await page.getByRole('button', { name: /Activer le thème sombre/ }).click()
     for (const width of [375, 768, 1280]) {
       await page.setViewportSize({ width, height: 900 })
+      await waitForAuditState(page, theme === 'sombre' ? 'dark' : 'light', width <= 760)
       const results = await new AxeBuilder({ page }).analyze()
       expect(results.violations).toEqual([])
     }
@@ -133,9 +134,24 @@ test('UI-05 reste accessible sur la page et pendant l’aperçu en clair et somb
   await page.getByRole('tab', { name: 'Imports' }).click()
   await page.locator('input[type="file"]').setInputFiles(resolve(fixtures, 'overlap_A.csv'))
   await expect(page.getByRole('heading', { name: 'Vérifiez avant d’importer' })).toBeVisible()
+  await waitForAuditState(page, 'dark', false)
   const previewAudit = await new AxeBuilder({ page }).analyze()
   expect(previewAudit.violations).toEqual([])
 })
+
+async function waitForAuditState(
+  page: import('@playwright/test').Page,
+  theme: 'light' | 'dark',
+  isMobile: boolean,
+): Promise<void> {
+  await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1)
+  const menuButton = page.getByRole('button', { name: 'Ouvrir le menu' })
+  if (isMobile) {
+    await expect(menuButton).toBeVisible()
+  } else {
+    await expect(menuButton).not.toBeVisible()
+  }
+}
 
 function cents(value: string): bigint {
   const normalized = value.replace(/^.*?([−-]?\d[\d\u00a0\u202f ]*,\d{2}).*$/, '$1').replace(/[\u00a0\u202f ]/g, '')

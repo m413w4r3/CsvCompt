@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
@@ -15,13 +13,11 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.api.v1.health import database_status
 from app.core.errors import AppError
-from app.db.errors import DatabaseBusyError
 from app.db.models import (
     Account,
     AuditEvent,
@@ -33,8 +29,7 @@ from app.db.models import (
     Transaction,
 )
 from app.services.app_secrets import ensure_hmac_key
-from app.services.idempotency import purge_expired_idempotency, sign_cursor, verify_cursor
-from app.services.import_archive import purge_orphaned_archives
+from app.services.idempotency import sign_cursor, verify_cursor
 from app.services.import_commit import commit_preview
 from app.services.import_preview_store import ImportPreviewStore
 from app.services.imports import (
@@ -47,22 +42,6 @@ from app.services.imports import (
     validate_link_existing_preview,
 )
 from app.services.transactions import sanitize_api_cents
-
-
-@asynccontextmanager
-async def _imports_lifespan(application: Any) -> AsyncIterator[None]:
-    storage_status, detail_status, _revision = database_status(
-        application.state.settings.database_url
-    )
-    if storage_status == "ok" and detail_status == "ok":
-        with suppress(DatabaseBusyError, OperationalError):
-            purge_expired_idempotency(application.state.db_engine)
-            purge_orphaned_archives(
-                application.state.db_engine, application.state.settings.data_dir
-            )
-    # Absent, corrupt, or busy storage is left to the ordinary readiness path;
-    # expiration is retried on the next successful startup.
-    yield
 
 
 class _UploadLimitRoute(APIRoute):
@@ -111,9 +90,7 @@ class _UploadLimitRoute(APIRoute):
         return handler
 
 
-router = APIRouter(
-    prefix="/imports", tags=["imports"], lifespan=_imports_lifespan, route_class=_UploadLimitRoute
-)
+router = APIRouter(prefix="/imports", tags=["imports"], route_class=_UploadLimitRoute)
 _CONTENT_TYPES = {"text/csv", "application/vnd.ms-excel", "application/octet-stream", "text/plain"}
 
 
@@ -762,30 +739,32 @@ def get_import_detail(request: Request, import_file_id: UUID) -> dict[str, Any]:
                 .order_by(ImportRejection.code)
             )
         )
-        return sanitize_api_cents({
-            "import_file_id": record.import_file_id,
-            "file_sha256": record.file_sha256,
-            "status": record.status,
-            "duplicate_of_import_file_id": record.duplicate_of_import_file_id,
-            "created_at_utc": record.started_at_utc.isoformat().replace("+00:00", "Z"),
-            "finished_at_utc": record.finished_at_utc.isoformat().replace("+00:00", "Z")
-            if record.finished_at_utc
-            else None,
-            "generated_on": record.generation_date,
-            "generation_date_source": record.generation_date_source,
-            "file_size_bytes": record.file_size_bytes,
-            "operation_count": record.parsed_operation_count,
-            "created_transaction_count": created_count,
-            "source_row_count": source_count,
-            "archive_retained": record.archive_relpath is not None,
-            "sections": section_items,
-            "candidates": [
-                {
-                    "source_row_id": source_id,
-                    "candidate_transaction_id": transaction_id,
-                    "reason_code": reason,
-                }
-                for source_id, transaction_id, reason in candidates
-            ],
-            "diagnostics": [{"code": code, "count": count} for code, count in diagnostics],
-        })
+        return sanitize_api_cents(
+            {
+                "import_file_id": record.import_file_id,
+                "file_sha256": record.file_sha256,
+                "status": record.status,
+                "duplicate_of_import_file_id": record.duplicate_of_import_file_id,
+                "created_at_utc": record.started_at_utc.isoformat().replace("+00:00", "Z"),
+                "finished_at_utc": record.finished_at_utc.isoformat().replace("+00:00", "Z")
+                if record.finished_at_utc
+                else None,
+                "generated_on": record.generation_date,
+                "generation_date_source": record.generation_date_source,
+                "file_size_bytes": record.file_size_bytes,
+                "operation_count": record.parsed_operation_count,
+                "created_transaction_count": created_count,
+                "source_row_count": source_count,
+                "archive_retained": record.archive_relpath is not None,
+                "sections": section_items,
+                "candidates": [
+                    {
+                        "source_row_id": source_id,
+                        "candidate_transaction_id": transaction_id,
+                        "reason_code": reason,
+                    }
+                    for source_id, transaction_id, reason in candidates
+                ],
+                "diagnostics": [{"code": code, "count": count} for code, count in diagnostics],
+            }
+        )

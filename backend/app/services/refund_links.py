@@ -617,7 +617,9 @@ def confirm_refund_link(
                 None
                 if target_allocation is not None
                 else _prorated_allocation_parts(
-                    link.amount_cents, target_allocations, session,
+                    link.amount_cents,
+                    target_allocations,
+                    session,
                     exclude_link_id=link.transaction_link_id,
                 )
             )

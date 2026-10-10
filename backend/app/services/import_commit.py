@@ -1049,6 +1049,7 @@ def commit_preview(
     request_sha256 = request_fingerprint(
         _HTTP_METHOD, canonical_path, {"expected_version": expected_version}
     )
+
     # Fast replay lookup allows a retried request to succeed after its preview
     # file has been removed. The authoritative lookup still runs under IMMEDIATE.
     def lookup_replay() -> tuple[int, dict[str, Any]] | None:

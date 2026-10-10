@@ -223,8 +223,6 @@ def test_MONEY_15_varied_link_orders_never_exceed_category_capacity(
             parts = prorate_link_bounded(amount, allocations, remaining)
             assert sum(parts.values()) == amount
             assert all(0 <= part <= remaining[category] for category, part in parts.items())
-            remaining = {
-                category: remaining[category] - parts[category] for category in remaining
-            }
+            remaining = {category: remaining[category] - parts[category] for category in remaining}
         assert all(capacity >= 0 for capacity in remaining.values())
         assert sum(initial_capacities.values()) - sum(remaining.values()) == sum(order)

@@ -47,6 +47,7 @@ function TransactionsPageContent() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [q, setQ] = useState('')
+  const [debouncedQ, setDebouncedQ] = useState('')
   const [minimumInput, setMinimumInput] = useState(() => centsParamToInput(searchParams.get('amount_min_cents')))
   const [maximumInput, setMaximumInput] = useState(() => centsParamToInput(searchParams.get('amount_max_cents')))
   const [busy, setBusy] = useState(false)
@@ -63,6 +64,8 @@ function TransactionsPageContent() {
   const idempotencyKey = useRef<string | null>(null)
   const drawerRef = useRef<HTMLElement | null>(null)
   const previousDrawerFocus = useRef<HTMLElement | null>(null)
+  const transactionRequest = useRef(0)
+  const transactionAbort = useRef<AbortController | null>(null)
 
   const filters = useMemo(() => ({
     account_ids: searchParams.getAll('account_ids'),
@@ -77,17 +80,41 @@ function TransactionsPageContent() {
   const apiFilters = useMemo<TransactionFilters>(() => filters, [filters])
   const periodNotStarted = Boolean(filters.period_end && filters.period_end < '2026-01-01')
 
-  const load = useCallback(async (cursor?: string | null, append = false) => {
+  const load = useCallback(async (cursor?: string | null, append = false, search = debouncedQ) => {
+    const requestId = ++transactionRequest.current
+    transactionAbort.current?.abort()
+    const controller = new AbortController()
+    transactionAbort.current = controller
     setLoading(true); setError('')
     try {
-      const result = await getTransactions({ ...apiFilters, q: q || undefined }, cursor)
+      const result = await getTransactions({ ...apiFilters, q: search || undefined }, cursor, controller.signal)
+      if (requestId !== transactionRequest.current) return
       const items = Array.isArray(result.items) ? result.items : []
       setPage({ ...result, items, summary: result.summary ?? { count: 0, debit_total_cents: 0, credit_total_cents: 0, net_cents: 0 }, total_count: result.total_count ?? 0 })
       setTransactions((current) => append ? [...current, ...items] : items)
-    } catch (cause) { setError(humanError(cause)) }
-    finally { setLoading(false) }
-  }, [apiFilters, q])
-  useEffect(() => { void load() }, [load]) // URL-backed filters reload the first page.
+    } catch (cause) {
+      if (requestId === transactionRequest.current && !controller.signal.aborted) setError(humanError(cause))
+    } finally {
+      if (requestId === transactionRequest.current) {
+        setLoading(false)
+        transactionAbort.current = null
+      }
+    }
+  }, [apiFilters, debouncedQ])
+  useEffect(() => {
+    transactionRequest.current += 1
+    transactionAbort.current?.abort()
+    setLoading(false)
+    const timer = window.setTimeout(() => setDebouncedQ(q), 300)
+    return () => window.clearTimeout(timer)
+  }, [q])
+  useEffect(() => {
+    void load()
+    return () => {
+      transactionRequest.current += 1
+      transactionAbort.current?.abort()
+    }
+  }, [load]) // URL-backed filters reload the first page; searches wait 300 ms.
 
   useEffect(() => {
     void fetch('/api/v1/accounts').then((response) => response.ok ? response.json() : null)
@@ -130,7 +157,7 @@ function TransactionsPageContent() {
         ? 'Ce fichier avait déjà été importé : 0 opération et 0 provenance supplémentaire (no_op).'
         : `Import terminé : ${String(result.created_transaction_count ?? 0)} opération(s) créée(s), ${String(result.new_source_row_count ?? 0)} provenance(s) ajoutée(s)${ranges.length ? ` · couverture ${ranges.join(', ')}` : ''}.`)
       setPreview(null); idempotencyKey.current = null
-      await load()
+      await load(undefined, false, q)
     } catch (cause) { setUploadMessage(humanError(cause)) }
     finally { setBusy(false) }
   }
@@ -227,9 +254,9 @@ function TransactionsPageContent() {
         <label>Montant minimum<input inputMode="decimal" value={minimumInput} onChange={(event) => setMinimumInput(event.target.value)} onBlur={() => updateAmountFilter('amount_min_cents', minimumInput, setFilter)} placeholder="0,00" /></label>
         <label>Montant maximum<input inputMode="decimal" value={maximumInput} onChange={(event) => setMaximumInput(event.target.value)} onBlur={() => updateAmountFilter('amount_max_cents', maximumInput, setFilter)} placeholder="0,00" /></label>
         <label>Import d’origine<input value={filters.import_file_id ?? ''} onChange={(event) => setFilter('import_file_id', event.target.value)} placeholder="Identifiant d’import" /></label>
-        <label>Recherche du libellé<input value={q} onChange={(event) => setQ(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void load() }} placeholder="Saisir des mots…" /></label>
+        <label>Recherche du libellé<input value={q} onChange={(event) => setQ(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') setDebouncedQ(q) }} placeholder="Saisir des mots…" /></label>
         <label>Ventilation<select value={filters.classification ?? 'all'} onChange={(event) => setFilter('classification', event.target.value)}><option value="all">Toutes</option><option value="unclassified">Non ventilées</option></select></label>
-        <Button variant="primary" onClick={() => void load()}>Appliquer</Button>
+        <Button variant="primary" onClick={() => setDebouncedQ(q)}>Appliquer</Button>
       </Card>
       {periodNotStarted && <p className="muted" role="status">{periodCompletenessLabel('not_started')} : aucune alerte de couverture pour cette période.</p>}
       <p className="classification-note"><strong>Non ventilées :</strong> les opérations affichées restent au montant bancaire brut. Leur ventilation sera proposée dans la future Revue.</p>

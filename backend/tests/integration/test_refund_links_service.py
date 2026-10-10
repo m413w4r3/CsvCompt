@@ -827,14 +827,22 @@ def test_MONEY_17_public_service_grid_returns_typed_conflicts(
         source = _allocate(engine, credit_id, 2_000, "refund", "income_refund")
         source_allocation_id = source["income_refund"]
         first = create_refund_link(
-            engine, credit_id, purchase_a, 1_000, actor="reviewer",
+            engine,
+            credit_id,
+            purchase_a,
+            1_000,
+            actor="reviewer",
             source_allocation_id=source_allocation_id,
         )
         first = confirm_refund_link(
             engine, first.transaction_link_id, actor="reviewer", expected_version=first.version
         )
         second = create_refund_link(
-            engine, credit_id, purchase_b, 1_000, actor="reviewer",
+            engine,
+            credit_id,
+            purchase_b,
+            1_000,
+            actor="reviewer",
             source_allocation_id=source_allocation_id,
         )
         confirm_refund_link(
@@ -854,27 +862,46 @@ def test_MONEY_17_public_service_grid_returns_typed_conflicts(
 
         missing = str(uuid4())
         invalid_calls = (
-            ("TRANSACTION_NOT_FOUND", lambda: allocate(
-                engine, missing, [AllocationPart("expense", "groceries", -1)],
-                mode="complete", origin="manual", actor="reviewer", expected_version=1,
-            )),
-            ("TRANSACTION_NOT_FOUND", lambda: clear_allocations(
-                engine, missing, actor="reviewer", expected_version=1
-            )),
+            (
+                "TRANSACTION_NOT_FOUND",
+                lambda: allocate(
+                    engine,
+                    missing,
+                    [AllocationPart("expense", "groceries", -1)],
+                    mode="complete",
+                    origin="manual",
+                    actor="reviewer",
+                    expected_version=1,
+                ),
+            ),
+            (
+                "TRANSACTION_NOT_FOUND",
+                lambda: clear_allocations(engine, missing, actor="reviewer", expected_version=1),
+            ),
             ("TRANSACTION_NOT_FOUND", lambda: get_allocation_state(engine, missing)),
-            ("TRANSACTION_NOT_FOUND", lambda: create_refund_link(
-                engine, missing, purchase_a, 1, actor="reviewer"
-            )),
-            ("REFUND_LINK_NOT_FOUND", lambda: confirm_refund_link(
-                engine, missing, actor="reviewer", expected_version=1
-            )),
-            ("REFUND_LINK_NOT_FOUND", lambda: reject_refund_link(
-                engine, missing, actor="reviewer", expected_version=1
-            )),
-            ("REFUND_LINK_NOT_FOUND", lambda: replace_refund_link(
-                engine, missing, target_transaction_id=purchase_a, amount_cents=1,
-                actor="reviewer", expected_version=1,
-            )),
+            (
+                "TRANSACTION_NOT_FOUND",
+                lambda: create_refund_link(engine, missing, purchase_a, 1, actor="reviewer"),
+            ),
+            (
+                "REFUND_LINK_NOT_FOUND",
+                lambda: confirm_refund_link(engine, missing, actor="reviewer", expected_version=1),
+            ),
+            (
+                "REFUND_LINK_NOT_FOUND",
+                lambda: reject_refund_link(engine, missing, actor="reviewer", expected_version=1),
+            ),
+            (
+                "REFUND_LINK_NOT_FOUND",
+                lambda: replace_refund_link(
+                    engine,
+                    missing,
+                    target_transaction_id=purchase_a,
+                    amount_cents=1,
+                    actor="reviewer",
+                    expected_version=1,
+                ),
+            ),
             ("REFUND_LINK_NOT_FOUND", lambda: get_refund_link_state(engine, missing)),
             ("TRANSACTION_NOT_FOUND", lambda: net_effect_by_category(engine, missing)),
         )
@@ -902,35 +929,65 @@ def test_MONEY_17_public_service_grid_returns_typed_conflicts(
         monkeypatch.setattr(refund_service, "write_transaction", fail_context)
         monkeypatch.setattr(refund_service, "session_scope", fail_context)
         integrity_calls = (
-            ("ALLOCATION_CONFLICT", lambda: allocation_service.allocate(
-                engine, purchase_a, [AllocationPart("expense", "groceries", -1)],
-                mode="partial", origin="manual", actor="reviewer", expected_version=1,
-            )),
-            ("ALLOCATION_CONFLICT", lambda: allocation_service.clear_allocations(
-                engine, purchase_a, actor="reviewer", expected_version=1
-            )),
-            ("ALLOCATION_CONFLICT", lambda: allocation_service.get_allocation_state(
-                engine, purchase_a
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.create_refund_link(
-                engine, credit_id, purchase_a, 1, actor="reviewer"
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.confirm_refund_link(
-                engine, first.transaction_link_id, actor="reviewer", expected_version=1
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.reject_refund_link(
-                engine, first.transaction_link_id, actor="reviewer", expected_version=1
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.replace_refund_link(
-                engine, first.transaction_link_id, target_transaction_id=purchase_a,
-                amount_cents=1, actor="reviewer", expected_version=1,
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.get_refund_link_state(
-                engine, first.transaction_link_id
-            )),
-            ("REFUND_LINK_CONFLICT", lambda: refund_service.net_effect_by_category(
-                engine, purchase_a
-            )),
+            (
+                "ALLOCATION_CONFLICT",
+                lambda: allocation_service.allocate(
+                    engine,
+                    purchase_a,
+                    [AllocationPart("expense", "groceries", -1)],
+                    mode="partial",
+                    origin="manual",
+                    actor="reviewer",
+                    expected_version=1,
+                ),
+            ),
+            (
+                "ALLOCATION_CONFLICT",
+                lambda: allocation_service.clear_allocations(
+                    engine, purchase_a, actor="reviewer", expected_version=1
+                ),
+            ),
+            (
+                "ALLOCATION_CONFLICT",
+                lambda: allocation_service.get_allocation_state(engine, purchase_a),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.create_refund_link(
+                    engine, credit_id, purchase_a, 1, actor="reviewer"
+                ),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.confirm_refund_link(
+                    engine, first.transaction_link_id, actor="reviewer", expected_version=1
+                ),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.reject_refund_link(
+                    engine, first.transaction_link_id, actor="reviewer", expected_version=1
+                ),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.replace_refund_link(
+                    engine,
+                    first.transaction_link_id,
+                    target_transaction_id=purchase_a,
+                    amount_cents=1,
+                    actor="reviewer",
+                    expected_version=1,
+                ),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.get_refund_link_state(engine, first.transaction_link_id),
+            ),
+            (
+                "REFUND_LINK_CONFLICT",
+                lambda: refund_service.net_effect_by_category(engine, purchase_a),
+            ),
         )
         for expected_code, call in integrity_calls:
             with pytest.raises(AppError) as translated:
@@ -989,18 +1046,27 @@ def test_MONEY_20_insufficient_remaining_prorata_capacity_is_refused_atomically(
         assert insufficient.value.status_code == 409
         assert insufficient.value.code == "REFUND_PRORATA_INFEASIBLE"
         with session_scope(engine) as session:
-            assert session.scalar(
-                select(func.count()).select_from(TransactionLink).where(
-                    TransactionLink.source_transaction_id == second_credit_id
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(TransactionLink)
+                    .where(TransactionLink.source_transaction_id == second_credit_id)
                 )
-            ) == 0
-            assert session.scalar(
-                select(func.count()).select_from(RefundLinkAllocation).join(
-                    TransactionLink,
-                    TransactionLink.transaction_link_id
-                    == RefundLinkAllocation.transaction_link_id,
-                ).where(TransactionLink.target_transaction_id == purchase_id)
-            ) == 2
+                == 0
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(RefundLinkAllocation)
+                    .join(
+                        TransactionLink,
+                        TransactionLink.transaction_link_id
+                        == RefundLinkAllocation.transaction_link_id,
+                    )
+                    .where(TransactionLink.target_transaction_id == purchase_id)
+                )
+                == 2
+            )
         effect = net_effect_by_category(engine, purchase_id)
         assert effect.matched_refunds_cents == 800
         assert effect.by_category_cents == {"groceries": 100, "restaurants_dining": 100}

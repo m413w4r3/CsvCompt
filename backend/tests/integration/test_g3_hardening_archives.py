@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import multiprocessing
 import os
 import signal
@@ -18,6 +19,7 @@ from app.db.errors import DatabaseBusyError
 from app.db.migrate import upgrade_to_head
 from app.db.models import AuditEvent
 from app.main import create_app
+from app.main import logger as main_logger
 from app.services import import_archive, import_commit
 from app.services.import_archive import ImportArchive, purge_orphaned_archives
 
@@ -344,3 +346,38 @@ def test_IMP_06_sigkill_temp_is_purged_at_startup_after_grace(
     monkeypatch.setattr(import_archive, "datetime", FutureDateTime)
     with TestClient(create_app(settings)):
         assert not temporary_files[0].exists()
+
+
+@pytest.mark.integration
+def test_IMP_06_archive_enolck_is_503_and_does_not_block_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _settings, _database, data_dir = _ready(tmp_path, "archive-enolck")
+    (data_dir / "originals").mkdir(parents=True)
+    real_flock = import_archive.fcntl.flock
+    locked_operations: list[int] = []
+    warning_messages: list[str] = []
+    real_warning = main_logger.warning
+
+    def enolck(descriptor: int, operation: int) -> None:
+        locked_operations.append(operation)
+        if operation & (import_archive.fcntl.LOCK_SH | import_archive.fcntl.LOCK_EX):
+            raise OSError(errno.ENOLCK, "No locks available")
+        real_flock(descriptor, operation)
+
+    def record_warning(message: str, *args: object, **kwargs: object) -> None:
+        warning_messages.append(message % args if args else message)
+        real_warning(message, *args, **kwargs)
+
+    monkeypatch.setattr(main_logger, "warning", record_warning)
+    monkeypatch.setattr(import_archive.fcntl, "flock", enolck)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        preview = _upload(client, (FIXTURES / "ca_2026_simple.csv").read_bytes())
+        response = _commit(client, preview)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "ARCHIVE_LOCK_UNAVAILABLE"
+    assert any(operation & import_archive.fcntl.LOCK_EX for operation in locked_operations)
+    assert "archive_purge_skipped code=ARCHIVE_LOCK_UNAVAILABLE" in warning_messages
+    assert list((data_dir / "originals").glob("*.bin")) == []

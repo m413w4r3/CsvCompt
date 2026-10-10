@@ -77,11 +77,7 @@ def _bounded_prorata(
     active = {key for key in weights if capacities[key] > 0}
     while remaining and active:
         denominator = sum(weights[key] for key in active)
-        capped = {
-            key
-            for key in active
-            if remaining * weights[key] > capacities[key] * denominator
-        }
+        capped = {key for key in active if remaining * weights[key] > capacities[key] * denominator}
         if capped:
             for key in sorted(capped):
                 part = capacities[key]
@@ -234,9 +230,7 @@ def _verify_explicit_backup(expected_revision: str) -> None:
         backup = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         try:
             integrity = backup.execute("PRAGMA integrity_check").fetchone()
-            version = backup.execute(
-                "SELECT version_num FROM alembic_version"
-            ).fetchone()
+            version = backup.execute("SELECT version_num FROM alembic_version").fetchone()
         finally:
             backup.close()
     except (OSError, sqlite3.Error, ValueError, TypeError) as error:
@@ -279,9 +273,9 @@ def downgrade() -> None:
     original = _schema_objects(reference_path)
     for trigger in (*_ADDED_TRIGGERS, *_REPLACED_TRIGGERS):
         connection.exec_driver_sql(f"DROP TRIGGER {_quote(trigger)}")
-    connection.exec_driver_sql("DROP TRIGGER \"trg_classification_decisions_version_increment\"")
-    connection.exec_driver_sql("DROP INDEX \"ix_classification_decisions_transaction\"")
-    connection.exec_driver_sql("DROP INDEX \"ix_refund_link_allocation_parts_allocation\"")
+    connection.exec_driver_sql('DROP TRIGGER "trg_classification_decisions_version_increment"')
+    connection.exec_driver_sql('DROP INDEX "ix_classification_decisions_transaction"')
+    connection.exec_driver_sql('DROP INDEX "ix_refund_link_allocation_parts_allocation"')
     connection.exec_driver_sql("DROP TABLE refund_link_allocation_parts")
 
     columns = (

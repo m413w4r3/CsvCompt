@@ -685,8 +685,7 @@ def test_OPS_02_restore_fixture_import_to_distinct_database_exactly(tmp_path: Pa
     )
     assert repeat.safety_backup is not None
     assert (
-        backups.verify_backup(repeat.safety_backup).schema_version
-        == backups._installed_revision()
+        backups.verify_backup(repeat.safety_backup).schema_version == backups._installed_revision()
     )
     assert _table_snapshot(target_database) == before_repeat
 

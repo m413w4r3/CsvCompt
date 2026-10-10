@@ -18,11 +18,20 @@ les filtres canoniques, la dernière paire, un identifiant opaque de snapshot et
 le `snapshot_at` UTC. Le snapshot est une lecture SQLite WAL épinglée à la
 visibilité observée lors de la première page; une écriture non committée est
 invisible sur toutes ses pages, même si elle est committée entre deux appels.
-Le snapshot reste en mémoire au plus cinq minutes et jusqu'à 32 navigations
-inachevées par processus; un redémarrage ou son expiration répond
-`CURSOR_STALE` et impose de relancer la liste. La valeur de recherche `q` n'est
+Les snapshots utilisent un pool SQLite dédié de quatre connexions, distinct du
+pool des autres routes, et leur nombre est plafonné à trois par processus. Une
+nouvelle première page évince le snapshot inachevé le moins récemment utilisé
+(LRU); si les trois snapshots servent tous une page simultanément, la requête
+répond `503 DATABASE_BUSY`. Le TTL est de 60 secondes. Un balayage de fond les
+ferme au plus une seconde après expiration, même sans nouvelle navigation, ce
+qui libère le lecteur WAL. Un snapshot expiré ou évincé répond
+`CURSOR_STALE` (409) et impose de relancer la liste. La valeur de recherche `q` n'est
 jamais sérialisée en clair dans le curseur. Un curseur mal formé ou modifié
 répond `CURSOR_INVALID` (422).
+
+L'interface attend 300 ms après la dernière frappe de recherche, puis annule
+la requête précédente et ignore ses réponses tardives. Les clients API doivent
+eux-mêmes tolérer `DATABASE_BUSY` et relancer une première page.
 
 ```json
 {

@@ -278,19 +278,20 @@ def test_T06_downgrade_succeeds_only_with_explicit_verified_backup(
     )
     monkeypatch.setenv("COMPTES_ALLOW_DATA_LOSS_DOWNGRADE", "1")
     monkeypatch.setenv("COMPTES_DOWNGRADE_BACKUP", str(backup.database_path))
-    command.downgrade(
-        _alembic_config(settings, operation="downgrade"), "0001_initial"
-    )
+    command.downgrade(_alembic_config(settings, operation="downgrade"), "0001_initial")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             "0001_initial",
         )
         assert connection.execute("SELECT count(*) FROM accounts").fetchone() == (1,)
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='refund_link_allocation_parts'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='refund_link_allocation_parts'"
+            ).fetchone()
+            is None
+        )
         assert connection.execute("SELECT value FROM local_extension").fetchone() == (
             "preserve-on-downgrade",
         )

@@ -11,11 +11,14 @@ from datetime import date, datetime
 from typing import Any, cast
 
 from sqlalchemy import case, func, select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.db.models import Account, Allocation, ImportFile, SourceRow, Transaction
+from app.db.session import is_sqlite_busy_error
 from app.importers.normalize import search_label
 
 MAX_SAFE_FRONTEND_INTEGER = 2**53 - 1
@@ -56,28 +59,29 @@ def sanitize_api_cents[Sanitized](value: Sanitized) -> Sanitized:
 class TransactionSnapshotStore:
     """Keep short-lived SQLite read snapshots pinned across transaction pages."""
 
-    def __init__(self, *, ttl_seconds: int = 300, max_snapshots: int = 32) -> None:
-        self._ttl_seconds = ttl_seconds
+    def __init__(self, *, ttl_milliseconds: int = 60_000, max_snapshots: int = 3) -> None:
+        if ttl_milliseconds <= 0 or max_snapshots <= 0:
+            raise ValueError("Les limites du magasin de snapshots doivent être positives.")
+        self._ttl_milliseconds = ttl_milliseconds
         self._max_snapshots = max_snapshots
         self._entries: dict[str, _TransactionSnapshot] = {}
         self._guard = threading.RLock()
 
     def create(self, engine: Engine, snapshot_at: str) -> tuple[str, Session]:
-        self._expire()
         with self._guard:
+            self._expire_locked()
             if len(self._entries) >= self._max_snapshots:
-                available = [
-                    key for key, entry in self._entries.items() if not entry.lock.locked()
-                ]
+                available = [key for key, entry in self._entries.items() if not entry.lock.locked()]
                 if not available:
                     raise AppError(
                         "DATABASE_BUSY", 503, "La pagination locale est momentanément occupée."
                     )
-                oldest = min(available, key=lambda key: self._entries[key].created_at)
+                oldest = min(available, key=lambda key: self._entries[key].last_used_at)
                 self._discard_locked(oldest)
-            connection = engine.connect()
+            connection: Connection | None = None
             session: Session | None = None
             try:
+                connection = engine.connect()
                 connection.exec_driver_sql("PRAGMA query_only=ON")
                 connection.commit()
                 session = Session(
@@ -88,26 +92,39 @@ class TransactionSnapshotStore:
                 session.begin()
                 # The first read fixes SQLite's WAL snapshot at commit visibility.
                 session.execute(select(Transaction.transaction_id).limit(1)).first()
-            except BaseException:
+            except BaseException as error:
                 try:
                     if session is not None:
                         session.rollback()
                         session.close()
-                    if connection.in_transaction():
+                    if connection is not None and connection.in_transaction():
                         connection.rollback()
-                    connection.exec_driver_sql("PRAGMA query_only=OFF")
-                    connection.commit()
+                    if connection is not None:
+                        connection.exec_driver_sql("PRAGMA query_only=OFF")
+                        connection.commit()
                 except Exception:
-                    connection.invalidate()
+                    if connection is not None:
+                        connection.invalidate()
                 finally:
-                    connection.close()
+                    if connection is not None:
+                        connection.close()
+                if isinstance(error, SQLAlchemyTimeoutError) or (
+                    isinstance(error, OperationalError) and is_sqlite_busy_error(error)
+                ):
+                    raise AppError(
+                        "DATABASE_BUSY",
+                        503,
+                        "La pagination locale est momentanément occupée.",
+                    ) from error
                 raise
-            assert session is not None
+            assert session is not None and connection is not None
             snapshot_id = uuid.uuid4().hex
+            created_at = time.monotonic_ns()
             self._entries[snapshot_id] = _TransactionSnapshot(
                 session=session,
                 connection=connection,
-                created_at=time.monotonic_ns(),
+                created_at=created_at,
+                last_used_at=created_at,
                 snapshot_at=snapshot_at,
             )
             return snapshot_id, session
@@ -124,6 +141,7 @@ class TransactionSnapshotStore:
             with self._guard:
                 if self._entries.get(snapshot_id) is not entry:
                     raise SnapshotUnavailable(snapshot_id)
+                entry.last_used_at = time.monotonic_ns()
             yield entry.session, entry.snapshot_at
         finally:
             entry.lock.release()
@@ -143,16 +161,29 @@ class TransactionSnapshotStore:
         for snapshot_id in snapshot_ids:
             self.discard(snapshot_id)
 
-    def _expire(self) -> None:
+    def expire_expired(self) -> int:
+        """Close expired snapshots that are not currently serving a page."""
+
         with self._guard:
+            before = len(self._entries)
             self._expire_locked()
+            return before - len(self._entries)
+
+    @property
+    def snapshot_count(self) -> int:
+        with self._guard:
+            return len(self._entries)
+
+    @property
+    def sweep_interval_milliseconds(self) -> int:
+        return min(1000, max(25, self._ttl_milliseconds // 4))
 
     def _expire_locked(self) -> None:
         now = time.monotonic_ns()
         expired = [
             snapshot_id
             for snapshot_id, entry in self._entries.items()
-            if now - entry.created_at >= self._ttl_seconds * 1_000_000_000
+            if now - entry.created_at >= self._ttl_milliseconds * 1_000_000
             and not entry.lock.locked()
         ]
         for snapshot_id in expired:
@@ -179,13 +210,15 @@ class _TransactionSnapshot:
         self,
         *,
         session: Session,
-        connection: Any,
+        connection: Connection,
         created_at: int,
+        last_used_at: int,
         snapshot_at: str,
     ) -> None:
         self.session = session
         self.connection = connection
         self.created_at = created_at
+        self.last_used_at = last_used_at
         self.snapshot_at = snapshot_at
         self.lock = threading.Lock()
 
