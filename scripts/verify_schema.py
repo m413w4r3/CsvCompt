@@ -2880,6 +2880,50 @@ def verify_refund_parts_and_state(schema_path: Path) -> None:
         connection.close()
 
 
+def verify_refund_attribution_insert_guard(schema_path: Path) -> None:
+    """Isolate the confirmed-link INSERT attribution guard from initial status."""
+    connection = connect(schema_path)
+    try:
+        # Normally every refund link must first be proposed. Temporarily removing
+        # that independent guard makes this focused check exercise the INSERT
+        # attribution trigger itself instead of succeeding only because status is
+        # invalid. The production schema is untouched; this is an in-memory DB.
+        connection.execute("DROP TRIGGER IF EXISTS trg_refund_links_initial_status")
+        insert_account(connection, account_role="current")
+        seed_financial_categories(connection)
+        credit = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-05-01", 3000, "Avoir INSERT attribution synthétique"),
+            occurrence_rank=1,
+        )
+        purchase = insert_transaction(
+            connection,
+            identity=(ACCOUNT_ID, "2026-04-01", -3000, "Achat INSERT attribution synthétique"),
+            occurrence_rank=1,
+        )
+        source = insert_allocation(
+            connection, credit, category_id="income_refund", flow_kind="refund", amount_cents=3000
+        )
+        insert_allocation(
+            connection, purchase, category_id="groceries", flow_kind="expense", amount_cents=-3000
+        )
+        expect_integrity_error(
+            "MONEY-18 INSERT confirmé sans parts rejeté par le garde d'attribution",
+            lambda: connection.execute(
+                """INSERT INTO transaction_links
+                   (transaction_link_id, source_transaction_id, target_transaction_id,
+                    link_kind, amount_cents, source_allocation_id, target_allocation_id, status)
+                   VALUES (?, ?, ?, 'refund_of', 1000, ?, NULL, 'confirmed')""",
+                (new_id(), credit, purchase, source),
+            ),
+            "refund_link_attribution_total_mismatch",
+        )
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        connection.close()
+
+
 def verify_two_connection_noop(schema_path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="verify-schema-imp07-") as temp_dir:
         db_path = Path(temp_dir) / "synthetic.sqlite"
@@ -3641,6 +3685,30 @@ def verify_constraint_mutation_proofs(schema_path: Path) -> None:
             ),
             verify_refund_parts_and_state,
             "MONEY-18 une part ne peut pas cibler une allocation inactive",
+        ),
+        (
+            "refund part insert guard",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_link_allocation_parts_insert_guard"
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 une part ne peut pas cibler une allocation inactive",
+        ),
+        (
+            "refund attribution INSERT",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_confirmed_attribution_insert"
+            ),
+            verify_refund_attribution_insert_guard,
+            "MONEY-18 INSERT confirmé sans parts rejeté par le garde d'attribution",
+        ),
+        (
+            "refund attribution UPDATE",
+            lambda s: remove_sql_object(
+                s, "trigger", "trg_refund_links_confirmed_attribution_update"
+            ),
+            verify_refund_parts_and_state,
+            "MONEY-18 somme des parts égale au montant du lien confirmé",
         ),
         (
             "refund part positive integer sign",

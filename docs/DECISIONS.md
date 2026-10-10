@@ -253,9 +253,9 @@
 - **Conséquences** : une nouvelle navigation borne les anciens snapshots par LRU; le balayage libère la transaction de lecture pour laisser SQLite tronquer le WAL. Une navigation continuée après 60 secondes peut demander un nouveau départ. Le stockage d'archives doit être sur un système où `flock` fonctionne pour permettre les commits.
   À l'arrêt, le magasin se ferme irréversiblement sous son verrou commun : les balayages tardifs deviennent inoffensifs, les créations répondent `503 DATABASE_BUSY` et les curseurs existants `409 CURSOR_STALE`.
 
-## Proposition d'ADR — Répartition prorata bornée (numéro à attribuer)
+## ADR-033 — Répartition prorata bornée par capacité restante
 
-- **Statut** : proposition T17, numérotation et arbitrage réservés à l'orchestrateur.
+- **Statut** : acceptée par l'orchestrateur le 2026-10-10 (précise ADR-007 sans changer la formule de base ; revue indépendante `docs/revues/REVUE_T17_G4.md` PASS).
 - **Contexte** : le prorata de remboursement hérité d'ADR-007 arrondissait les
   catégories et affectait le résidu à la dernière. Après des remboursements
   antérieurs, cette méthode pouvait dépasser la capacité restante d'une
