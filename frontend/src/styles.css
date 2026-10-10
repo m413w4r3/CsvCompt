@@ -8,7 +8,7 @@
   --surface-soft: #f8f9f6;
   --ink: #17231e;
   --ink-soft: #65726c;
-  --ink-faint: #98a29c;
+  --ink-faint: #64716b;
   --line: #e5e9e4;
   --accent: #276b54;
   --accent-strong: #1e5945;
@@ -87,7 +87,9 @@ button:focus-visible, a:focus-visible, [tabindex='-1']:focus-visible { outline: 
 .sidebar-bottom > p { margin: 0; color: var(--sidebar-muted); font-size: 0.69rem; }
 .badge { display: inline-flex; align-items: center; gap: 0.46rem; width: fit-content; padding: 0.26rem 0.58rem; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); color: var(--ink-soft); font-size: 0.71rem; font-weight: 600; }
 .health { border-color: rgb(255 255 255 / 12%); background: rgb(255 255 255 / 5%); color: #d3dfd6; }
+.mobile-health .health { border-color: var(--line); background: var(--surface); color: var(--ink-soft); }
 .health-dot { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: #a2b1a6; }
+.health-label { min-width: 0; }
 .health--ok .health-dot { background: #82c69b; box-shadow: 0 0 0 3px rgb(130 198 155 / 13%); }
 .health--warning .health-dot { background: #e8b95f; box-shadow: 0 0 0 3px rgb(232 185 95 / 13%); }
 .health--offline .health-dot, .health--error .health-dot { background: #e18a7d; }
@@ -97,6 +99,7 @@ button:focus-visible, a:focus-visible, [tabindex='-1']:focus-visible { outline: 
 .breadcrumb { display: flex; align-items: center; gap: 0.62rem; color: var(--ink-faint); font-size: 0.76rem; }
 .breadcrumb-current { color: var(--ink-soft); }
 .topbar-actions { display: flex; align-items: center; gap: 0.85rem; }
+.mobile-health { display: none; }
 .local-pill { display: inline-flex; align-items: center; gap: 0.38rem; color: var(--ink-soft); font-size: 0.73rem; }
 .local-pill > span { color: var(--success); font-size: 0.55rem; }
 .button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 0.45rem; padding: 0.55rem 0.9rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); cursor: pointer; font-size: 0.82rem; font-weight: 600; text-decoration: none; transition: background 140ms ease, border-color 140ms ease, transform 140ms ease; }
@@ -159,13 +162,17 @@ h1, h2 { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.0
   .note-card { min-height: 0; }
 }
 @media (max-width: 760px) {
-  .sidebar { z-index: 12; width: min(290px, 84vw); transform: translateX(-102%); transition: transform 180ms ease; }
+  .sidebar { z-index: 12; width: min(290px, 84vw); visibility: hidden; transform: translateX(-102%); transition: transform 180ms ease; }
   .sidebar--open { transform: translateX(0); }
+  .sidebar.sidebar--open { visibility: visible; }
   .workspace { margin-left: 0; }
   .topbar { height: 60px; justify-content: flex-start; gap: 0.8rem; padding-inline: 1rem; }
   .menu-toggle { display: inline-flex; width: 38px; min-height: 38px; padding: 0; }
   .breadcrumb { font-size: 0.7rem; }
   .topbar-actions { margin-left: auto; gap: 0.5rem; }
+  .mobile-health { display: block; min-width: 0; }
+  .health--compact { max-width: 145px; overflow: hidden; white-space: nowrap; padding-inline: 0.48rem; font-size: 0.67rem; }
+  .health--compact .health-dot { flex: 0 0 auto; }
   .local-pill { display: none; }
   .main-content { min-height: calc(100vh - 112px); padding: 2rem 1.1rem 2.5rem; }
   .page-header { margin-bottom: 1.5rem; }
@@ -182,6 +189,7 @@ h1, h2 { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.0
 @media (max-width: 420px) {
   .breadcrumb > span:first-child { display: none; }
   .breadcrumb > span:nth-child(2) { display: none; }
+  .health--compact { max-width: 125px; }
   .period-context { gap: 0.75rem; }
   .period-context p { font-size: 0.72rem; }
   .period-context .text-link { margin-left: 3.85rem; }

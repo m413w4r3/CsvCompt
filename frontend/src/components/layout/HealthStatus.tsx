@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ApiError, getHealth } from '../../lib/api'
 import { Badge } from '../ui/Badge'
 
-export function HealthStatus() {
+export function HealthStatus({ compact = false }: { compact?: boolean }) {
   const health = useQuery({ queryKey: ['health'], queryFn: ({ signal }) => getHealth(signal), refetchInterval: 60_000, retry: false })
   let state: 'loading' | 'ok' | 'warning' | 'error' | 'offline' = 'loading'
   let text = 'Vérification…'
@@ -41,7 +41,7 @@ export function HealthStatus() {
     }
   }
 
-  return <Badge className={`health health--${state}`} title={title} aria-live="polite">
-    <span className="health-dot" aria-hidden="true" />{text}
+  return <Badge className={`health health--${state} ${compact ? 'health--compact' : ''}`} title={title} aria-live="polite">
+    <span className="health-dot" aria-hidden="true" /><span className="health-label">{text}</span>
   </Badge>
 }

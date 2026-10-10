@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { formatDateFr, formatMonthFr } from '../../src/lib/dates'
-import { parseFilters, serializeFilters } from '../../src/lib/filters'
+import { formatDateFr, formatMonthFr, parseIsoDate } from '../../src/lib/dates'
+import { parseFilters, serializeFilters, type CommonFilters } from '../../src/lib/filters'
 
 describe('dates françaises', () => {
   it('formate une date ISO sans dépendre du fuseau local', () => {
@@ -10,6 +10,12 @@ describe('dates françaises', () => {
 
   it.each(['2026-02-30', '2026-2-03', '03/10/2026'])('rejette la date invalide %s', (date) => {
     expect(() => formatDateFr(date)).toThrow(RangeError)
+  })
+
+  it('valide le calendrier grégorien sans parser une chaîne avec Date', () => {
+    expect(parseIsoDate('2024-02-29')).not.toBeNull()
+    expect(parseIsoDate('2026-02-29')).toBeNull()
+    expect(parseIsoDate('2026-13-01')).toBeNull()
   })
 })
 
@@ -25,5 +31,19 @@ describe('filtres URL', () => {
 
   it('ignore les périodes mal formées et conserve les valeurs par défaut', () => {
     expect(parseFilters('period_start=2026-02-30&mode=invalid&personal_mode=invalid')).toEqual({ accountIds: [], categoryIds: [], flowKinds: [], status: [], mode: 'treasury', personalMode: 'envelope' })
+  })
+
+  it('rejette les enums inconnues et les bornes inversées sans perdre les autres filtres', () => {
+    expect(parseFilters('period_start=2026-12-01&period_end=2026-01-01&account_ids=compte-1&flow_kind=n_importe_quoi&mode=n_importe_quoi&personal_mode=n_importe_quoi')).toEqual({
+      accountIds: ['compte-1'], categoryIds: [], flowKinds: [], status: [], mode: 'treasury', personalMode: 'envelope',
+    })
+  })
+
+  it('ne sérialise pas de filtres invalides fournis au runtime', () => {
+    const invalid = {
+      periodStart: '2026-12-01', periodEnd: '2026-01-01', accountIds: [], categoryIds: [],
+      flowKinds: ['not_a_flow'], status: [], mode: 'unknown', personalMode: 'invalid',
+    } as unknown as CommonFilters
+    expect(serializeFilters(invalid)).toBe('')
   })
 })

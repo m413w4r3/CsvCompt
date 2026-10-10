@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -30,7 +30,7 @@ function renderShell(path = '/') {
   </Route></Routes></MemoryRouter></QueryClientProvider>)
 }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear() })
 
 describe('UI-00 · shell et navigation', () => {
   it('affiche la page sans données fabriquées et les dix destinations', async () => {
@@ -41,7 +41,7 @@ describe('UI-00 · shell et navigation', () => {
     const nav = screen.getByRole('navigation', { name: 'Pages' })
     expect(within(nav).getAllByRole('link')).toHaveLength(10)
     for (const item of navigation) expect(within(nav).getByRole('link', { name: item.label })).toBeInTheDocument()
-    expect(await screen.findByText('Serveur local connecté')).toBeInTheDocument()
+    expect(await within(document.querySelector('.sidebar') as HTMLElement).findByText('Serveur local connecté')).toBeInTheDocument()
   })
 
   it('affiche les pages vides et une page 404 sans données fictives', async () => {
@@ -63,11 +63,11 @@ describe('UI-00 · shell et navigation', () => {
   it('gère health hors ligne et erreur HTTP sans bloquer la page', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')))
     const { unmount } = renderShell()
-    expect(await screen.findByText('Serveur local hors ligne')).toBeInTheDocument()
+    expect(await within(document.querySelector('.sidebar') as HTMLElement).findByText('Serveur local hors ligne')).toBeInTheDocument()
     unmount()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'DATABASE_BUSY', message: 'Base indisponible', details: null } }), { status: 503 })))
     renderShell()
-    await waitFor(() => expect(screen.getByText('Serveur local en erreur')).toBeInTheDocument())
+    await waitFor(() => expect(within(document.querySelector('.sidebar') as HTMLElement).getByText('Serveur local en erreur')).toBeInTheDocument())
     expect(screen.getByRole('heading', { name: 'Vue d’ensemble' })).toBeInTheDocument()
   })
 
@@ -77,7 +77,9 @@ describe('UI-00 · shell et navigation', () => {
   ])('explique l’état de la base (%s)', async (status, storage, label, explanation, stateClass) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(healthResponse(status, storage)))
     renderShell()
-    const health = await screen.findByText(label)
+    const sidebar = document.querySelector('.sidebar') as HTMLElement
+    await within(sidebar).findByText(label)
+    const health = sidebar.querySelector('.health')
     expect(health).toHaveAttribute('title', explanation)
     expect(health).toHaveClass(`health--${stateClass}`)
     expect(screen.getByRole('heading', { name: 'Vue d’ensemble' })).toBeInTheDocument()
@@ -96,5 +98,33 @@ describe('UI-00 · shell et navigation', () => {
     expect(menu).toHaveAttribute('aria-expanded', 'false')
     await user.click(menu)
     expect(menu).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('retire le menu mobile fermé du parcours clavier, piège Tab et ferme avec Échap', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: query === '(max-width: 760px)', media: query, onchange: null,
+      addListener: () => {}, removeListener: () => {}, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(healthOk()))
+    const user = userEvent.setup()
+    renderShell()
+    const sidebar = document.querySelector('aside[aria-label="Navigation principale"]')
+    const menuButton = screen.getByRole('button', { name: 'Ouvrir le menu' })
+    expect(sidebar).toHaveAttribute('inert')
+    expect(sidebar).toHaveAttribute('aria-hidden', 'true')
+
+    await user.click(menuButton)
+    const links = within(sidebar as HTMLElement).getAllByRole('link')
+    expect(menuButton).toHaveAttribute('aria-expanded', 'true')
+    expect(links[0]).toHaveFocus()
+    fireEvent.keyDown(links[0] as HTMLElement, { key: 'Tab', shiftKey: true })
+    expect(links.at(-1)).toHaveFocus()
+    fireEvent.keyDown(links.at(-1) as HTMLElement, { key: 'Tab' })
+    expect(links[0]).toHaveFocus()
+
+    fireEvent.keyDown(links[0] as HTMLElement, { key: 'Escape' })
+    expect(menuButton).toHaveFocus()
+    expect(menuButton).toHaveAttribute('aria-expanded', 'false')
+    expect(sidebar).toHaveAttribute('inert')
   })
 })

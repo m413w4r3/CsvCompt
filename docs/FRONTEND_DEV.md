@@ -39,6 +39,8 @@ Les filtres partagés suivent `docs/API.md` : période inclusive, comptes, caté
 - La clé LLM et les secrets restent côté backend. Le frontend n’envoie aucune requête à un service tiers et charge les polices système localement.
 - Les vues utilisent des titres hiérarchiques, des états ARIA, un lien d’évitement, un focus visible et une navigation clavier. Les animations réduisent leur durée avec `prefers-reduced-motion`.
 - Le statut health distingue la connexion, une base à initialiser ou migrer, une base indisponible, une erreur HTTP et le serveur hors ligne. Ces états n’empêchent pas l’utilisation du shell.
+- Sur mobile, le statut health reste dans la topbar ; le menu fermé est masqué et inerte, son ouverture place le focus dans les liens, Tab reste dans le tiroir et Échap le ferme en restituant le focus.
+- `tests/e2e/a11y.spec.ts` vérifie les contrastes et les critères WCAG automatisables par axe-core à 375, 768 et 1280 px, en thèmes clair et sombre.
 
 ## Direction visuelle
 
