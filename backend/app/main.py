@@ -48,28 +48,6 @@ async def _expire_transaction_snapshots(store: TransactionSnapshotStore) -> None
         try:
             await asyncio.shield(sweep)
         except asyncio.CancelledError:
-            # Cancelling the asyncio wrapper cannot stop its worker thread. Wait
-            # until the bounded shutdown deadline before disposing its engines.
-            deadline = loop.time() + _SWEEP_SHUTDOWN_TIMEOUT_SECONDS
-            current_task = asyncio.current_task()
-            while current_task is not None and current_task.cancelling() > 1:
-                current_task.uncancel()
-            while not sweep.done():
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    await asyncio.wait({sweep}, timeout=remaining)
-                except asyncio.CancelledError:
-                    # Keep the original cancellation pending while absorbing any
-                    # repeated requests until the worker finishes or the deadline.
-                    while current_task is not None and current_task.cancelling() > 1:
-                        current_task.uncancel()
-            if not sweep.done():
-                logger.warning(
-                    "transaction_snapshot_sweep_shutdown_timeout timeout_seconds=%s",
-                    _SWEEP_SHUTDOWN_TIMEOUT_SECONDS,
-                )
             raise
         except Exception as error:
             logger.warning(
@@ -77,7 +55,6 @@ async def _expire_transaction_snapshots(store: TransactionSnapshotStore) -> None
                 type(error).__name__,
                 uuid4().hex,
             )
-            await asyncio.sleep(0.1)
 
 
 def create_app(
@@ -113,27 +90,14 @@ def create_app(
             try:
                 if sweeper is not None:
                     sweeper.cancel()
-                    current_task = asyncio.current_task()
-                    shutdown_cancelled = False
-                    try:
-                        while True:
-                            try:
-                                await asyncio.shield(sweeper)
-                                break
-                            except asyncio.CancelledError:
-                                if sweeper.done():
-                                    if shutdown_cancelled or (
-                                        current_task is not None and current_task.cancelling()
-                                    ):
-                                        raise
-                                    break
-                                # A repeated cancellation of the lifespan must not
-                                # interrupt the sweeper's own bounded worker wait.
-                                shutdown_cancelled = True
-                                while current_task is not None and current_task.cancelling():
-                                    current_task.uncancel()
-                    except Exception:
-                        pass
+                    _done, pending = await asyncio.wait(
+                        {sweeper}, timeout=_SWEEP_SHUTDOWN_TIMEOUT_SECONDS
+                    )
+                    if pending:
+                        logger.warning(
+                            "transaction_snapshot_sweep_shutdown_timeout timeout_seconds=%s",
+                            _SWEEP_SHUTDOWN_TIMEOUT_SECONDS,
+                        )
             finally:
                 try:
                     application.state.transaction_snapshot_store.close_all()

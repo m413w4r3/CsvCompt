@@ -16,12 +16,13 @@ from sqlalchemy import select
 import app.main as main_module
 from app.api.v1.transactions import _safe_frontend_summary
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.db.migrate import upgrade_to_head
 from app.db.models import Transaction
 from app.db.session import session_scope
 from app.main import create_app
 from app.services import import_commit
-from app.services.transactions import TransactionSnapshotStore
+from app.services.transactions import SnapshotUnavailable, TransactionSnapshotStore
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -453,106 +454,56 @@ def test_IMP_14_snapshot_sweeper_error_does_not_block_shutdown_cleanup(
 
 
 @pytest.mark.integration
-def test_IMP_14_snapshot_sweeper_waits_for_running_worker_before_shutdown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("cancel_count", [1, 2, 3])
+def test_IMP_14_snapshot_sweeper_late_worker_is_safe_after_lifespan_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_count: int
 ) -> None:
-    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-cancel")
-    store = app.state.transaction_snapshot_store
-    store._ttl_milliseconds = 100
-    worker_started = threading.Event()
-    release_worker = threading.Event()
-    worker_finished = threading.Event()
-
-    def block_expiration() -> int:
-        worker_started.set()
-        try:
-            if not release_worker.wait(timeout=10):
-                raise RuntimeError("synthetic worker release timeout")
-            return 0
-        finally:
-            worker_finished.set()
-
-    monkeypatch.setattr(store, "expire_expired", block_expiration)
-    snapshot_engine = app.state.transaction_snapshot_engine
-    db_engine = app.state.db_engine
-    store.create(snapshot_engine, datetime.now(UTC).isoformat())
-
-    async def cancel_lifespan() -> None:
-        async def serve() -> None:
-            async with app.router.lifespan_context(app):
-                await asyncio.Event().wait()
-
-        lifespan_task = asyncio.create_task(serve())
-        started = await asyncio.to_thread(worker_started.wait, 2)
-        assert started, "sweep worker did not start"
-
-        lifespan_task.cancel()
-        await asyncio.sleep(0.05)
-        assert not lifespan_task.done(), "lifespan returned while sweep worker was blocked"
-
-        release_worker.set()
-        with pytest.raises(asyncio.CancelledError):
-            await lifespan_task
-
-    try:
-        asyncio.run(cancel_lifespan())
-    finally:
-        release_worker.set()
-
-    assert worker_finished.is_set()
-    assert store.snapshot_count == 0
-    assert snapshot_engine.pool.checkedout() == 0
-    assert db_engine.pool.checkedout() == 0
-
-
-@pytest.mark.integration
-def test_IMP_14_snapshot_sweeper_absorbs_repeated_cancellation_until_worker_finishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-double-cancel")
+    app, _data_dir = _ready(tmp_path, f"snapshot-sweeper-cancel-{cancel_count}")
     store = app.state.transaction_snapshot_store
     store._ttl_milliseconds = 100
     worker_started = threading.Event()
     release_worker = threading.Event()
     worker_finished = threading.Event()
     wait_entered = threading.Event()
-    cleanup_observations: list[bool] = []
+    release_wait = asyncio.Event()
     loop_errors: list[dict[str, object]] = []
+    original_expire = store.expire_expired
 
-    def fail_after_release() -> int:
+    def fail_after_close() -> int:
         worker_started.set()
         try:
             if not release_worker.wait(timeout=10):
                 raise RuntimeError("synthetic worker release timeout")
+            assert original_expire() == 0
             raise RuntimeError("synthetic late sweep failure")
         finally:
             worker_finished.set()
 
-    monkeypatch.setattr(store, "expire_expired", fail_after_release)
+    monkeypatch.setattr(store, "expire_expired", fail_after_close)
     original_wait = asyncio.wait
 
-    async def signal_wait_entered(*args, **kwargs):
+    async def gated_wait(tasks, *, timeout):
         wait_entered.set()
-        return await original_wait(*args, **kwargs)
+        await release_wait.wait()
+        return await original_wait(tasks, timeout=timeout)
 
-    monkeypatch.setattr(main_module.asyncio, "wait", signal_wait_entered)
-    original_close_all = store.close_all
-
-    def observe_close_all() -> None:
-        cleanup_observations.append(worker_finished.is_set())
-        original_close_all()
-
-    monkeypatch.setattr(store, "close_all", observe_close_all)
-    for engine in (app.state.transaction_snapshot_engine, app.state.db_engine):
+    monkeypatch.setattr(main_module.asyncio, "wait", gated_wait)
+    snapshot_engine = app.state.transaction_snapshot_engine
+    db_engine = app.state.db_engine
+    store.create(snapshot_engine, datetime.now(UTC).isoformat())
+    assert snapshot_engine.pool.checkedout() == 1
+    dispose_checkout_counts: list[tuple[int, int]] = []
+    for engine in (snapshot_engine, db_engine):
         original_dispose = engine.dispose
 
-        def observe_dispose(*args, _dispose=original_dispose, **kwargs) -> None:
-            cleanup_observations.append(worker_finished.is_set())
+        def observe_dispose(*args, _dispose=original_dispose, _engine=engine, **kwargs) -> None:
+            checked_out_before = _engine.pool.checkedout()
             _dispose(*args, **kwargs)
+            dispose_checkout_counts.append((checked_out_before, _engine.pool.checkedout()))
 
         monkeypatch.setattr(engine, "dispose", observe_dispose)
 
-    async def cancel_lifespan_twice() -> None:
+    async def cancel_lifespan() -> None:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
 
@@ -562,27 +513,71 @@ def test_IMP_14_snapshot_sweeper_absorbs_repeated_cancellation_until_worker_fini
 
         lifespan_task = asyncio.create_task(serve())
         assert await asyncio.to_thread(worker_started.wait, 2), "sweep worker did not start"
-
         lifespan_task.cancel()
         assert await asyncio.to_thread(wait_entered.wait, 2), "shutdown wait did not start"
-        lifespan_task.cancel()
-        await asyncio.sleep(0)
-        assert not lifespan_task.done(), "second cancellation escaped the bounded wait"
-        assert not worker_finished.is_set()
-
-        release_worker.set()
+        for _ in range(cancel_count - 1):
+            lifespan_task.cancel()
+        release_wait.set()
         with pytest.raises(asyncio.CancelledError):
             await lifespan_task
+
+        assert not worker_finished.is_set()
+        assert store.snapshot_count == 0
+        assert snapshot_engine.pool.checkedout() == 0
+        assert db_engine.pool.checkedout() == 0
+
+        # Release the executor thread only after close_all() and both dispose().
+        release_worker.set()
+        assert await asyncio.to_thread(worker_finished.wait, 2)
         await asyncio.sleep(0)
 
     try:
-        asyncio.run(cancel_lifespan_twice())
+        asyncio.run(cancel_lifespan())
     finally:
         release_worker.set()
 
-    assert worker_finished.is_set()
-    assert cleanup_observations == [True, True, True]
+    assert store.snapshot_count == 0
+    assert snapshot_engine.pool.checkedout() == 0
+    assert db_engine.pool.checkedout() == 0
+    assert dispose_checkout_counts == [(0, 0), (0, 0)]
     assert not any("never retrieved" in str(context.get("message", "")) for context in loop_errors)
+
+
+@pytest.mark.integration
+def test_IMP_14_closed_snapshot_store_preserves_cursor_and_create_contracts(
+    tmp_path: Path,
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-store-closed")
+    raw = (FIXTURES / "overlap_A.csv").read_bytes()
+
+    with TestClient(app) as client:
+        _commit(client, _ready_preview(client, raw))
+        store = client.app.state.transaction_snapshot_store
+        snapshot_engine = client.app.state.transaction_snapshot_engine
+        first_page = client.get("/api/v1/transactions", params={"limit": 1})
+        assert first_page.status_code == 200, first_page.text
+        cursor = first_page.json()["next_cursor"]
+        assert cursor
+        snapshot_id, _session = store.create(snapshot_engine, datetime.now(UTC).isoformat())
+
+        store.close_all()
+
+        assert store.expire_expired() == 0
+        with pytest.raises(SnapshotUnavailable), store.use(snapshot_id):
+            pytest.fail("a closed snapshot must not be usable")
+        with pytest.raises(AppError) as create_error:
+            store.create(snapshot_engine, datetime.now(UTC).isoformat())
+        assert (create_error.value.code, create_error.value.status_code) == ("DATABASE_BUSY", 503)
+        store.discard(snapshot_id)
+        assert store.snapshot_count == 0
+        assert snapshot_engine.pool.checkedout() == 0
+
+        stale_cursor = client.get("/api/v1/transactions", params={"limit": 1, "cursor": cursor})
+        assert stale_cursor.status_code == 409
+        assert stale_cursor.json()["error"]["code"] == "CURSOR_STALE"
+        new_page = client.get("/api/v1/transactions", params={"limit": 1})
+        assert new_page.status_code == 503
+        assert new_page.json()["error"]["code"] == "DATABASE_BUSY"
 
 
 @pytest.mark.integration
@@ -598,13 +593,15 @@ def test_IMP_14_snapshot_sweeper_timeout_logs_without_request_data(
     loop_errors: list[dict[str, object]] = []
     warnings: list[str] = []
     timeout = 0.2
+    release_delayed_sweeper = asyncio.Event()
+    original_sweeper = main_module._expire_transaction_snapshots
 
     def fail_after_release() -> int:
         worker_started.set()
         try:
             if not release_worker.wait(timeout=10):
-                raise RuntimeError("synthetic worker release timeout")
-            raise RuntimeError("synthetic late sweep failure")
+                raise RuntimeError("synthetic request marker worker release timeout")
+            raise RuntimeError("synthetic request marker late failure")
         finally:
             worker_finished.set()
 
@@ -616,20 +613,38 @@ def test_IMP_14_snapshot_sweeper_timeout_logs_without_request_data(
         lambda message, *args: warnings.append(message % args),
     )
 
+    async def delayed_cancel_sweeper(store):
+        try:
+            await original_sweeper(store)
+        except asyncio.CancelledError:
+            # Keep only this test task alive to exercise a real wait timeout.
+            await release_delayed_sweeper.wait()
+            raise
+
+    monkeypatch.setattr(main_module, "_expire_transaction_snapshots", delayed_cancel_sweeper)
+    original_close_all = store.close_all
+
+    def close_store_and_release_sweeper() -> None:
+        original_close_all()
+        release_delayed_sweeper.set()
+
+    monkeypatch.setattr(store, "close_all", close_store_and_release_sweeper)
+
     async def timeout_shutdown() -> None:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
 
         async def serve() -> None:
             async with app.router.lifespan_context(app):
-                await asyncio.Event().wait()
+                assert await asyncio.to_thread(worker_started.wait, 2)
 
         lifespan_task = asyncio.create_task(serve())
         assert await asyncio.to_thread(worker_started.wait, 2), "sweep worker did not start"
-        lifespan_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await lifespan_task
+        await lifespan_task
         assert not worker_finished.is_set()
+        assert store.snapshot_count == 0
+        assert app.state.transaction_snapshot_engine.pool.checkedout() == 0
+        assert app.state.db_engine.pool.checkedout() == 0
 
         release_worker.set()
         assert await asyncio.to_thread(worker_finished.wait, 2)
@@ -648,6 +663,65 @@ def test_IMP_14_snapshot_sweeper_timeout_logs_without_request_data(
     assert timeout_warnings == [
         f"transaction_snapshot_sweep_shutdown_timeout timeout_seconds={timeout}"
     ]
+    assert not any("request marker" in warning for warning in warnings)
+    assert not any("never retrieved" in str(context.get("message", "")) for context in loop_errors)
+
+
+@pytest.mark.integration
+def test_IMP_14_snapshot_sweeper_external_cancel_wins_over_concurrent_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _data_dir = _ready(tmp_path, "snapshot-sweeper-cancel-timeout")
+    store = app.state.transaction_snapshot_store
+    store._ttl_milliseconds = 100
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    wait_entered = threading.Event()
+    loop_errors: list[dict[str, object]] = []
+
+    def finish_after_release() -> int:
+        worker_started.set()
+        try:
+            if not release_worker.wait(timeout=10):
+                raise RuntimeError("synthetic late worker timeout")
+            return 0
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(store, "expire_expired", finish_after_release)
+
+    async def blocked_wait(_tasks, *, timeout):
+        wait_entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main_module.asyncio, "wait", blocked_wait)
+
+    async def concurrent_cancel_and_timeout() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+        async def serve() -> None:
+            async with asyncio.timeout(2.0):
+                async with app.router.lifespan_context(app):
+                    assert await asyncio.to_thread(worker_started.wait, 2)
+
+        lifespan_task = asyncio.create_task(serve())
+        assert await asyncio.to_thread(wait_entered.wait, 2), "shutdown wait did not start"
+        loop.call_later(0.5, lifespan_task.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await lifespan_task
+        assert not worker_finished.is_set()
+
+        release_worker.set()
+        assert await asyncio.to_thread(worker_finished.wait, 2)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(concurrent_cancel_and_timeout())
+    finally:
+        release_worker.set()
+
     assert not any("never retrieved" in str(context.get("message", "")) for context in loop_errors)
 
 

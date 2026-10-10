@@ -251,6 +251,7 @@
   4. Les limites de pool, d'attente ou de snapshots sont exposées comme `503 DATABASE_BUSY`.
   5. Si `flock` retourne `ENOLCK`, un commit répond `503 ARCHIVE_LOCK_UNAVAILABLE`; au démarrage, l'application journalise ce code et saute la purge d'archives, sans rendre l'API indisponible. La purge reste interdite sans verrou.
 - **Conséquences** : une nouvelle navigation borne les anciens snapshots par LRU; le balayage libère la transaction de lecture pour laisser SQLite tronquer le WAL. Une navigation continuée après 60 secondes peut demander un nouveau départ. Le stockage d'archives doit être sur un système où `flock` fonctionne pour permettre les commits.
+  À l'arrêt, le magasin se ferme irréversiblement sous son verrou commun : les balayages tardifs deviennent inoffensifs, les créations répondent `503 DATABASE_BUSY` et les curseurs existants `409 CURSOR_STALE`.
 
 ## Proposition d'ADR — Répartition prorata bornée (numéro à attribuer)
 

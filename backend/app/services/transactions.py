@@ -66,9 +66,14 @@ class TransactionSnapshotStore:
         self._max_snapshots = max_snapshots
         self._entries: dict[str, _TransactionSnapshot] = {}
         self._guard = threading.RLock()
+        self._closed = False
 
     def create(self, engine: Engine, snapshot_at: str) -> tuple[str, Session]:
         with self._guard:
+            if self._closed:
+                raise AppError(
+                    "DATABASE_BUSY", 503, "La pagination locale est momentanément occupée."
+                )
             self._expire_locked()
             if len(self._entries) >= self._max_snapshots:
                 available = [key for key, entry in self._entries.items() if not entry.lock.locked()]
@@ -136,35 +141,44 @@ class TransactionSnapshotStore:
             entry = self._entries.get(snapshot_id)
             if entry is None:
                 raise SnapshotUnavailable(snapshot_id)
-        entry.lock.acquire()
-        try:
-            with self._guard:
-                if self._entries.get(snapshot_id) is not entry:
+            with entry.lock:
+                if self._closed or self._entries.get(snapshot_id) is not entry:
                     raise SnapshotUnavailable(snapshot_id)
                 entry.last_used_at = time.monotonic_ns()
-            yield entry.session, entry.snapshot_at
-        finally:
-            entry.lock.release()
+                # Keep the shared store lock for the whole read. close_all() then
+                # cannot dispose a snapshot connection while a page is using it.
+                yield entry.session, entry.snapshot_at
 
     def discard(self, snapshot_id: str) -> None:
         with self._guard:
+            if self._closed:
+                return
             entry = self._entries.get(snapshot_id)
-        if entry is None:
-            return
-        with entry.lock, self._guard:
-            if self._entries.get(snapshot_id) is entry:
-                self._discard_locked(snapshot_id)
+            if entry is None:
+                return
+            with entry.lock:
+                if self._entries.get(snapshot_id) is entry:
+                    self._discard_locked(snapshot_id)
 
     def close_all(self) -> None:
         with self._guard:
-            snapshot_ids = list(self._entries)
-        for snapshot_id in snapshot_ids:
-            self.discard(snapshot_id)
+            self._closed = True
+            first_error: BaseException | None = None
+            for snapshot_id in list(self._entries):
+                try:
+                    self._discard_locked(snapshot_id)
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
 
     def expire_expired(self) -> int:
         """Close expired snapshots that are not currently serving a page."""
 
         with self._guard:
+            if self._closed:
+                return 0
             before = len(self._entries)
             self._expire_locked()
             return before - len(self._entries)
@@ -179,6 +193,8 @@ class TransactionSnapshotStore:
         return min(1000, max(25, self._ttl_milliseconds // 4))
 
     def _expire_locked(self) -> None:
+        if self._closed:
+            return
         now = time.monotonic_ns()
         expired = [
             snapshot_id
