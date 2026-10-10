@@ -90,10 +90,12 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 
 | Méthode et chemin | Requête / réponse |
 |---|---|
-| `POST /api/v1/imports/preview` | `multipart/form-data file`; crée un aperçu temporaire sans ligne métier SQLite, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` calculé sur les octets reçus, `generated_on`, `generation_date_source`, `sections[]` avec `complete_through`, compteurs, sommes en cents, `warnings[]`, `rejections[]`, `expires_at_utc`. Les octets restent dans un tampon temporaire privé ; les numéros ne sont jamais renvoyés. |
-| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/account-mapping` | résolution humaine versionnée `{expected_version, account_id}` ou `{expected_version, new_account:{alias,account_role}}`; utilisée dans le preview avant commit. |
-| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/coverage` | résolution humaine versionnée `{expected_version, coverage_from, coverage_through}`; recalcul de `complete_through` et de la validation du preview. |
-| `PATCH /api/v1/imports/{preview_id}/rows/{logical_row_idx}/multiplicity` | `{expected_version, action:"link_existing"|"create_occurrence", transaction_id?}` ; décision humaine pour une `OUT_OF_PERIOD` ou une ambiguïté de multiplicité, enregistrée avec acteur/audit dans le preview. `link_existing` exige une identité égale (`identity_key_sha256` égal) ; `create_occurrence` attribue le rang supplémentaire suivant. |
+| `POST /api/v1/imports/preview` | Un unique champ `multipart/form-data file`; crée un aperçu temporaire sans ligne métier SQLite, clé d'idempotence non requise. Réponse `preview_id`, `version`, `status:"previewed"`, `encoding`, `file_sha256` des octets reçus, `generated_on`, `generation_date_source`, `sections[]`, `warnings[]`, `rejections[]`, `anomaly_counts`, `already_imported`, `import_file_id`, `can_commit`, `expires_at_utc`, `reconciliation:null`. Les aperçus sont privés et expirent. Les numéros, empreintes et libellés ne sont jamais renvoyés. |
+| `GET /api/v1/imports/preview/{preview_id}` | Renvoie l'état courant et sa `version`; un aperçu expiré ou supprimé répond `410 IMPORT_PREVIEW_EXPIRED`. |
+| `DELETE /api/v1/imports/preview/{preview_id}` | Supprime immédiatement l'aperçu privé et ses octets (204). |
+| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/account-mapping` | Résolution versionnée `{expected_version, account_id}` ou `{expected_version, new_account:{alias,account_role}}`; une section `known` est verrouillée. Le nouveau compte et son alias sont seulement mémorisés, jamais créés ici. |
+| `PATCH /api/v1/imports/{preview_id}/sections/{section_index}/coverage` | `{expected_version, coverage_from, coverage_through}` uniquement pour `SECTION_RANGE_REQUIRED`; la plage contient toutes les dates d'opérations et ne remplace pas la période déclarée. |
+| `PATCH /api/v1/imports/{preview_id}/rows/{logical_row_idx}/multiplicity` | `{expected_version, action:"link_existing"|"create_occurrence", transaction_id?, section_index?}`. `link_existing` exige `transaction_id` d'une transaction existante du même compte et de même identité stricte; le contrôle est refait au commit. `section_index` est obligatoire si l'index logique est ambigu. Les décisions gardent acteur, horodatage et ancienne valeur dans l'aperçu. |
 | `POST /api/v1/imports/{preview_id}/commit` | `Idempotency-Key` obligatoire ; `{expected_version}` après résolution de toutes les sections/lignes. Commit atomique du fichier entier. Réponse uniquement `committed` ou `no_op`, avec compteurs et plages de couverture ; aucun état `partial`. Une occurrence `no_op` est un nouveau registre final, conserve hash/taille/référence au commit d'origine, supprime le preview temporaire et répond `archive_retained:false` (`archive_relpath` reste `NULL`). |
 | `GET /api/v1/imports` | filtres `status`, `period_start`, `period_end`, curseur ; liste `ImportSummary[]` paginée. |
 | `GET /api/v1/imports/{import_file_id}` | détail statut, hash, alias de sections, bornes, soldes source, références aux `balance_checks`, compteurs, candidats ambigus et diagnostic rédigé. Jamais d'archive ou de numéro. |
@@ -103,10 +105,20 @@ Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-a
 Types principaux :
 
 ```text
-ImportSectionPreview = {section_index: integer, account_resolution: "known"|"unknown"|"ambiguous",
-  account_id: UUID|null, account_alias: string|null, coverage_from: date|null,
-  coverage_through: date|null, complete_through: date|null, balance_as_of: date|null, header_balance_cents: integer|null,
-  operation_count: integer, debit_total_cents: integer, credit_total_cents: integer}
+ImportSectionPreview = {section_index: integer, account_mapping: {status: "known"|"unknown"|"ambiguous",
+  account_id: UUID|null, alias: string|null, new_account?: {alias: string, account_role: string}}, period_from: date|null, period_to: date|null,
+  coverage_from: date|null, coverage_through: date|null, complete_through: date|null,
+  balance_as_of: date|null, header_balance_cents: integer|null, min_date: date|null, max_date: date|null,
+  account_resolution: "known"|"unknown"|"ambiguous", account_id: UUID|null, account_alias: string|null,
+  operation_count: integer, debit_total_cents: integer, credit_total_cents: integer, net_cents: integer,
+  provisional_days: date[], anomaly_counts: {code: integer}}
+ImportPreview = {preview_id: UUIDv4, version: integer, status: "previewed", encoding: string,
+  file_sha256: string, generated_on: date, generation_date_source: string, sections: ImportSectionPreview[],
+  warnings: PreviewFinding[], rejections: PreviewFinding[], anomaly_counts: {code: integer}, anomaly_summary: object,
+  already_imported: boolean,
+  import_file_id: UUID|null, can_commit: boolean, expires_at_utc: datetime, reconciliation: null}
+PreviewFinding = {code: string, detail_code?: string|null, severity: string, section: integer|null,
+  logical_row_idx: integer|null, field: string|null, message: string}
 ImportSummary = {import_file_id: UUID, file_sha256: string, status: "previewed"|"committed"|"rejected"|"no_op",
   created_at_utc: datetime, generated_on: date, generation_date_source: "header_download"|"received_on_fallback",
   sections: integer, operation_count: integer,
@@ -119,7 +131,7 @@ BalanceCheck = {balance_check_id: UUID, account_id: UUID, status: "match"|"misma
   delta_cents: integer|null, input_snapshot_sha256: string, version: integer}
 ```
 
-Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir dans le preview une décision auditée `link_existing` ou `create_occurrence`; les deux chemins restent dans un commit tout-ou-rien du fichier. Un fichier associant deux sections au même compte est structurellement rejeté, avec `DUPLICATE_ACCOUNT_SECTION` et zéro transaction/provenance. `ZERO_AMOUNT` est une erreur bloquante de format CA. Les statuts d'import ne comprennent jamais `partial`.
+`can_commit` est faux tant qu'une anomalie bloquante, un mapping requis, une plage requise, une ligne `OUT_OF_PERIOD` ou un compte de section dupliqué n'est pas résolu. Une section sans numéro canonique émet `MISSING_ACCOUNT_NUMBER` et ne peut pas être résolue par un mapping. Une ligne `OUT_OF_PERIOD` n'entre jamais automatiquement dans la multiplicité. Elle doit recevoir une décision auditée; `link_existing` identifie la transaction par `transaction_id`, et une ambiguïté de ligne exige `section_index`. Un fichier associant deux sections au même compte reste bloqué avec `DUPLICATE_ACCOUNT_SECTION`. `ZERO_AMOUNT`, `AMOUNT_OUT_OF_RANGE`, `MISSING_ACCOUNT_NUMBER`, `GENERATION_DATE_INCONSISTENT`, `FUTURE_DATED_ROW`, `DATE_IMPLAUSIBLE` et `LABEL_TOO_LONG` sont bloquants. `ACCOUNT_MAPPING_REQUIRED` figure dans `rejections` tant qu'un mapping manque. `FILE_TOO_LARGE` est une réponse 413 avant l'analyse. Les statuts d'import ne comprennent jamais `partial`.
 
 Exemples synthétiques :
 
@@ -131,8 +143,17 @@ Content-Type: multipart/form-data; boundary=...
 ```
 
 ```json
-{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"status":"previewed","encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generated_on":"2026-03-31","generation_date_source":"header_download","operation_count":2,"sections":[{"section_index":1,"account_resolution":"unknown","account_id":null,"account_alias":null,"coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","provisional_days":["2026-03-31"],"balance_as_of":"2026-03-30","header_balance_cents":120000,"operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000}],"warnings":[],"rejections":[],"expires_at_utc":"2026-10-10T10:15:00Z"}
+{"preview_id":"550e8400-e29b-41d4-a716-446655440010","version":1,"status":"previewed","encoding":"utf-8","file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generated_on":"2026-03-31","generation_date_source":"header_download","operation_count":2,"anomaly_counts":{},"anomaly_summary":{"warning_count":0,"rejection_count":0,"stored_warning_count":0,"stored_rejection_count":0,"omitted_warning_count":0,"omitted_rejection_count":0},"sections":[{"section_index":1,"account_mapping":{"status":"unknown","account_id":null,"alias":null},"account_resolution":"unknown","account_id":null,"account_alias":null,"period_from":"2026-03-01","period_to":"2026-03-31","coverage_from":"2026-03-01","coverage_through":"2026-03-31","complete_through":"2026-03-30","operation_count":2,"debit_total_cents":-2500,"credit_total_cents":5000,"net_cents":2500,"balance_as_of":"2026-03-30","header_balance_cents":120000,"min_date":"2026-03-30","max_date":"2026-03-31","provisional_days":["2026-03-31"],"anomaly_counts":{}}],"warnings":[],"rejections":[{"code":"ACCOUNT_MAPPING_REQUIRED","severity":"blocking","section":1,"logical_row_idx":null,"field":"account_mapping","message":"Associez cette section à un compte avant de continuer."}],"can_commit":false,"already_imported":false,"import_file_id":null,"expires_at_utc":"2026-10-10T10:15:00Z","reconciliation":null}
 ```
+
+Erreurs principales de l'aperçu : `DATABASE_NOT_READY` (503), `FILE_TOO_LARGE`
+(413), `UNSUPPORTED_MEDIA_TYPE` (415), `VERSION_CONFLICT` (409),
+`ACCOUNT_MAPPING_LOCKED` / `ACCOUNT_ALIAS_CONFLICT` (409),
+`ACCOUNT_FINGERPRINT_CONFLICT` (409 ou 422), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_PREVIEW_EXPIRED` (410),
+`CSV_INVALID` / `VALIDATION_ERROR` (422). `MISSING_ACCOUNT_NUMBER`,
+`AMOUNT_OUT_OF_RANGE`, `GENERATION_DATE_INCONSISTENT`, `FUTURE_DATED_ROW`,
+`DATE_IMPLAUSIBLE` et `LABEL_TOO_LONG` sont des codes de rejet bloquant dans
+`rejections` d'une réponse 200.
 
 Commit synthétique :
 

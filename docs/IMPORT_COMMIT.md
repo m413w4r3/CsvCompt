@@ -30,7 +30,10 @@ commités.
 
 Les lignes `OUT_OF_PERIOD` ne participent pas au maximum automatique. L'aperçu
 requiert une décision humaine : `link_existing` fournit un identifiant de
-transaction, revérifié sous verrou contre les quatre champs d'identité ;
+transaction existante du même compte, vérifié pendant l'aperçu, revérifié avant
+l'archive et une seconde fois sous `BEGIN IMMEDIATE` contre les quatre champs
+d'identité (`account_id`, date, montant signé, `identity_label`) ; un index logique partagé entre sections
+exige `section_index` ;
 `create_occurrence` ajoute explicitement le rang suivant après le maximum
 automatique. Une cible incompatible ou déjà utilisée par une autre ligne du
 même fichier bloque le commit. Une journée provisoire est conservée dans les

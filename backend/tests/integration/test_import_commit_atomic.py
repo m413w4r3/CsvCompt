@@ -227,7 +227,7 @@ def test_api_idempotency_key_conflict_is_normalized_and_does_not_write(tmp_path:
 
 
 @pytest.mark.integration
-def test_legacy_targetless_link_is_rejected_before_archive_or_database_writes(
+def test_targetless_link_is_rejected_during_preview_without_database_writes(
     tmp_path: Path,
 ) -> None:
     app, database, data_dir = _ready_app(tmp_path, "legacy-link")
@@ -240,23 +240,13 @@ def test_legacy_targetless_link_is_rejected_before_archive_or_database_writes(
         outside = _upload(client, (FIXTURES / "provisional_day_B.csv").read_bytes())
         preview_store = app.state.import_preview_store
         stored = preview_store.get(str(outside["preview_id"]))
-        stored.pop("_preview_protocol_version", None)
-        legacy = preview_store.update(str(outside["preview_id"]), stored)
+        before = _table_snapshot(database)
         decision = client.patch(
             f"/api/v1/imports/{outside['preview_id']}/rows/1/multiplicity",
-            json={"expected_version": legacy["version"], "action": "link_existing"},
+            json={"expected_version": stored["version"], "action": "link_existing"},
         )
-        assert decision.status_code == 200
-        archive_count_before = len(list((data_dir / "originals").glob("*.bin")))
-        before = _table_snapshot(database)
-        rejected = client.post(
-            f"/api/v1/imports/{outside['preview_id']}/commit",
-            headers={"Idempotency-Key": str(uuid4())},
-            json={"expected_version": decision.json()["version"]},
-        )
-        assert rejected.status_code == 422
-        assert rejected.json()["error"]["code"] == "MULTIPLICITY_RESOLUTION_INVALID"
-        assert len(list((data_dir / "originals").glob("*.bin"))) == archive_count_before
+        assert decision.status_code == 422
+        assert decision.json()["error"]["code"] == "VALIDATION_ERROR"
         assert _table_snapshot(database) == before
 
 

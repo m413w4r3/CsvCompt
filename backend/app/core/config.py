@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     data_dir: Path = Path("data")
     max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    max_preview_anomalies: int = Field(default=1000, ge=1)
     preview_ttl_seconds: int = Field(default=1800, ge=1)
     preview_dir: Path | None = None
     version: str = Field(default="0.1.0", validation_alias="APP_VERSION")

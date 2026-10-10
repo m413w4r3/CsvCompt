@@ -23,7 +23,7 @@ from app.services.app_secrets import ensure_hmac_key
 from app.services.import_preview_store import ImportPreviewStore
 
 _ACCOUNT_ROLES = {"current", "savings", "pea", "personal", "cash", "other"}
-_LONG_NUMBER = re.compile(r"\d{8,}")
+_IBAN_LIKE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$", re.IGNORECASE)
 _SCRIPT_TAG = re.compile(r"<\s*/?\s*script\b", re.IGNORECASE)
 _INSTRUCTION_PATTERN = re.compile(r"\b(ignore|disregard|follow)\b", re.IGNORECASE)
 
@@ -102,7 +102,6 @@ def _rejection_code(code: str) -> str:
         "EMPTY_FILE",
         "MISSING_HEADER",
         "PARSE_ERROR",
-        "FILE_TOO_LARGE",
         "FIELD_TOO_LONG",
     }:
         return "CSV_INVALID"
@@ -116,6 +115,7 @@ def build_preview(
     store: ImportPreviewStore,
     max_upload_bytes: int,
     received_on: date,
+    max_anomalies: int = 1000,
 ) -> dict[str, Any]:
     """Parse, aggregate, and privately save one upload; only HMAC settings may be written."""
     if len(raw_bytes) > max_upload_bytes:
@@ -150,22 +150,30 @@ def build_preview(
     section_by_ordinal = {section.ordinal: section for section in parsed.sections}
     warnings: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
+    anomaly_totals: dict[str, int] = {}
+    warning_total = 0
+    rejection_total = 0
+    anomaly_limit = max(1, max_anomalies)
     for anomaly in parsed.anomalies:
+        code = _rejection_code(anomaly.code.value)
         item = {
-            "code": _rejection_code(anomaly.code.value),
-            "detail_code": anomaly.code.value
-            if _rejection_code(anomaly.code.value) != anomaly.code.value
-            else None,
+            "code": code,
+            "detail_code": anomaly.code.value if code != anomaly.code.value else None,
             "severity": anomaly.severity,
             "section": anomaly.section_ordinal,
             "logical_row_idx": anomaly.logical_row_idx,
             "field": anomaly.field,
             "message": anomaly.message,
         }
+        anomaly_totals[code] = anomaly_totals.get(code, 0) + 1
         if anomaly.severity == "warning":
-            warnings.append(item)
+            warning_total += 1
+            if len(warnings) < anomaly_limit:
+                warnings.append(item)
         else:
-            rejections.append(item)
+            rejection_total += 1
+            if len(rejections) < anomaly_limit:
+                rejections.append(item)
         section_view = next(
             (value for value in sections if value["section_index"] == anomaly.section_ordinal), None
         )
@@ -191,7 +199,9 @@ def build_preview(
                     else None
                 )
                 if row is not None:
-                    section_view["provisional_days"].append(row.booked_on.isoformat())
+                    day = row.booked_on.isoformat()
+                    if day not in section_view["provisional_days"]:
+                        section_view["provisional_days"].append(day)
     for parsed_section in parsed.sections:
         view = next(item for item in sections if item["section_index"] == parsed_section.ordinal)
         for row in parsed_section.rows:
@@ -215,7 +225,10 @@ def build_preview(
                     "message": "Le libellé contient une caractéristique nécessitant une revue.",
                 }
                 if warning not in warnings:
-                    warnings.append(warning)
+                    warning_total += 1
+                    anomaly_totals[warning_code] = anomaly_totals.get(warning_code, 0) + 1
+                    if len(warnings) < anomaly_limit:
+                        warnings.append(warning)
                 view["anomaly_counts"][warning_code] = (
                     view["anomaly_counts"].get(warning_code, 0) + 1
                 )
@@ -230,6 +243,38 @@ def build_preview(
                 "message": "Deux sections du fichier correspondent au même compte.",
             }
         )
+    parser_missing_account_sections = {
+        anomaly.section_ordinal
+        for anomaly in parsed.anomalies
+        if anomaly.code.value == "MISSING_ACCOUNT_NUMBER"
+    }
+    for section in parsed.sections:
+        if (
+            section.account_number_canonical is None
+            and section.ordinal not in parser_missing_account_sections
+        ):
+            anomaly_totals["MISSING_ACCOUNT_NUMBER"] = (
+                anomaly_totals.get("MISSING_ACCOUNT_NUMBER", 0) + 1
+            )
+            section_view = next(
+                item for item in sections if item["section_index"] == section.ordinal
+            )
+            section_view["anomaly_counts"]["MISSING_ACCOUNT_NUMBER"] = (
+                section_view["anomaly_counts"].get("MISSING_ACCOUNT_NUMBER", 0) + 1
+            )
+            rejection_total += 1
+            if len(rejections) < anomaly_limit:
+                rejections.append(
+                    {
+                        "code": "MISSING_ACCOUNT_NUMBER",
+                        "detail_code": None,
+                        "severity": "blocking",
+                        "section": section.ordinal,
+                        "logical_row_idx": None,
+                        "field": "account_number",
+                        "message": "Le numéro de compte de cette section n'a pas pu être reconnu.",
+                    }
+                )
     period_missing_sections = {
         a.section_ordinal for a in parsed.anomalies if a.code.value == "MISSING_PERIOD"
     }
@@ -240,6 +285,8 @@ def build_preview(
         and a.section_ordinal is not None
         and a.logical_row_idx is not None
     ]
+    all_out_of_period_rows = out_of_period_rows
+    out_of_period_rows = out_of_period_rows[:anomaly_limit]
     payload: dict[str, Any] = {
         "status": "previewed",
         "encoding": parsed.encoding,
@@ -251,6 +298,15 @@ def build_preview(
         else "received_on_fallback",
         "operation_count": parsed.operation_count,
         "sections": sections,
+        "anomaly_counts": anomaly_totals,
+        "anomaly_summary": {
+            "warning_count": warning_total,
+            "rejection_count": rejection_total,
+            "stored_warning_count": len(warnings),
+            "stored_rejection_count": len(rejections),
+            "omitted_warning_count": max(0, warning_total - len(warnings)),
+            "omitted_rejection_count": max(0, rejection_total - len(rejections)),
+        },
         "warnings": warnings,
         "rejections": rejections,
         "can_commit": False,
@@ -262,7 +318,35 @@ def build_preview(
         "_preview_protocol_version": 2,
         "_resolutions": {"account_mapping": {}, "coverage": {}, "multiplicity": {}},
         "_period_missing_sections": list(period_missing_sections),
+        "_canonical_sections": [
+            section.ordinal
+            for section in parsed.sections
+            if section.account_number_canonical is not None
+        ],
+        "_initial_known_sections": [
+            section["section_index"]
+            for section in sections
+            if section["account_mapping"]["status"] == "known"
+        ],
+        "_row_dates": [
+            {
+                "section": section.ordinal,
+                "row": row.logical_row_idx,
+                "date": row.booked_on.isoformat(),
+            }
+            for section in parsed.sections
+            for row in section.rows
+        ],
         "_out_of_period_rows": list(out_of_period_rows),
+        "_out_of_period_omitted": len(all_out_of_period_rows) - len(out_of_period_rows),
+        "_unresolvable_blocking_count": sum(
+            1
+            for anomaly in parsed.anomalies
+            if anomaly.severity == "blocking"
+            and anomaly.code.value
+            not in {"MISSING_PERIOD", "OUT_OF_PERIOD", "DUPLICATE_ACCOUNT_SECTION"}
+        )
+        + sum(1 for section in parsed.sections if section.account_number_canonical is None),
         "_structural_rejection": any(
             a.code.value == "DUPLICATE_ACCOUNT_SECTION" for a in parsed.anomalies
         ),
@@ -286,7 +370,17 @@ def _recalculate(preview: dict[str, Any]) -> None:
         f"{item['section']}:{item['row']}" not in resolved_multiplicity
         for item in preview["_out_of_period_rows"]
     )
-    pending_blocking = any(item["severity"] == "blocking" for item in preview["rejections"])
+    # Rebuild resolution-dependent rejections before reading their blocking state.
+    preview["rejections"] = [
+        rejection
+        for rejection in preview["rejections"]
+        if rejection["code"]
+        not in {
+            "ACCOUNT_MAPPING_REQUIRED",
+            "DUPLICATE_ACCOUNT_SECTION",
+            "DUPLICATE_ACCOUNT_ALIAS",
+        }
+    ]
     duplicate_mapped_accounts = False
     account_ids = [
         section["account_mapping"].get("account_id")
@@ -297,14 +391,7 @@ def _recalculate(preview: dict[str, Any]) -> None:
     ]
     non_null = [account_id for account_id in account_ids if account_id]
     duplicate_mapped_accounts = len(non_null) != len(set(non_null))
-    preview["rejections"] = [
-        rejection
-        for rejection in preview["rejections"]
-        if not (
-            rejection["code"] == "DUPLICATE_ACCOUNT_SECTION" and rejection.get("section") is None
-        )
-    ]
-    if duplicate_mapped_accounts and not preview["_structural_rejection"]:
+    if duplicate_mapped_accounts or preview["_structural_rejection"]:
         preview["rejections"].append(
             {
                 "code": "DUPLICATE_ACCOUNT_SECTION",
@@ -316,6 +403,55 @@ def _recalculate(preview: dict[str, Any]) -> None:
                 "message": "Deux sections du fichier correspondent au même compte.",
             }
         )
+    pending_aliases: set[str] = set()
+    duplicate_alias = False
+    for section in preview["sections"]:
+        section_index = str(section["section_index"])
+        mapping = preview["_resolutions"]["account_mapping"].get(
+            section_index, section["account_mapping"]
+        )
+        if int(section_index) not in preview.get(
+            "_canonical_sections", [item["section_index"] for item in preview["sections"]]
+        ):
+            continue
+        if (
+            mapping.get("status") != "known"
+            and section_index not in preview["_resolutions"]["account_mapping"]
+        ):
+            preview["rejections"].append(
+                {
+                    "code": "ACCOUNT_MAPPING_REQUIRED",
+                    "detail_code": None,
+                    "severity": "blocking",
+                    "section": section["section_index"],
+                    "logical_row_idx": None,
+                    "field": "account_mapping",
+                    "message": "Associez cette section à un compte avant de continuer.",
+                }
+            )
+        alias = mapping.get("alias")
+        if isinstance(alias, str):
+            normalized_alias = alias.strip().casefold()
+            if normalized_alias in pending_aliases:
+                duplicate_alias = True
+            pending_aliases.add(normalized_alias)
+    if duplicate_alias:
+        preview["rejections"].append(
+            {
+                "code": "DUPLICATE_ACCOUNT_ALIAS",
+                "detail_code": None,
+                "severity": "blocking",
+                "section": None,
+                "logical_row_idx": None,
+                "field": "alias",
+                "message": "Deux sections utilisent le même alias de compte.",
+            }
+        )
+    pending_blocking = (
+        any(item["severity"] == "blocking" for item in preview["rejections"])
+        or preview.get("_unresolvable_blocking_count", 0) > 0
+        or preview.get("_out_of_period_omitted", 0) > 0
+    )
     preview["can_commit"] = not any(
         (
             pending_mapping,
@@ -336,17 +472,51 @@ def set_mapping(
     )
     if section is None:
         raise AppError("NOT_FOUND", 404, "Section introuvable.")
+    if section_index not in preview.get("_canonical_sections", []):
+        raise AppError(
+            "ACCOUNT_MAPPING_INVALID",
+            422,
+            "Cette section ne peut pas être associée sans numéro reconnu.",
+        )
+    initial_known_sections = preview.get(
+        "_initial_known_sections",
+        [
+            item["section_index"]
+            for item in preview["sections"]
+            if item["account_mapping"].get("status") == "known"
+        ],
+    )
+    if section_index in initial_known_sections:
+        raise AppError(
+            "ACCOUNT_MAPPING_LOCKED", 409, "Le compte de cette section est déjà identifié."
+        )
     mapping: dict[str, Any]
     if "account_id" in resolution:
         with session_scope(engine) as session:
             account = session.get(Account, resolution["account_id"])
             if account is None or not account.is_active:
                 raise AppError("VALIDATION_ERROR", 422, "Le compte sélectionné est indisponible.")
+            fingerprint = preview.get("_fingerprints", {}).get(
+                section_index, preview.get("_fingerprints", {}).get(str(section_index))
+            )
+            if account.bank_fingerprint is not None and account.bank_fingerprint != fingerprint:
+                raise AppError(
+                    "ACCOUNT_FINGERPRINT_CONFLICT", 422, "Le compte sélectionné est incompatible."
+                )
             mapping = {"status": "known", "account_id": account.account_id, "alias": account.alias}
     else:
         value = resolution["new_account"]
         alias = value["alias"].strip()
-        if not alias or len(alias) > 80 or _LONG_NUMBER.search(alias):
+        compact_alias = "".join(char for char in alias if char.isalnum())
+        digit_count = sum(unicodedata.category(char) == "Nd" for char in alias)
+        if (
+            not alias
+            or len(alias) > 80
+            or digit_count > 7
+            or _IBAN_LIKE.fullmatch(compact_alias) is not None
+            or "<" in alias
+            or ">" in alias
+        ):
             raise AppError("VALIDATION_ERROR", 422, "L'alias est invalide.")
         if value["account_role"] not in _ACCOUNT_ROLES:
             raise AppError("VALIDATION_ERROR", 422, "Le rôle de compte est invalide.")
@@ -356,6 +526,39 @@ def set_mapping(
             "alias": alias,
             "new_account": {"alias": alias, "account_role": value["account_role"]},
         }
+    if "new_account" in resolution:
+        with session_scope(engine) as session:
+            aliases = list(session.scalars(select(Account.alias)))
+            if any(
+                existing.strip().casefold() == mapping["alias"].strip().casefold()
+                for existing in aliases
+            ):
+                raise AppError("ACCOUNT_ALIAS_CONFLICT", 409, "Cet alias est déjà utilisé.")
+            fingerprint = preview.get("_fingerprints", {}).get(
+                section_index, preview.get("_fingerprints", {}).get(str(section_index))
+            )
+            if fingerprint is not None and session.scalar(
+                select(Account.account_id).where(Account.bank_fingerprint == fingerprint)
+            ):
+                raise AppError(
+                    "ACCOUNT_FINGERPRINT_CONFLICT",
+                    409,
+                    "Cette empreinte est déjà liée à un compte.",
+                )
+    if "new_account" in resolution:
+        for other in preview["sections"]:
+            if other["section_index"] == section_index:
+                continue
+            other_mapping = preview["_resolutions"]["account_mapping"].get(
+                str(other["section_index"]), other["account_mapping"]
+            )
+            if (
+                other_mapping.get("alias")
+                and other_mapping["alias"].strip().casefold() == mapping["alias"].strip().casefold()
+            ):
+                raise AppError(
+                    "ACCOUNT_ALIAS_CONFLICT", 409, "Cet alias est déjà utilisé dans l'aperçu."
+                )
     preview["_resolutions"]["account_mapping"][str(section_index)] = mapping
     _record_decision(
         preview,
@@ -421,6 +624,16 @@ def set_coverage(
         coverage_through=coverage_through.isoformat(),
         complete_through=complete_through.isoformat() if complete_through else None,
     )
+    # Re-evaluate every row against the accepted coverage. The required span check
+    # above means a valid resolution cannot leave an operation outside that span.
+    preview["_out_of_period_rows"] = [
+        item for item in preview["_out_of_period_rows"] if item["section"] != section_index
+    ] + [
+        {"section": section_index, "row": item["row"]}
+        for item in preview.get("_row_dates", [])
+        if item["section"] == section_index
+        and not (coverage_from <= date.fromisoformat(item["date"]) <= coverage_through)
+    ]
     preview["_resolutions"]["coverage"][str(section_index)] = next_coverage
     _record_decision(
         preview,
@@ -448,6 +661,7 @@ def set_multiplicity(
     *,
     section_index: int | None = None,
     transaction_id: str | None = None,
+    actor: str = "local_user",
 ) -> dict[str, Any]:
     matches = [
         item
@@ -479,6 +693,7 @@ def set_multiplicity(
         before=previous_resolution,
         after=resolution,
     )
+    preview["_decision_history"][-1]["actor"] = actor
     preview["rejections"] = [
         r
         for r in preview["rejections"]

@@ -11,11 +11,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, File, Header, Query, Request, UploadFile
 from fastapi.responses import Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.api.v1.health import database_status
 from app.core.errors import AppError
@@ -57,7 +59,55 @@ async def _imports_lifespan(application: Any) -> AsyncIterator[None]:
     yield
 
 
-router = APIRouter(prefix="/imports", tags=["imports"], lifespan=_imports_lifespan)
+class _UploadLimitRoute(APIRoute):
+    """Reject oversized multipart requests before Starlette spools their bodies."""
+
+    def get_route_handler(self) -> Any:
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            if request.url.path == "/api/v1/imports/preview":
+                content_length = request.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError:
+                        raise AppError(
+                            "VALIDATION_ERROR", 400, "La taille déclarée est invalide."
+                        ) from None
+                    # Multipart framing and the required single boundary add a small
+                    # constant overhead; the exact file length is checked in-route.
+                    max_request = request.app.state.settings.max_upload_bytes + 64 * 1024
+                    if declared_length > max_request:
+                        raise AppError(
+                            "FILE_TOO_LARGE",
+                            413,
+                            "Le fichier dépasse la taille maximale autorisée.",
+                        )
+                _database_ready(request)
+                try:
+                    form = await request.form(max_files=1, max_fields=1)
+                except Exception as exc:
+                    raise AppError(
+                        "VALIDATION_ERROR", 422, "Le formulaire doit contenir un seul fichier."
+                    ) from exc
+                fields = list(form.multi_items())
+                if (
+                    len(fields) != 1
+                    or fields[0][0] != "file"
+                    or not isinstance(fields[0][1], StarletteUploadFile)
+                ):
+                    raise AppError(
+                        "VALIDATION_ERROR", 422, "Le formulaire doit contenir un seul champ file."
+                    )
+            return await original(request)
+
+        return handler
+
+
+router = APIRouter(
+    prefix="/imports", tags=["imports"], lifespan=_imports_lifespan, route_class=_UploadLimitRoute
+)
 _CONTENT_TYPES = {"text/csv", "application/vnd.ms-excel", "application/octet-stream", "text/plain"}
 
 
@@ -103,6 +153,10 @@ class PreviewResponse(BaseModel):
     generated_on: date
     generation_date_source: str
     operation_count: int
+    anomaly_counts: dict[str, int]
+    anomaly_summary: dict[str, int]
+    already_imported: bool
+    import_file_id: UUID | None
     sections: list[SectionPreview]
     warnings: list[dict[str, Any]]
     rejections: list[dict[str, Any]]
@@ -148,6 +202,8 @@ class MultiplicityRequest(BaseModel):
     def validate_target(self) -> MultiplicityRequest:
         if self.action == "create_occurrence" and self.transaction_id is not None:
             raise ValueError("create_occurrence_has_no_transaction_id")
+        if self.action == "link_existing" and self.transaction_id is None:
+            raise ValueError("link_existing_requires_transaction_id")
         return self
 
 
@@ -272,7 +328,7 @@ def _reject_binary(data: bytes) -> bool:
 
 
 @router.post("/preview", response_model=PreviewResponse)
-async def create_preview(request: Request, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
+def create_preview(request: Request, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
     engine = _database_ready(request)
     content_type = (
         (file.content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
@@ -282,20 +338,21 @@ async def create_preview(request: Request, file: Annotated[UploadFile, File()]) 
             "UNSUPPORTED_MEDIA_TYPE", 415, "Le type de fichier n'est pas pris en charge."
         )
     limit = request.app.state.settings.max_upload_bytes
-    data = await file.read(limit + 1)
+    data = file.file.read(limit + 1)
     if len(data) > limit:
         raise AppError("FILE_TOO_LARGE", 413, "Le fichier dépasse la taille maximale autorisée.")
     if _reject_binary(data):
         raise AppError(
             "UNSUPPORTED_MEDIA_TYPE", 415, "Le contenu du fichier n'est pas un CSV texte."
         )
-    now = request.app.state.clock().date()
+    now = date.today()
     result = build_preview(
         raw_bytes=data,
         engine=engine,
         store=_store(request),
         max_upload_bytes=limit,
         received_on=now,
+        max_anomalies=request.app.state.settings.max_preview_anomalies,
     )
     return public_preview(result)
 
@@ -363,31 +420,37 @@ def resolve_multiplicity(
             "VERSION_CONFLICT", 409, "Cet aperçu a changé.", {"current_version": preview["version"]}
         )
     if body.action == "link_existing":
-        if body.transaction_id is None:
-            if preview.get("_preview_protocol_version") == 2:
-                raise AppError("VALIDATION_ERROR", 422, "link_existing exige transaction_id.")
-        else:
-            candidates = [
-                item["section"]
-                for item in preview.get("_out_of_period_rows", [])
-                if item["row"] == logical_row_idx
-                and (body.section_index is None or item["section"] == body.section_index)
-            ]
-            if len(candidates) == 1:
-                validate_link_existing_preview(
-                    preview,
-                    _store(request).raw_bytes(str(preview_id)),
-                    _database_ready(request),
-                    section_index=candidates[0],
-                    row_idx=logical_row_idx,
-                    transaction_id=str(body.transaction_id),
+        candidates = [
+            item["section"]
+            for item in preview.get("_out_of_period_rows", [])
+            if item["row"] == logical_row_idx
+            and (body.section_index is None or item["section"] == body.section_index)
+        ]
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                raise AppError(
+                    "MULTIPLICITY_AMBIGUOUS",
+                    409,
+                    "L'index logique apparaît dans plusieurs sections.",
                 )
+            raise AppError(
+                "VALIDATION_ERROR", 422, "Cette ligne ne requiert pas de décision de multiplicité."
+            )
+        validate_link_existing_preview(
+            preview,
+            _store(request).raw_bytes(str(preview_id)),
+            _database_ready(request),
+            section_index=candidates[0],
+            row_idx=logical_row_idx,
+            transaction_id=str(body.transaction_id),
+        )
     updated = set_multiplicity(
         preview,
         logical_row_idx,
         body.action,
         section_index=body.section_index,
         transaction_id=str(body.transaction_id) if body.transaction_id else None,
+        actor="local_user",
     )
     return public_preview(_store(request).update(str(preview_id), updated))
 
