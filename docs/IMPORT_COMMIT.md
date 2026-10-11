@@ -45,11 +45,14 @@ pas extrapolée.
 
 Après validation de l'aperçu, l'archive écrit les octets uploadés sans
 transformation sous un nom UUID dans `data/originals/`. Le nom d'origine du
-fichier n'est jamais conservé. Le répertoire est en `0700`, les fichiers en
-`0600`; l'écriture utilise un fichier temporaire, `fsync`, puis renommage
-atomique. L'archive est brute, sans chiffrement applicatif, selon ADR-010.
-Seul le chemin relatif `data/originals/<import_file_id>.bin` est enregistré dans
-SQLite. L'API ne renvoie jamais ce chemin ni les octets.
+fichier n'est jamais conservé. Le répertoire `originals/` est en `0700`, les
+fichiers en `0600`; l'écriture utilise un fichier temporaire dans son répertoire
+frère `originals.staging/` (également `0700`, sur le même système de fichiers),
+`fsync`, puis renommage atomique vers `originals/`. Un arrêt pendant l'écriture
+ne laisse donc pas de temporaire dans le répertoire validé par la restauration.
+L'archive est brute, sans chiffrement applicatif, selon ADR-010. Seul le chemin
+relatif `data/originals/<import_file_id>.bin` est enregistré dans SQLite. L'API
+ne renvoie jamais ce chemin ni les octets.
 
 Le service utilise ensuite `write_transaction`, qui exécute `BEGIN IMMEDIATE`
 sur une connexion SQLite autocommit. Le SHA du fichier est relu sous ce verrou.
@@ -64,22 +67,30 @@ Le contrôle final vérifie le nombre total de provenances, leur identité et le
 compte, l'absence de transaction sans source et la continuité des rangs. Toute
 exception avant confirmation du `COMMIT` annule l'ensemble des écritures. Si
 aucun `import_files` commité ne référence l'archive, elle est supprimée avant
-de renvoyer l'erreur. Un arrêt brutal peut laisser un `.bin` non référencé ; au
-démarrage, avant l'acceptation des requêtes, et via `purge_orphaned_archives`,
-le backend inventorie puis purge les `.bin` non référencés et les `.tmp`
-d'écriture abandonnés de `originals/` après 24 heures. L'âge est le plus récent
-de `mtime` et `ctime`, afin qu'un simple réglage de `mtime` ne rende pas un
-fichier récent purgeable.
+de renvoyer l'erreur. Un arrêt brutal peut laisser un `.bin` non référencé ou un
+temporaire ; au démarrage, avant l'acceptation des requêtes, et via
+`purge_orphaned_archives`, le backend inventorie puis purge après 24 heures les
+archives non référencées nommées exactement `<uuid>.bin`, ainsi que les
+temporaires nommés exactement `.<uuid>.tmp` dans `originals.staging/`. Les
+temporaires de ce motif laissés par une ancienne version dans `originals/` sont
+aussi nettoyés. Tout autre nom, lien symbolique ou répertoire est ignoré. L'âge
+est le plus récent de `mtime` et `ctime`, afin qu'un simple réglage de `mtime`
+ne rende pas un fichier récent purgeable.
 
 Avant toute écriture de l'archive, le commit prend un verrou advisory `flock`
-partagé sur `.archive-lifecycle.lock` à la racine du répertoire de données (à
-côté de `originals/`, jamais dedans pour préserver le contrat de restauration);
-il le garde jusqu'à
-confirmation du COMMIT SQLite ou suppression de l'archive non référencée. La
-purge prend le même verrou en exclusif non bloquant et saute tout l'inventaire
-si un commit ou une écriture est actif, y compris dans un autre processus. Ce
-verrou interprocessus est la réservation du cycle de vie; aucune colonne métier
-ni migration n'est requise.
+partagé sur le descripteur du répertoire de données, puis sur
+`.archive-lifecycle.lock` (à côté de `originals/`, jamais dedans pour préserver
+le contrat de restauration). Le verrou du répertoire garde l'exclusion commit /
+purge même si le fichier advisory est supprimé et recréé pendant un commit.
+Après acquisition, le service vérifie aussi que le descripteur du fichier
+verrouillé et son chemin désignent le même inode et périphérique ; si le fichier
+a été remplacé entre l'ouverture et le verrouillage, il ferme et réessaie
+jusqu'à trois fois. Le commit garde les deux verrous jusqu'à confirmation du
+COMMIT SQLite ou suppression de l'archive non référencée. La purge les prend en
+exclusif non bloquant et saute tout l'inventaire si un commit ou une écriture
+est actif, y compris dans un autre processus. Le verrou du fichier reste
+compatible avec la restauration des sauvegardes. Aucune colonne métier ni
+migration n'est requise.
 
 La purge écrit et commit d'abord l'événement d'audit d'intention, avec les
 seuls comptages `archive_count` et `temporary_count`, puis supprime les fichiers

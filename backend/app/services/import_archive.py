@@ -6,9 +6,11 @@ import errno
 import fcntl
 import json
 import os
+import re
+import stat
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,17 +21,43 @@ from app.core.errors import AppError
 from app.db.models import AuditEvent, ImportFile
 from app.db.session import session_scope, write_transaction
 
+_UUID_ARCHIVE_FILENAME = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin$"
+)
+_UUID_TEMP_FILENAME = re.compile(
+    r"^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$"
+)
+_LIFECYCLE_LOCK_ATTEMPTS = 3
+
+
+class ArchiveLifecycleLock(int):
+    """File descriptor handle that also retains the stable directory lock."""
+
+    directory_descriptor: int
+
+    def __new__(cls, file_descriptor: int, directory_descriptor: int) -> ArchiveLifecycleLock:
+        lock = int.__new__(cls, file_descriptor)
+        lock.directory_descriptor = directory_descriptor
+        return lock
+
+    @property
+    def file_descriptor(self) -> int:
+        return int(self)
+
 
 class ImportArchive:
     """Store original upload bytes with atomic rename and strict local permissions."""
 
     def __init__(self, data_dir: Path) -> None:
         self.directory = data_dir / "originals"
+        self.staging_directory = data_dir / "originals.staging"
 
     def _open_lifecycle_lock(self) -> int:
         self.directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory.chmod(0o700)
+        self.staging_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.staging_directory.chmod(0o700)
         # Keep lifecycle metadata outside originals/, whose contents are also
         # validated as UUID-named archives by backup restore.
         lock_path = self.directory.parent / ".archive-lifecycle.lock"
@@ -37,14 +65,65 @@ class ImportArchive:
         os.fchmod(descriptor, 0o600)
         return descriptor
 
-    def acquire_commit_reservation(self) -> int:
+    def _open_data_directory(self) -> int:
+        return os.open(
+            self.directory.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+
+    def acquire_lifecycle_lock(self, operation: int) -> ArchiveLifecycleLock:
+        """Lock the stable data directory and verify the compatible lock-file inode."""
+        lock_path = self.directory.parent / ".archive-lifecycle.lock"
+        for _attempt in range(_LIFECYCLE_LOCK_ATTEMPTS):
+            descriptor = self._open_lifecycle_lock()
+            try:
+                directory_descriptor = self._open_data_directory()
+            except BaseException:
+                os.close(descriptor)
+                raise
+            try:
+                _archive_flock(directory_descriptor, operation)
+                _archive_flock(descriptor, operation)
+                descriptor_stat = os.fstat(descriptor)
+                try:
+                    path_stat = os.stat(lock_path, follow_symlinks=False)
+                except FileNotFoundError:
+                    path_stat = None
+            except BaseException:
+                with suppress(OSError):
+                    _archive_flock(descriptor, fcntl.LOCK_UN)
+                    _archive_flock(directory_descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+                os.close(directory_descriptor)
+                raise
+            if (
+                path_stat is not None
+                and stat.S_ISREG(path_stat.st_mode)
+                and descriptor_stat.st_dev == path_stat.st_dev
+                and descriptor_stat.st_ino == path_stat.st_ino
+            ):
+                return ArchiveLifecycleLock(descriptor, directory_descriptor)
+            with suppress(OSError):
+                _archive_flock(descriptor, fcntl.LOCK_UN)
+                _archive_flock(directory_descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+            os.close(directory_descriptor)
+        raise ArchiveLockUnavailable("Archive lifecycle lock was replaced repeatedly.")
+
+    def release_lifecycle_lock(self, lock: ArchiveLifecycleLock) -> None:
+        try:
+            _archive_flock(lock.file_descriptor, fcntl.LOCK_UN)
+            _archive_flock(lock.directory_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(lock.file_descriptor)
+            os.close(lock.directory_descriptor)
+
+    def acquire_commit_reservation(self) -> ArchiveLifecycleLock:
         """Reserve archive lifecycle against purges through the SQLite COMMIT."""
 
-        descriptor = self._open_lifecycle_lock()
         try:
-            _archive_flock(descriptor, fcntl.LOCK_SH)
+            return self.acquire_lifecycle_lock(fcntl.LOCK_SH)
         except ArchiveLockUnavailable as error:
-            os.close(descriptor)
             raise AppError(
                 "ARCHIVE_LOCK_UNAVAILABLE",
                 503,
@@ -52,14 +131,13 @@ class ImportArchive:
                 "réessayez ailleurs.",
             ) from error
         except BaseException:
-            os.close(descriptor)
             raise
-        return descriptor
 
     @staticmethod
-    def release_commit_reservation(descriptor: int) -> None:
+    def release_commit_reservation(lock: ArchiveLifecycleLock) -> None:
         try:
-            _archive_flock(descriptor, fcntl.LOCK_UN)
+            _archive_flock(lock.file_descriptor, fcntl.LOCK_UN)
+            _archive_flock(lock.directory_descriptor, fcntl.LOCK_UN)
         except ArchiveLockUnavailable as error:
             raise AppError(
                 "ARCHIVE_LOCK_UNAVAILABLE",
@@ -68,7 +146,8 @@ class ImportArchive:
                 "réessayez ailleurs.",
             ) from error
         finally:
-            os.close(descriptor)
+            os.close(lock.file_descriptor)
+            os.close(lock.directory_descriptor)
 
     @contextmanager
     def commit_reservation(self) -> Iterator[None]:
@@ -88,7 +167,9 @@ class ImportArchive:
 
     def _write_reserved(self, import_file_id: str, raw_bytes: bytes) -> Path:
         final_path = self.directory / f"{import_file_id}.bin"
-        temporary_path = self.directory / f".{uuid.uuid4()}.tmp"
+        self.staging_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.staging_directory.chmod(0o700)
+        temporary_path = self.staging_directory / f".{uuid.uuid4()}.tmp"
         descriptor = os.open(temporary_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
             with os.fdopen(descriptor, "wb") as stream:
@@ -130,16 +211,16 @@ def purge_orphaned_archives(
     """
 
     archive = ImportArchive(data_dir)
-    if not archive.directory.exists():
+    if not archive.directory.exists() and not archive.staging_directory.exists():
         return 0
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     cutoff = current - older_than
-    lock_descriptor = archive._open_lifecycle_lock()
+    lock_descriptor: ArchiveLifecycleLock | None = None
     try:
         try:
-            _archive_flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_descriptor = archive.acquire_lifecycle_lock(fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
 
@@ -156,22 +237,18 @@ def purge_orphaned_archives(
 
         binary_candidates: list[Path] = []
         temporary_candidates: list[Path] = []
-        for path in (*archive.directory.glob("*.bin"), *archive.directory.glob(".*.tmp")):
-            if path.is_symlink() or not path.is_file():
+        for path in archive.directory.iterdir():
+            if not _UUID_ARCHIVE_FILENAME.fullmatch(path.name) or path.name in references:
                 continue
-            if path.suffix == ".bin" and path.name in references:
+            _append_aged_regular_file(path, cutoff, binary_candidates)
+        # Clean exact-name temporaries left by older versions as well as current
+        # staging files. New writes never put a temporary in originals/.
+        for directory in (archive.directory, archive.staging_directory):
+            if not directory.is_dir() or directory.is_symlink():
                 continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            newest_timestamp = max(stat.st_mtime, stat.st_ctime)
-            if datetime.fromtimestamp(newest_timestamp, UTC) > cutoff:
-                continue
-            if path.suffix == ".bin":
-                binary_candidates.append(path)
-            else:
-                temporary_candidates.append(path)
+            for path in directory.iterdir():
+                if _UUID_TEMP_FILENAME.fullmatch(path.name):
+                    _append_aged_regular_file(path, cutoff, temporary_candidates)
 
         if not binary_candidates and not temporary_candidates:
             return 0
@@ -205,11 +282,22 @@ def purge_orphaned_archives(
         return removed
     finally:
         try:
-            _archive_flock(lock_descriptor, fcntl.LOCK_UN)
+            if lock_descriptor is not None:
+                archive.release_lifecycle_lock(lock_descriptor)
         except ArchiveLockUnavailable:
             pass
-        finally:
-            os.close(lock_descriptor)
+
+
+def _append_aged_regular_file(path: Path, cutoff: datetime, candidates: list[Path]) -> None:
+    try:
+        file_stat = path.lstat()
+    except OSError:
+        return
+    if not stat.S_ISREG(file_stat.st_mode):
+        return
+    newest_timestamp = max(file_stat.st_mtime, file_stat.st_ctime)
+    if datetime.fromtimestamp(newest_timestamp, UTC) <= cutoff:
+        candidates.append(path)
 
 
 class ArchiveLockUnavailable(RuntimeError):

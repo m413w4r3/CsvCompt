@@ -21,6 +21,7 @@ from app.db.models import AuditEvent
 from app.main import create_app
 from app.main import logger as main_logger
 from app.services import import_archive, import_commit
+from app.services.backups import _validate_target_originals
 from app.services.import_archive import ImportArchive, purge_orphaned_archives
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -217,8 +218,10 @@ def test_IMP_06_tmp_purge_never_removes_an_in_progress_writer_file(
     worker.start()
     try:
         assert entered.wait(timeout=5)
-        temporary_files = list(originals.glob(".*.tmp"))
+        staging = data_dir / "originals.staging"
+        temporary_files = list(staging.glob(".*.tmp"))
         assert len(temporary_files) == 1
+        assert temporary_files[0].stat().st_dev == originals.stat().st_dev
         future = datetime.now(UTC) + timedelta(hours=26)
         assert purge_orphaned_archives(app.state.db_engine, data_dir, now=future) == 0
         assert temporary_files[0].exists()
@@ -242,7 +245,9 @@ def test_IMP_06_archive_purge_uses_maximum_mtime_ctime_and_cleans_tmp(
     originals = data_dir / "originals"
     originals.mkdir(parents=True, mode=0o700)
     old_bin = originals / f"{uuid4()}.bin"
-    old_tmp = originals / f".{uuid4()}.tmp"
+    staging = data_dir / "originals.staging"
+    staging.mkdir(mode=0o700)
+    old_tmp = staging / f".{uuid4()}.tmp"
     old_bin.write_bytes(b"synthetic aged archive")
     old_tmp.write_bytes(b"synthetic aged temporary archive")
     old_mtime = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
@@ -326,8 +331,10 @@ def test_IMP_06_sigkill_temp_is_purged_at_startup_after_grace(
     assert process.exitcode == -signal.SIGKILL
 
     originals = data_dir / "originals"
-    temporary_files = list(originals.glob(".*.tmp"))
+    staging = data_dir / "originals.staging"
+    temporary_files = list(staging.glob(".*.tmp"))
     assert len(temporary_files) == 1
+    assert list(originals.iterdir()) == []
     with sqlite3.connect(database) as connection:
         for table in ("transactions", "source_rows", "import_files", "accounts"):
             assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
@@ -346,6 +353,133 @@ def test_IMP_06_sigkill_temp_is_purged_at_startup_after_grace(
     monkeypatch.setattr(import_archive, "datetime", FutureDateTime)
     with TestClient(create_app(settings)):
         assert not temporary_files[0].exists()
+
+
+@pytest.mark.integration
+def test_IMP_06_archive_temp_is_outside_restore_validated_originals(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "archive-restore-contract"
+    archive = ImportArchive(data_dir)
+    result = archive.write(str(uuid4()), b"synthetic archive")
+
+    assert result.parent == data_dir / "originals"
+    assert result.exists()
+    assert list(archive.staging_directory.iterdir()) == []
+    assert archive.staging_directory.stat().st_mode & 0o777 == 0o700
+    assert archive.directory.stat().st_dev == archive.staging_directory.stat().st_dev
+    _validate_target_originals(archive.directory)
+
+
+@pytest.mark.integration
+def test_IMP_06_lifecycle_lock_retries_if_replaced_while_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = ImportArchive(tmp_path / "archive-lock-replacement")
+    holder = archive.acquire_commit_reservation()
+    lock_path = archive.directory.parent / ".archive-lifecycle.lock"
+    old_inode = os.fstat(holder.file_descriptor).st_ino
+    descriptor_opened = threading.Event()
+    real_open = archive._open_lifecycle_lock
+    opened_count = 0
+
+    def signal_open() -> int:
+        nonlocal opened_count
+        descriptor = real_open()
+        opened_count += 1
+        if opened_count == 1:
+            descriptor_opened.set()
+        return descriptor
+
+    monkeypatch.setattr(archive, "_open_lifecycle_lock", signal_open)
+    outcome: dict[str, object] = {}
+
+    def wait_for_exclusive_lock() -> None:
+        try:
+            outcome["descriptor"] = archive.acquire_lifecycle_lock(import_archive.fcntl.LOCK_EX)
+        except BaseException as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=wait_for_exclusive_lock)
+    worker.start()
+    try:
+        assert descriptor_opened.wait(timeout=5)
+        lock_path.unlink()
+        lock_path.touch(mode=0o600)
+        ImportArchive.release_commit_reservation(holder)
+        holder = -1
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        assert "error" not in outcome
+        lock = outcome["descriptor"]
+        assert isinstance(lock, import_archive.ArchiveLifecycleLock)
+        descriptor_stat = os.fstat(lock.file_descriptor)
+        path_stat = lock_path.stat()
+        assert descriptor_stat.st_ino == path_stat.st_ino
+        assert descriptor_stat.st_dev == path_stat.st_dev
+        assert descriptor_stat.st_ino != old_inode
+        assert opened_count >= 2
+        archive.release_lifecycle_lock(lock)
+    finally:
+        if holder >= 0:
+            ImportArchive.release_commit_reservation(holder)
+        if worker.is_alive():
+            worker.join(timeout=10)
+
+
+@pytest.mark.integration
+def test_IMP_06_purge_skips_if_lock_file_is_replaced_during_active_commit(
+    tmp_path: Path,
+) -> None:
+    app, _settings, _database, data_dir = _ready(tmp_path, "archive-active-lock-replacement")
+    archive = ImportArchive(data_dir)
+    originals = data_dir / "originals"
+    originals.mkdir(parents=True, mode=0o700)
+    candidate = originals / f"{uuid4()}.bin"
+    candidate.write_bytes(b"synthetic active archive")
+    future = datetime.now(UTC) + timedelta(hours=26)
+    lock = archive.acquire_commit_reservation()
+    lock_path = data_dir / ".archive-lifecycle.lock"
+    lock_path.unlink()
+    lock_path.touch(mode=0o600)
+
+    try:
+        assert purge_orphaned_archives(app.state.db_engine, data_dir, now=future) == 0
+        assert candidate.exists()
+    finally:
+        archive.release_commit_reservation(lock)
+
+    assert purge_orphaned_archives(app.state.db_engine, data_dir, now=future) == 1
+    assert not candidate.exists()
+
+
+@pytest.mark.integration
+def test_IMP_06_purge_only_removes_strict_uuid_archives(
+    tmp_path: Path,
+) -> None:
+    app, _settings, _database, data_dir = _ready(tmp_path, "archive-strict-purge")
+    originals = data_dir / "originals"
+    originals.mkdir(parents=True, mode=0o700)
+    valid = originals / f"{uuid4()}.bin"
+    user_note = originals / "notes-utilisateur.bin"
+    unrelated = originals / "foreign.txt"
+    symlink = originals / f"{uuid4()}.bin"
+    directory = originals / f"{uuid4()}.bin"
+    external_target = tmp_path / "external-synthetic-target"
+    for path in (valid, user_note, unrelated, external_target):
+        path.write_bytes(b"synthetic bytes")
+    symlink.symlink_to(external_target)
+    directory.mkdir()
+    old_mtime = (datetime.now(UTC) - timedelta(hours=25)).timestamp()
+    for path in (valid, user_note, unrelated, external_target):
+        os.utime(path, (old_mtime, old_mtime))
+
+    future = datetime.now(UTC) + timedelta(hours=26)
+    assert purge_orphaned_archives(app.state.db_engine, data_dir, now=future) == 1
+    assert not valid.exists()
+    assert user_note.exists() and unrelated.exists()
+    assert symlink.is_symlink() and directory.is_dir()
+    assert external_target.exists()
 
 
 @pytest.mark.integration

@@ -41,7 +41,7 @@ from app.importers.overlap import (
 from app.importers.types import Anomaly, ParsedRow, ParsedSection
 from app.services.app_secrets import read_hmac_key
 from app.services.idempotency import find_replay, request_fingerprint, save_response
-from app.services.import_archive import ImportArchive
+from app.services.import_archive import ArchiveLifecycleLock, ImportArchive
 from app.services.import_preview_store import ImportPreviewStore
 from app.services.imports import MAX_IMPORT_OPERATION_COUNT, _rejection_code
 
@@ -1068,7 +1068,7 @@ def commit_preview(
     commit_marked = False
     archive = ImportArchive(data_dir)
     archive_path: Path | None = None
-    archive_reservation: int | None = None
+    archive_reservation: ArchiveLifecycleLock | None = None
     commit_confirmed = False
     try:
         try:
