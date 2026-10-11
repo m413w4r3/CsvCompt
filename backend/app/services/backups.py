@@ -36,11 +36,18 @@ from app.db.migrate import database_file_path, upgrade_to_head
 ROOT = Path(__file__).resolve().parents[3]
 BACKUP_FORMAT_VERSION = 1
 BACKUP_EXTENSION = ".cfbackup"
+_ARCHIVE_LIFECYCLE_LOCK_NAME = ".archive-lifecycle.lock"
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_MEMBER = "database.sqlite"
 _HMAC_SETTING = "import.account_hmac_key.v1"
 _BACKUP_TIMEOUT_ENV = "COMPTES_BACKUP_TIMEOUT_SECONDS"
 _DEFAULT_BACKUP_TIMEOUT_SECONDS = 30
+_UUID_ORIGINAL_FILENAME = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin$"
+)
+_UUID_ORIGINAL_TEMP_FILENAME = re.compile(
+    r"^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$"
+)
 _OUTPUT_TEMP_GLOB = "._comptes-backup-publish.cfbackup.*.tmp"
 _BACKUP_STAGING_LOCK = threading.RLock()
 _BACKUP_STAGING_LOCK_STATE = threading.local()
@@ -238,6 +245,60 @@ def _canonical_lock_directories(paths: set[Path]) -> list[Path]:
         {_absolute_path(path).resolve(strict=False) for path in paths},
         key=str,
     )
+
+
+def _archive_lifecycle_lock_path(originals_dir: Path) -> Path:
+    """Match ImportArchive's lock location: the parent of ``originals/``."""
+    return originals_dir.parent / _ARCHIVE_LIFECYCLE_LOCK_NAME
+
+
+@contextmanager
+def _archive_lifecycle_restore_lock(originals_dir: Path) -> Iterator[None]:
+    """Exclude archive commits and purges while a restored generation is published."""
+    data_dir = originals_dir.parent
+    if not data_dir.exists():
+        # A fresh, unpublished target has no import process or archive lifecycle yet.
+        yield
+        return
+
+    descriptor: int | None = None
+    locked = False
+    try:
+        physical_data_dir = data_dir.resolve(strict=True)
+        if not physical_data_dir.is_dir():
+            raise OSError("archive data directory is not a directory")
+        lock_path = _archive_lifecycle_lock_path(physical_data_dir / "originals")
+        descriptor = os.open(
+            lock_path,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as error:
+            raise BackupError(
+                "Une importation ou purge des archives est en cours; la restauration est refusée."
+            ) from error
+        except OSError as error:
+            raise BackupError(
+                "Le verrou du cycle de vie des archives est indisponible; "
+                "la restauration est refusée."
+            ) from error
+        yield
+    except BackupError:
+        raise
+    except OSError as error:
+        raise BackupError(
+            "Impossible d'acquérir le verrou du cycle de vie des archives."
+        ) from error
+    finally:
+        if descriptor is not None:
+            if locked:
+                with suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 def _purge_output_staging(directory: Path) -> None:
@@ -668,9 +729,15 @@ def _collect_originals(data_dir: Path, referenced: frozenset[str]) -> list[Path]
     if directory.exists():
         if not directory.is_dir():
             raise BackupError("Le stockage des archives d'import est invalide.")
-        for path in sorted(directory.glob("*.bin")):
+        for path in sorted(directory.iterdir()):
             if path.is_symlink() or not path.is_file():
                 raise BackupError("Le stockage des archives d'import est invalide.")
+            if _UUID_ORIGINAL_TEMP_FILENAME.fullmatch(path.name):
+                continue
+            if not _UUID_ORIGINAL_FILENAME.fullmatch(path.name):
+                raise BackupError(
+                    "Le stockage des archives d'import contient une entrée inattendue."
+                )
             _archive_filename(f"data/originals/{path.name}")
             files.append(path)
     names = {path.name for path in files}
@@ -1469,11 +1536,14 @@ def _validate_target_originals(originals_dir: Path) -> None:
         return
     if not originals_dir.is_dir():
         raise BackupError("Le stockage d'archives cible est invalide.")
-    uuid_filename = re.compile(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin$"
-    )
     for entry in originals_dir.iterdir():
-        if entry.is_symlink() or not entry.is_file() or not uuid_filename.fullmatch(entry.name):
+        if entry.is_symlink() or not entry.is_file():
+            raise BackupError(
+                "La restauration refuse originals/ contenant un fichier autre que <uuid>.bin."
+            )
+        if not _UUID_ORIGINAL_FILENAME.fullmatch(
+            entry.name
+        ) and not _UUID_ORIGINAL_TEMP_FILENAME.fullmatch(entry.name):
             raise BackupError(
                 "La restauration refuse originals/ contenant un fichier autre que <uuid>.bin."
             )
@@ -1645,6 +1715,25 @@ def restore_backup(
 
 
 def _restore_backup_locked(
+    backup_path: Path,
+    target_database_path: Path,
+    target_data_dir: Path,
+    *,
+    active_database_path: Path | None = None,
+    active_data_dir: Path | None = None,
+) -> RestoreResult:
+    """Acquire ImportArchive's lifecycle lock before preparing/publishing a generation."""
+    with _archive_lifecycle_restore_lock(target_data_dir / "originals"):
+        return _restore_backup_generation_locked(
+            backup_path,
+            target_database_path,
+            target_data_dir,
+            active_database_path=active_database_path,
+            active_data_dir=active_data_dir,
+        )
+
+
+def _restore_backup_generation_locked(
     backup_path: Path,
     target_database_path: Path,
     target_data_dir: Path,

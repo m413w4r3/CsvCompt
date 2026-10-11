@@ -44,6 +44,23 @@ Cet addendum complète la matrice source sans la modifier. Les IDs sont utilisé
 | `OUT_OF_PERIOD` | `OUT_OF_PERIOD` · résolution requise | La ligne ne participe pas au maximum automatique ; PATCH de multiplicité exige `link_existing` ou `create_occurrence`, puis commit tout-ou-rien. |
 | `ZERO_AMOUNT` | `VALIDATION_ERROR` avec détail `ZERO_AMOUNT` · erreur bloquante | Le format CA ne crée aucune transaction/source pour la ligne ; le fichier doit être corrigé ou rejeté. |
 
+### Tests T21 — API de revue humaine
+
+| ID | Gate | Scénario | Oracle / condition de succès | Niveau |
+|---|---|---|---|---|
+| REVIEW-01 | G5 | File groupée, filtres et agrégats | contrepartie validée groupée, inconnue isolée; compte, période, direction et statut filtrent; centimes exacts, hors plage `null` + indicateur | integration |
+| REVIEW-02 | G5 | Priorité, nouveauté et pagination curseur | ordre stable impact puis date/ID; pages sans doublon; curseur lié aux filtres/snapshot; snapshot expiré → `CURSOR_STALE`; `Cache-Control: no-store` | contract |
+| REVIEW-03 | G5 | Détail et provenance des suggestions | détail expose décisions et sources/méthodes ordonnées de `evaluate_transaction`; aucune suggestion n'est appliquée par GET | integration |
+| REVIEW-04 | G5 | Correction d'une occurrence dans un groupe | seule l'ID visée change; les voisins restent strictement identiques (RULE-05) | integration |
+| REVIEW-05 | G5 | Action atomique sur sélection | sélection explicite uniquement; versions périmées → 409 listant les éléments; aucun élément partiellement modifié | integration/concurrency |
+| REVIEW-06 | G5 | Règle future avec simulation obligatoire | simulation renvoyée avant création du brouillon `future_only`; zéro allocation/exécution; aucune application silencieuse | integration |
+| REVIEW-07 | G5 | Split entier | parts strictes signées avec somme exacte acceptées; somme incorrecte ou float rejeté 422 sans écriture | integration/property |
+| REVIEW-08 | G5 | Idempotence d'une confirmation | même clé/corps rejoue exactement la réponse; même clé/corps différent → 409; une seule décision/audit | integration |
+| REVIEW-09 | G5 | Concurrence optimiste | version transaction ou lien périmée → 409 stable; snapshot de source bancaire inchangé | integration/concurrency |
+| REVIEW-10 | G5 | Annulation T20 | undo versionné restaure les allocations via nouvelles lignes, garde la source bancaire, et le rejeu est idempotent | integration |
+| REVIEW-11 | G5 | Priorité humaine et rechargement | moteur/règle/mémoire ne remplace pas une décision humaine; après nouvelle session, allocations, versions et historique sont persistés | integration |
+| REVIEW-12 | G5 | Performance et propriétés seedées | file de 10 000 opérations < 2 s; ≥500 séquences gardent somme allocations + résidu = montant et aucun écrasement humain | performance/property |
+
 ### Tests supplémentaires T19 — règles, ordre et simulation
 
 | ID | Gate | Scénario | Oracle / condition de succès | Niveau |
@@ -60,3 +77,22 @@ Cet addendum complète la matrice source sans la modifier. Les IDs sont utilisé
 | RULE-19 | G4 | Prédicats compte, direction, montant, dates et flux | Seules les transactions satisfaisant chaque contrainte entière explicite sont proposées | integration |
 | RULE-20 | G4 | Marketplace ambiguë détectée depuis un motif sans payee lié | Le libellé synthétique correspondant à une marketplace connue est marqué ambigu dans la simulation | integration |
 | RULE-21 | G4 | Plafond d'exceptions de règle | L'ajout d'une exception au-delà de la limite configurée échoue sans avancer la version ni modifier la règle | integration |
+
+### Tests supplémentaires T24/T25 — moteur canonique et API analytique
+
+| ID | Gate | Scénario | Oracle / condition de succès | Niveau |
+|---|---|---|---|---|
+| KPI-10 | G6 | Validation et erreur normalisée des filtres analytiques | Période hors 2026, flux inconnu, compte absent/inconnu ou engagement invalide renvoie `VALIDATION_ERROR`/422 ; toute réponse analytique porte `Cache-Control: no-store` | contract |
+| KPI-11 | G6 | Revenu régulier distinct d'un prêt reçu | `regular_income.v1` ne somme que `income_recurring`; le déblocage de prêt, l'aide/autre revenu, les transferts propres, l'épargne et les remboursements restent dans leurs propres composantes | contract |
+| KPI-12 | G6 | Engagements explicites et détail de capacité | Seule une échéance de prêt sélectionnée est retranchée ; le détail paginé recomposé donne la même capacité et le même taux entier | unit/contract |
+| KPI-13 | G6 | Horloge, mois courant et delta | `as_of` est déterministe depuis l'horloge serveur ; mois courant incomplet et comparateur précédent absent rendent capacité, taux ou delta indisponibles avec raison, sans zéro de remplacement | contract |
+| KPI-14 | G6 | Curseur de drilldown stable et confidentialité | Pages ordonnées `(booked_on, transaction_id)` sans doublon sous snapshot signé ; filtres modifiés invalident le curseur ; `raw_label` est absent sauf demande explicite | contract/security |
+| PERF-01 | G6 | Lectures analytiques sur volumes synthétiques | Sur un mois couvert (section committée), avec allocations, résidus partiels et lignes non ventilées : `overview`, `spending-hierarchy`, `family`, `series` (jour) et une page de `drilldown` à 10 000 puis 100 000 transactions ; totaux bancaire et consommation exacts ; durées affichées (opt-in `COMPTES_RUN_ANALYTICS_PERF=1`), aucun index ajouté | performance |
+| KPI-15 | G6 | Séries jour/semaine/mois recomposent la période | Σ des points d'une métrique additive == valeur de la période ; semaines ISO tronquées ; chaque point porte complétude et raison d'indisponibilité | contract |
+| KPI-16 | G6 | Drilldown de chaque métrique | pour chaque métrique de l'overview, pages sans doublon, Σ contributions == agrégat, `reconciles` vrai ou `null` si indisponible ; curseur lié aux filtres | contract |
+| KPI-17 | G6 | Entiers hors 2^53 | `*_cents`/`*_basis_points` non sûrs → `null` + `total_out_of_range`, jamais arrondis ; indicateur racine booléen | contract |
+| KPI-18 | G6 | Propriétés de réconciliation seedées (≥ 1 000 scénarios) | bank_net_flow == Σ transactions ; Σ allocations + résidu == flux ; Σ catégories/bénéficiaires/arbre/épargne == total ; drilldown == agrégat ; invariance par ordre d'import ; filtres catégorie/flux aléatoires | unit/property |
+| KPI-19 | G6 | Oracle indépendant et KPI-08 en propriété | consommation, enveloppe et épargne == restatement METRICS.md ; observed − envelope == dépenses nettes du compte personnel ; aucun double comptage | unit/property |
+| KPI-20 | G6 | Base écrite par les services réels | allocations/liens via `allocate`/`create_refund_link`/`confirm_refund_link` : catégories == `net_effect_by_category`, prêt ≠ revenu, résidu visible, capacité/taux entiers, deltas et engagement non comparable | integration |
+| KPI-21 | G6 | Ventilations = agrégat | arbre catégorie/sous-catégorie, bénéficiaires, marchands et épargne par catégorie somment exactement à `consumption_net.v1`, `personal_allowances.v1` et `savings_net_transferred.v1` ; revenu régulier distinct du prêt reçu et des remboursements | contract/integration |
+| KPI-22 | G6 | Filtre catégorie parent et crédits liés | `category_ids=<parent>` inclut les sous-catégories et les crédits dont une part liée vise la catégorie ; `flow_kind=unknown` cible le résidu non nul | contract |

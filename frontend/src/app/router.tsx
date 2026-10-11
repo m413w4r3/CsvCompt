@@ -1,4 +1,4 @@
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, Navigate, useLocation } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import { Overview } from '../pages/Overview/index'
 import { Expenses } from '../pages/Expenses/index'
@@ -12,12 +12,18 @@ import { Transactions, TransactionsRouteErrorElement } from '../pages/Transactio
 import { Settings } from '../pages/Settings/index'
 import { NotFound } from '../pages/NotFound/index'
 
+/** Alias francophone de la page de revue ; les filtres de l'URL sont conservés. */
+function RevueAlias() {
+  const { search } = useLocation()
+  return <Navigate to={{ pathname: '/review', search }} replace />
+}
+
 export const router = createBrowserRouter([
   { path: '/', element: <AppShell />, children: [
     { index: true, element: <Overview /> },
     { path: 'expenses', element: <Expenses /> }, { path: 'income', element: <Income /> },
     { path: 'family', element: <Family /> }, { path: 'merchants', element: <Merchants /> },
-    { path: 'budgets', element: <Budgets /> }, { path: 'review', element: <Review /> },
+    { path: 'budgets', element: <Budgets /> }, { path: 'review', element: <Review /> }, { path: 'revue', element: <RevueAlias /> },
     { path: 'insights', element: <Insights /> }, { path: 'transactions', element: <Transactions />, errorElement: <TransactionsRouteErrorElement /> },
     { path: 'settings', element: <Settings /> }, { path: '*', element: <NotFound /> },
   ] },

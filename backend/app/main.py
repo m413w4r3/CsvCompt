@@ -11,6 +11,9 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from sqlalchemy.exc import OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.requests import Request
+from starlette.responses import Response
 
 from app.api.v1.accounts import router as accounts_router
 from app.api.v1.analytics import router as analytics_router
@@ -121,7 +124,9 @@ def create_app(
     )
 
     @application.middleware("http")
-    async def disable_analytics_caching(request, call_next):
+    async def disable_analytics_caching(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
         response = await call_next(request)
         if request.url.path.startswith("/api/v1/analytics/"):
             response.headers["Cache-Control"] = "no-store"

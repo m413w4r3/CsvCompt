@@ -98,3 +98,38 @@ reconstituer son ancien regroupement.
 | `UNDO_ACTION_NOT_SUPPORTED` | 409 | Une décision `undo` ne peut pas être annulée à son tour. |
 | `UNDO_SNAPSHOT_INVALID` | 500 | Un instantané stocké est incomplet ou invalide. |
 | `REVIEW_INVALID` | 422 | Acteur, identifiant, confirmation ou version mal formés. |
+
+## API de revue humaine T21
+
+La route `GET /api/v1/review/queue` lit un snapshot WAL isolé du pool ordinaire,
+avec le plafond, TTL et éviction LRU ADR-032. Elle regroupe les transactions
+par contrepartie validée et statut de décision; sans contrepartie, chaque
+occurrence reste indépendante. Les montants demeurent des centimes signés et
+les agrégats hors plage sûre JavaScript sont `null` avec
+`total_out_of_range=true`. Le curseur HMAC inclut les filtres, le snapshot et
+la position dans l'ordre impact décroissant, date récente puis ID stable.
+
+`GET /api/v1/review/queue/{review_group_id}` renvoie les allocations actives,
+versions, historique de décisions et candidats du moteur. Il ne modifie pas
+la file. La file et les détails n'exposent ni numéro bancaire ni empreinte de
+compte; les erreurs ne reflètent jamais un libellé reçu.
+
+`POST /api/v1/review/decisions` exige un acteur, une version attendue, une
+portée et une clé d'idempotence. `this_transaction` est la portée par défaut.
+`selection` porte une liste d'IDs et leurs versions; toutes les écritures
+d'allocation partagent une transaction SQLite. Toute version périmée annule
+l'ensemble et renvoie `409 REVIEW_SELECTION_CONFLICT` avec les IDs et versions
+courantes. L'écriture d'allocation utilise `allocate_in_session`, conserve
+l'audit T20 et protège les décisions humaines.
+
+`future_rule` n'applique aucune règle. La requête construit une règle
+`future_only`, lance d'abord `simulate_rule`, puis conserve un brouillon. La
+réponse expose le résultat de simulation, la règle non approuvée et
+`applied=false`; l'approbation est une action humaine ultérieure. La portée
+`selection` ne propage aucune règle aux transactions voisines.
+
+Les liens de remboursement utilisent `create_refund_link`,
+`confirm_refund_link` et `reject_refund_link`; les contrôles de capacité,
+versions et audits restent ceux d'ADR-027/033. L'annulation d'une allocation
+est déléguée à `undo_decision` de T20 et ne modifie jamais la transaction
+bancaire source.

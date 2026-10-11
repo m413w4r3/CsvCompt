@@ -26,7 +26,7 @@ Le front synchronise ces filtres dans l'URL sur les pages Transactions, Overview
 
 ### Pagination et cohérence
 
-Les listes serveur utilisent une pagination par curseur opaque `cursor` et `limit` (défaut 50, maximum 100), pas un offset. Transactions : ordre déterministe `booked_on DESC, transaction_id DESC`. Le curseur signé lie la dernière paire, les filtres canoniques et un identifiant opaque de snapshot. La première page épingle une lecture SQLite WAL à la visibilité observée lors de cette page ; les pages suivantes réutilisent cette lecture, même si un import est committé entre-temps. Les snapshots utilisent un pool dédié de 4 connexions, plafonné à 3 snapshots par processus, avec éviction LRU, un TTL de 60 secondes et un balayage de fond au plus chaque seconde. Si le plafond est occupé par des pages simultanées, l'API renvoie `503 DATABASE_BUSY`; après expiration ou éviction, elle renvoie `409 CURSOR_STALE`. La valeur de recherche `q` n'est jamais sérialisée en clair dans le curseur : les filtres sont vérifiés par HMAC. File de revue : curseur signé lié au filtre et à la révision de file, avec ordre `priority DESC, latest_booked_on DESC, review_group_id ASC`; si une décision a changé la file, l'API renvoie `CURSOR_STALE` et l'interface repart de la première page. `next_cursor=null` termine la liste.
+Les listes serveur utilisent une pagination par curseur opaque `cursor` et `limit` (défaut 50, maximum 100), pas un offset. Transactions : ordre déterministe `booked_on DESC, transaction_id DESC`. Le curseur signé lie la dernière paire, les filtres canoniques et un identifiant opaque de snapshot. La première page épingle une lecture SQLite WAL à la visibilité observée lors de cette page ; les pages suivantes réutilisent cette lecture, même si un import est committé entre-temps. Les snapshots utilisent un pool dédié de 4 connexions, plafonné à 3 snapshots par processus, avec éviction LRU, un TTL de 60 secondes et un balayage de fond au plus chaque seconde. Si le plafond est occupé par des pages simultanées, l'API renvoie `503 DATABASE_BUSY`; après expiration ou éviction, elle renvoie `409 CURSOR_STALE`. La valeur de recherche `q` n'est jamais sérialisée en clair dans le curseur : les filtres sont vérifiés par HMAC. File de revue : curseur signé lié aux filtres et au snapshot de revue, avec ordre `impact_cents DESC, latest_booked_on DESC, review_group_id ASC`. Une lecture continue sur le même snapshot; après expiration/éviction, `CURSOR_STALE` invite à relancer la première page. `next_cursor=null` termine la liste.
 
 Forme commune :
 
@@ -36,11 +36,13 @@ Forme commune :
 
 ### Mutations, erreurs et sécurité
 
-- Toutes les mutations exigent `Origin` local autorisé et jeton CSRF valide. `Idempotency-Key` UUID est obligatoire uniquement pour les POST qui créent ou appliquent une écriture persistante : `POST /imports/{preview_id}/commit`, `POST /rules`, `POST /rules/{rule_id}/apply`, `POST /review/decisions`, `POST /review/decisions/{decision_id}/undo`, `POST /review/llm-suggestions`, `POST /budgets`, `POST /insights/generate`, `POST /backups` et `POST /backups/restore/commit`. Les POST d'aperçu, de dry-run ou de test de connexion n'en exigent pas. Toute réutilisation d'une clé avec la même méthode/chemin/corps canonique rejoue le statut et la réponse enregistrés ; une même clé avec un corps différent renvoie `409 IDEMPOTENCY_CONFLICT`. Les réponses mémorisées ne contiennent ni clé secrète ni corps bancaire brut non nécessaire.
+- Toute mutation (`POST`, `PATCH`, `PUT`, `DELETE`) exige une origine locale autorisée : `Origin` est vérifié ; si cet en-tête est absent, le serveur vérifie `Referer`. `Origin: null`, une origine externe, un `Referer` externe ou l'absence des deux en-têtes donnent `403 ORIGIN_NOT_ALLOWED`. Il n'existe ni jeton CSRF ni route bootstrap en v1. Un client non navigateur, notamment un script local, doit envoyer un `Origin` correspondant à une origine loopback configurée ; ces contrôles ne constituent pas une authentification réseau. Un formulaire `text/plain` ne contourne pas le contrôle d'origine et reste soumis à la validation du type de contenu de la route. `Idempotency-Key` UUID est obligatoire uniquement pour les POST qui créent ou appliquent une écriture persistante : `POST /imports/{preview_id}/commit`, `POST /rules`, `POST /rules/{rule_id}/apply`, `POST /review/decisions`, `POST /review/decisions/{decision_id}/undo`, `POST /review/llm-suggestions`, `POST /budgets`, `POST /insights/generate`, `POST /backups` et `POST /backups/restore/commit`. Les POST d'aperçu, de dry-run ou de test de connexion n'en exigent pas. Toute réutilisation d'une clé avec la même méthode/chemin/corps canonique rejoue le statut et la réponse enregistrés ; une même clé avec un corps différent renvoie `409 IDEMPOTENCY_CONFLICT`. Les réponses mémorisées ne contiennent ni clé secrète ni corps bancaire brut non nécessaire.
 - `Idempotency-Key` est facultative pour `PUT`, `PATCH` et `DELETE`; ces méthodes exigent toujours `expected_version` et le contrôle optimiste reste obligatoire. Si une clé est fournie, elle suit la même règle de rejeu/conflit. Les `GET` ne demandent, n'enregistrent ni ne traitent jamais de clé d'idempotence.
 - Toute ressource modifiable expose `version`. La requête de mutation envoie `expected_version`; une version obsolète répond `409 VERSION_CONFLICT` avec `details.current_version`.
 - Les entrées `idempotency_records` sont conservées 7 jours glissants, avec `expires_at_utc`; une purge au démarrage supprime celles expirées. Les réponses créatrices ne sont rejouables qu'au cours de cette fenêtre (ADR-023).
-- Le serveur écoute `127.0.0.1` uniquement. `GET /api/v1/health` n'appelle ni banque ni fournisseur LLM et fonctionne sans réseau externe ni clé configurée.
+- Le bind loopback `127.0.0.1` est le seul mode d'usage supporté en v1. `ALLOW_NON_LOOPBACK=true` est un réglage de dernier recours, sans authentification applicative ; CORS et le contrôle `Origin` ne protègent pas contre un client réseau direct. `GET /api/v1/health` n'appelle ni banque ni fournisseur LLM et fonctionne sans réseau externe ni clé configurée.
+- `/docs`, `/redoc` et `/openapi.json` sont désactivés par défaut ; `ENABLE_API_DOCS=true` les active pour le développement local.
+- Toutes les réponses HTTP du backend reçoivent `Cache-Control: no-store`, y compris erreurs et réponses `304`.
 - Erreur normalisée sous l'enveloppe `{ "error": { "code", "message", "details" } }`, sans secret, chemin disque, numéro de compte ou libellé réel dans les détails techniques :
 
 <!-- contract-example:error -->
@@ -48,7 +50,7 @@ Forme commune :
 {"error":{"code":"VERSION_CONFLICT","message":"Cette ressource a changé.","details":{"current_version":3}}}
 ```
 
-Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `INVALID_HOST` (400), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `TOO_MANY_OPERATIONS` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `ACCOUNT_ALIAS_CONFLICT` (409), `ACCOUNT_FINGERPRINT_CONFLICT` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_COMMIT_IN_PROGRESS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (422), `CURSOR_STALE` (409), `CSRF_ORIGIN_REJECTED` (403), `DATABASE_BUSY` (503 réessayable), `ARCHIVE_LOCK_UNAVAILABLE` (503, commits désactivés sur le système de fichiers courant), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
+Codes contractuels : `VALIDATION_ERROR` (422), `NOT_FOUND` (404), `INVALID_HOST` (400), `UNSUPPORTED_MEDIA_TYPE` (415), `FILE_TOO_LARGE` (413), `TOO_MANY_OPERATIONS` (413), `CSV_INVALID` (422), `ACCOUNT_MAPPING_REQUIRED` (409), `ACCOUNT_ALIAS_CONFLICT` (409), `ACCOUNT_FINGERPRINT_CONFLICT` (409), `SECTION_RANGE_REQUIRED` (422), `DUPLICATE_ACCOUNT_SECTION` (422), `OUT_OF_PERIOD` (409 tant que non résolu), `MULTIPLICITY_AMBIGUOUS` (409), `IMPORT_COMMIT_IN_PROGRESS` (409), `IMPORT_PREVIEW_EXPIRED` (410), `VERSION_CONFLICT` (409), `IDEMPOTENCY_CONFLICT` (409), `CURSOR_INVALID` (422), `CURSOR_STALE` (409), `ORIGIN_NOT_ALLOWED` (403), `DATABASE_BUSY` (503 réessayable), `ARCHIVE_LOCK_UNAVAILABLE` (503, commits désactivés sur le système de fichiers courant), `RULE_DRY_RUN_STALE` (409), `CONFLICTING_DECISION` (409), `LLM_DISABLED` (409), `LLM_CONNECTION_FAILED` (502), `BACKUP_INVALID` (422), `RESTORE_PREVIEW_EXPIRED` (410), `INSUFFICIENT_COVERAGE` (422), `INTERNAL_ERROR` (500). `PROVISIONAL_DAY` est un code d'avertissement, pas un échec de requête. `details` contient uniquement champs, IDs opaques, codes de ligne et versions utiles.
 
 ### Enveloppe analytique
 
@@ -73,7 +75,6 @@ Chaque réponse analytique a `period`, `accounts`, `coverage`, `filters`, `metri
 | Méthode et chemin | Requête | Réponse |
 |---|---|---|
 | `GET /api/v1/health` | aucune | Champs obligatoires `status`, `api_version`, `storage_status`, `llm_enabled`; peut aussi renvoyer `version`, `time_utc`, `database:{status,revision}`, `offline_ready`. 200 hors ligne. |
-| `GET /api/v1/security/csrf` | bootstrap same-origin du client local | établit le cookie de session `SameSite=Strict; HttpOnly` et renvoie un jeton anti-CSRF à conserver en mémoire pour les mutations. |
 
 Exemple : `GET /api/v1/health` → 200. `storage_status` vaut `ok` si la base est migrée à la révision courante, `degraded` si elle est absente, non initialisée ou en retard, et `unavailable` si elle est illisible ou corrompue. Aucun appel réseau externe ni création de base.
 
@@ -82,9 +83,7 @@ Exemple : `GET /api/v1/health` → 200. `storage_status` vaut `ok` si la base es
 {"status":"ok","api_version":"1","storage_status":"ok","llm_enabled":false,"version":"0.1.0","time_utc":"2026-10-10T12:00:00Z","database":{"status":"ok","revision":"0001_initial"},"offline_ready":true}
 ```
 
-Le bind est loopback uniquement et les en-têtes `Host` non autorisés reçoivent l'erreur normalisée `INVALID_HOST` (400). Le lancement direct d'Uvicorn avec `--host 0.0.0.0` est déconseillé : la garde d'hôte demeure active, mais le serveur ne doit pas être exposé sur un réseau.
-
-Exemple bootstrap : `GET /api/v1/security/csrf` → `200 {"csrf_token":"<jeton-aléatoire>"}` + cookie local `SameSite=Strict; HttpOnly`; le jeton n'est pas écrit dans `localStorage`.
+Les en-têtes `Host` non autorisés reçoivent l'erreur normalisée `INVALID_HOST` (400). Le bind externe n'est pas un mode pris en charge en v1 ; le paramètre de dernier recours est décrit dans [PRIVACY.md](PRIVACY.md).
 
 ### Imports
 
@@ -149,7 +148,6 @@ Exemples synthétiques :
 ```http
 POST /api/v1/imports/preview
 Origin: http://127.0.0.1:5173
-X-CSRF-Token: <jeton local>
 Content-Type: multipart/form-data; boundary=...
 ```
 
@@ -238,19 +236,23 @@ Exemples d'écriture : `POST /api/v1/rules` avec `{"name":"Règle synthétique",
 
 | Méthode et chemin | Contrat |
 |---|---|
-| `GET /api/v1/review/queue` | filtres communs, états `unclassified`, `suggested`, `conflict`, `status`; groupes par payee/contexte, impact en cents, compteurs et curseur stable. |
-| `GET /api/v1/review/queue/{review_group_id}` | opérations et suggestions du groupe, sans appliquer de suggestion. |
-| `POST /api/v1/review/decisions` | `Idempotency-Key` obligatoire ; `{transaction_id, expected_version, action, allocations?, suggestion_id?, scope}` où scope vaut `this_transaction`, `selected_transactions` ou `future_rule`; les centimes du split doivent sommer exactement au montant. `future_rule` crée une règle distincte non approuvée tant que l'utilisateur ne l'a pas confirmée. |
-| `POST /api/v1/review/decisions/{decision_id}/undo` | `Idempotency-Key` obligatoire ; `{expected_version, reason}` ; annule l'effet analytique avec audit avant/après, sans modifier source transaction ni CSV. |
+| `GET /api/v1/review/queue` | filtres `period_start`, `period_end`, `account_id`, `direction`, `status`, `cursor`, `limit`; `Cache-Control: no-store`. Groupes par contrepartie validée et statut qualité, sinon par occurrence; tri impact décroissant puis date récente et ID stable. Le curseur HMAC est lié aux filtres et au snapshot WAL ADR-032. |
+| `GET /api/v1/review/queue/{review_group_id}` | membres avec allocations courantes, versions, historique append-only et candidats ordonnés de `evaluate_transaction`; aucune suggestion n'est appliquée. |
+| `POST /api/v1/review/decisions` | `Idempotency-Key` UUID obligatoire et corps strict. `expected_version`, `actor`, `action`, `scope`; scope `this_transaction`, `selection` (IDs + version de chaque membre) ou `future_rule`. La sélection est atomique; un conflit répond `409 REVIEW_SELECTION_CONFLICT` avec les IDs et versions courantes. Chaque allocation/split est validé au centime par le service allocations. |
+| `POST /api/v1/review/decisions/{decision_id}/undo` | `Idempotency-Key` UUID et `{expected_version, actor, confirm_human_override?}`; délègue l'annulation versionnée et vérifie les snapshots via T20, sans modifier transaction bancaire source. |
+| `POST /api/v1/review/rule-batches/{batch_id}/undo` | `Idempotency-Key` UUID; `{expected_versions: {transaction_id: version}, actor, confirm_human_override?}`; délègue l'annulation atomique du lot à T20. |
+| `POST /api/v1/review/refund-links` | `Idempotency-Key` obligatoire; `{source_transaction_id, target_transaction_id, amount_cents, actor, expected_source_version, expected_target_version}` propose un lien `refund_of`. Confirmation: `POST /refund-links/{id}/confirm` avec `{expected_version, actor}`. `DELETE /refund-links/{id}` rejette une proposition. Un lien confirmé est immuable en place par ADR-027/SQL; le DELETE répond `409 REFUND_LINK_CONFIRMED_PROTECTED`, et T21 ne l'efface pas. |
 | `POST /api/v1/review/llm-suggestions/preview` | `{transaction_ids[]}` ; aucun appel sortant. Renvoie exactement les champs et libellés caviardés qui seraient transmis, les redactions et des IDs temporaires non réversibles. |
 | `POST /api/v1/review/llm-suggestions` | `Idempotency-Key` obligatoire ; `{preview_id, expected_version, confirm_outbound:true}` ; exige opt-in LLM, nouvelle confirmation utilisateur et clé backend configurée. Le modèle ne reçoit qu'un petit lot ; réponse textuelle tolérante devient suggestions en revue seulement. |
 
-Exemple de file : `GET /api/v1/review/queue?period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life` → `{"items":[{"review_group_id":"<UUID>","priority":"high","transaction_count":1,"amount_cents":-1234,"latest_booked_on":"2026-03-12","status":"unclassified"}],"page":{"limit":50,"next_cursor":null,"snapshot_at":"2026-10-09T10:00:00Z"}}`.
+Une décision `future_rule` porte un objet `rule` explicite et lance obligatoirement `simulate_rule` avant l'enregistrement d'un brouillon `future_only`. La réponse contient le résultat de simulation et `applied:false`; aucune transaction future ou existante n'est classée par cette requête. L'approbation et toute application éventuelle restent des actes distincts.
+
+Exemple de file : `GET /api/v1/review/queue?period_start=2026-03-01&period_end=2026-03-31&account_id=<UUID>` → `{"items":[{"review_group_id":"<opaque-id>","payee_id":"<UUID>","counterparty":"Marchand synthétique","transaction_count":1,"amount_cents":-1234,"impact_cents":1234,"latest_booked_on":"2026-03-12","status":"unclassified","total_out_of_range":false}],"page":{"limit":50,"next_cursor":null,"snapshot_at":"2026-10-09T10:00:00Z"}}`.
 
 Exemple de décision exacte :
 
 ```json
-{"transaction_id":"550e8400-e29b-41d4-a716-446655440020","expected_version":1,"action":"confirm","scope":"this_transaction","allocations":[{"category_id":"groceries_organic","flow_kind":"expense","amount_cents":-1234,"beneficiary":"household","cadence":"occasional","flexibility":"variable_essential","acquisition":"unknown"}]}
+{"transaction_id":"550e8400-e29b-41d4-a716-446655440020","expected_version":1,"actor":"local_user","action":"confirm","scope":"this_transaction","allocations":[{"category_id":"groceries_organic","flow_kind":"expense","amount_cents":-1234,"beneficiary":"household","cadence":"occasional","flexibility":"variable_essential","acquisition":"unknown"}]}
 ```
 
 Réponse : `{"decision_id":"<UUID>","transaction_id":"<UUID>","status":"confirmed","allocated_cents":-1234,"residual_cents":0,"version":2,"audit_event_id":"<UUID>"}`. Une allocation en somme inexacte ou dans un `flow_kind` non admissible répond 422 sans écriture.
@@ -261,19 +263,24 @@ Exemple d'aperçu LLM sans appel sortant : `POST /api/v1/review/llm-suggestions/
 
 ### Analytique
 
-Tous les chemins suivants acceptent les filtres communs et renvoient l'enveloppe analytique décrite ci-dessus. `drilldown` exige `metric_definition_id` et réutilise les paramètres exacts du résultat d'origine.
+Tous les chemins suivants acceptent `period_start`, `period_end`, un ou plusieurs `account_ids`, et les filtres facultatifs `category_ids`, `flow_kind` (paramètre répétable), `mode`, `personal_mode` et `commitment_transaction_ids` (UUID répétables). La v1 rejette les dates hors 2026 par une erreur `VALIDATION_ERROR`/422. L'horloge du serveur fixe `period.as_of` et le mois courant reste `partial`. Toute réponse analytique porte `Cache-Control: no-store`; les montants sont en centimes entiers et les valeurs hors plage JavaScript sont marquées selon ADR-032. `drilldown` exige `metric_definition_id` et réutilise les paramètres exacts du résultat d'origine.
 
 | Méthode et chemin | Charge utile spécifique |
 |---|---|
-| `GET /api/v1/analytics/overview` | enveloppe primaire `bank_net_flow.v1`; métriques KPI individuelles et URL de drilldown, toutes avec IDs canoniques de `METRICS.md`. |
-| `GET /api/v1/analytics/cashflow` | `bank_net_flow.v1`; sommes `by_flow_kind[]`, crédits, débits, inconnus. Le total est la somme bancaire signée. |
-| `GET /api/v1/analytics/spending-hierarchy` | `consumption_net.v1`; arbre de dépenses confirmées, liens `refund_of` confirmés appliqués à la date de l'avoir, résidus à part. |
-| `GET /api/v1/analytics/series` | `metric_definition_id` demandé parmi ceux de `METRICS.md`; bucket `day`, `week` ou `month`, chaque point garde `raw_cents`/état de couverture. |
-| `GET /api/v1/analytics/merchants` | groupement par payee de `consumption_net.v1`; opération_count, cents et drilldown reprennent le même périmètre. |
-| `GET /api/v1/analytics/family` | enveloppe primaire `consumption_net.v1`; consommation, `personal_allowances.v1`, enfants/garde et remboursements liés présentés avec leurs IDs canoniques. |
-| `GET /api/v1/analytics/savings` | `savings_net_transferred.v1`; jambes identifiées côté compte courant, paires et engagements explicitement choisis. |
+| `GET /api/v1/analytics/overview` | enveloppe primaire `bank_net_flow.v1`; `metrics[]` (une entrée par métrique KPI avec son ID canonique, sa `definition` et son `drilldown`) et `monthly_deltas[]` (`monthly_delta.v1` par métrique de base : `status`, `unavailable_reason` parmi `previous_period_not_available`, `period_not_complete`, `previous_period_not_complete`, `commitments_not_comparable`, `metric_unavailable`, valeur précédente `previous_raw_cents`/`previous_raw_basis_points`). |
+| `GET /api/v1/analytics/cashflow` | `bank_net_flow.v1`; sommes `by_flow_kind[]` (allocations actives par flux + clé `unknown` pour le résidu), `credits_cents`, `debits_cents`, `loan_breakdown`, `pending`. Le total est la somme bancaire signée; couverture inconnue → `raw_cents`, crédits, débits et flux à `null`. |
+| `GET /api/v1/analytics/spending-hierarchy` | `consumption_net.v1`; `items[]` plat par catégorie (dépense brute, remboursements liés, net) et `tree[]` catégorie → sous-catégories avec sous-totaux; `item_sum_cents` et la somme des racines de `tree` égalent `raw_cents`. Liens `refund_of` confirmés appliqués à la date de l'avoir, résidus à part. |
+| `GET /api/v1/analytics/income` | `regular_income.v1` comme salaire/revenu régulier ; détail séparé des autres revenus, prêts reçus, transferts détenus, retours d'épargne, remboursements et crédits résiduels. Aucun libellé bancaire n'est inclus. |
+| `GET /api/v1/analytics/series` | `metric_definition_id` parmi les métriques de `overview.metrics` (pas `monthly_delta.v1`); bucket `day`, `week` ou `month` (semaines ISO tronquées à la période). Chaque point porte `period_start`, `period_end`, la valeur (`raw_cents`, `raw_basis_points` ou `state_value`), `completeness`, `operation_count`, `provisional_operation_count` et `unavailable_reason`. La somme des points d'une métrique additive égale la valeur de la période. |
+| `GET /api/v1/analytics/merchants` | groupement par payee de `consumption_net.v1` (jamais de libellé); `operation_count`, `amount_cents`, `item_sum_cents` égal à `raw_cents`. |
+| `GET /api/v1/analytics/family` | enveloppe primaire `consumption_net.v1`; `items[]` par bénéficiaire (`gross_expense_cents`, `linked_refunds_cents`, `consumption_net_cents`, `personal_allowances_cents`); `item_sum_cents` égale `raw_cents` et `personal_allowances_sum_cents` égale `personal_allowances.v1`. Le remboursement suit le bénéficiaire de l'allocation d'achat visée. |
+| `GET /api/v1/analytics/savings` | `savings_net_transferred.v1`; `by_category[]` (jambes du compte courant seulement; `by_category_sum_cents` égale `raw_cents`), `transfer_pairs`, `selected_commitments`. |
 | `GET /api/v1/analytics/data-quality` | `unclassified_amount_share.v1`, `operation_coverage.v1`, résidu absolu et signé, mois/couverture. |
 | `GET /api/v1/analytics/drilldown` | `metric_definition_id` canonique, mêmes filtres, curseur ; transactions exactes utilisées et somme recalculée. |
+
+Le drilldown est paginé par date comptable et ID transaction dans un snapshot SQLite en lecture seule. Le curseur signé expire avec le snapshot et est lié aux filtres, à la métrique, à la limite et au choix des libellés. Chaque ligne donne `transaction_id`, `active_allocation_ids` et, lorsqu'un remboursement intervient, les IDs du lien et de l'allocation cible. `include_labels=true` est le seul chemin analytique qui expose `raw_label`; la valeur par défaut est `false`. Une page donne les contributions; `detail_summary` vérifie le total complet au centime ou en basis points : `reconciles` vaut `true` si la valeur agrégée égale la recomposition des lignes, `null` si l'agrégat est lui-même indisponible (jamais `false` pour une indisponibilité). `monthly_delta.v1` n'a pas de drilldown additif propre; demander le drilldown de sa métrique de base.
+
+Protection des entiers : tout champ `*_cents` ou `*_basis_points` dont la valeur dépasse `2^53 − 1` est envoyé à `null` et l'objet qui le contenait porte `total_out_of_range: true`; la racine de chaque réponse analytique porte aussi `total_out_of_range` (booléen). La valeur n'est jamais arrondie ni convertie.
 
 Exemple Overview : `GET /api/v1/analytics/overview?period_start=2026-03-01&period_end=2026-03-31&account_ids=<UUID>&mode=family_life&personal_mode=envelope&flow_kind=unknown` → réponse standard avec `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:-1200` et `metrics:[{"metric_definition_id":"bank_net_flow.v1","raw_cents":-1200,"unit":"EUR-cent"},{"metric_definition_id":"regular_income.v1","raw_cents":5000,"unit":"EUR-cent"}]`. Le filtre `unknown` cible le résidu non nul ; aucun ID de métrique financière n'est inventé pour le regroupement de cartes.
 
@@ -283,6 +290,7 @@ Autres réponses analytiques synthétiques (elles reprennent toutes la même env
 
 - `GET /analytics/cashflow` → `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:-1200`, `by_flow_kind:[{"flow_kind":"expense","raw_cents":-1234},{"flow_kind":"refund","raw_cents":34}]`.
 - `GET /analytics/spending-hierarchy` → `metric_definition_id:"consumption_net.v1"`, `raw_cents:1200`, `items:[{"category_id":"groceries_organic","raw_cents":1200,"transaction_ids":["<UUID_ACHAT>","<UUID_AVOIR>"]}]`; les deux IDs sont l'achat et l'avoir lié montrés dans le drilldown.
+- `GET /analytics/income` → `metric_definition_id:"regular_income.v1"`, `raw_cents:5000`, `loan_disbursement_cents:500000`, `other_income_cents:0`, `bank_credits_cents:505000`.
 - `GET /analytics/series?metric_definition_id=bank_net_flow.v1&bucket=month` → `metric_definition_id:"bank_net_flow.v1"`, `raw_cents:null` pour l'enveloppe de série, `series:[{"period_start":"2026-03-01","period_end":"2026-03-31","raw_cents":-1200,"completeness":"complete"}]`.
 - `GET /analytics/merchants` → `metric_definition_id:"consumption_net.v1"`, `raw_cents:1200`, `items:[{"payee_id":"<UUID>","operation_count":1,"amount_cents":1200}]`.
 - `GET /analytics/family` → `metric_definition_id:"consumption_net.v1"`, `raw_cents:1200`, `metrics:[{"metric_definition_id":"consumption_net.v1","raw_cents":1200},{"metric_definition_id":"personal_allowances.v1","raw_cents":0}]`, `linked_refunds_cents:34`.

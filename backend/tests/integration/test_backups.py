@@ -25,6 +25,7 @@ from app.db.session import session_scope
 from app.main import create_app
 from app.services import backups
 from app.services.allocations import AllocationPart, allocate
+from app.services.import_archive import ImportArchive
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 ROOT = Path(__file__).resolve().parents[3]
@@ -1061,6 +1062,28 @@ def test_OPS_02_restore_refuses_non_uuid_bin_original_files(tmp_path: Path) -> N
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("unexpected_kind", ["file", "directory"])
+def test_OPS_01_backup_refuses_unexpected_originals_entries(
+    tmp_path: Path, unexpected_kind: str
+) -> None:
+    app, database, data_dir = _ready_app(tmp_path, f"unexpected-originals-{unexpected_kind}")
+    _import_fixture(app, classify=False)
+    originals = data_dir / "originals"
+    unexpected = originals / "notes-synthetiques.txt"
+    if unexpected_kind == "directory":
+        unexpected.mkdir()
+    else:
+        unexpected.write_text("synthetic", encoding="utf-8")
+    destination = tmp_path / f"unexpected-originals-{unexpected_kind}.cfbackup"
+
+    with pytest.raises(backups.BackupError, match="archives d'import"):
+        backups.create_backup(database, data_dir, destination, retention_count=None)
+
+    assert unexpected.exists()
+    assert not destination.exists()
+
+
+@pytest.mark.integration
 def test_OPS_02_restore_refuses_target_held_by_another_writer(tmp_path: Path) -> None:
     source_app, source_database, source_data = _ready_app(tmp_path, "busy-source")
     _import_fixture(source_app, classify=False)
@@ -1092,6 +1115,94 @@ def test_OPS_02_restore_refuses_target_held_by_another_writer(tmp_path: Path) ->
     assert (tmp_path / "busy-target" / "current").resolve() == active_generation
     assert after["import_files"] == before["import_files"]
     assert after["app_settings"] != before["app_settings"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("held_lifecycle", ["commit", "purge"])
+def test_OPS_02_restore_shares_import_archive_lifecycle_lock(
+    tmp_path: Path, held_lifecycle: str
+) -> None:
+    source_app, source_database, source_data = _ready_app(tmp_path, "lifecycle-source")
+    _import_fixture(source_app, classify=False)
+    backup_path = tmp_path / "lifecycle-source.cfbackup"
+    backups.create_backup(source_database, source_data, backup_path, retention_count=None)
+
+    target_app, target_database, target_data = _ready_generation_app(
+        tmp_path, f"lifecycle-target-{held_lifecycle}"
+    )
+    _import_fixture(target_app, classify=False)
+    before = _table_snapshot(target_database)
+    target_root = tmp_path / f"lifecycle-target-{held_lifecycle}"
+    active_generation = (target_root / "current").resolve()
+    generation_entries_before = {entry.name for entry in (target_root / "generations").iterdir()}
+    archive_store = ImportArchive(target_data)
+    if held_lifecycle == "commit":
+        descriptor = archive_store.acquire_commit_reservation()
+    else:
+        descriptor = archive_store._open_lifecycle_lock()
+        backups.fcntl.flock(descriptor, backups.fcntl.LOCK_EX | backups.fcntl.LOCK_NB)
+
+    expected_lock = backups._archive_lifecycle_lock_path(target_data / "originals")
+    try:
+        expected_stat = expected_lock.stat()
+        descriptor_stat = os.fstat(descriptor)
+        assert (descriptor_stat.st_dev, descriptor_stat.st_ino) == (
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+        )
+        with pytest.raises(backups.BackupError, match="importation ou purge.*refusée"):
+            backups.restore_backup(
+                backup_path,
+                target_database,
+                target_data,
+                active_database_path=source_database,
+                active_data_dir=source_data,
+            )
+    finally:
+        if held_lifecycle == "commit":
+            archive_store.release_commit_reservation(descriptor)
+        else:
+            backups.fcntl.flock(descriptor, backups.fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    assert (target_root / "current").resolve() == active_generation
+    assert _table_snapshot(target_database) == before
+    assert {entry.name for entry in (target_root / "generations").iterdir()} == (
+        generation_entries_before
+    )
+
+
+@pytest.mark.integration
+def test_OPS_02_restore_ignores_orphan_archive_temporary(tmp_path: Path) -> None:
+    source_app, source_database, source_data = _ready_app(tmp_path, "orphan-temp-source")
+    _import_fixture(source_app, classify=False)
+    orphan = source_data / "originals" / f".{uuid4()}.tmp"
+    orphan.write_bytes(b"synthetic partial import")
+    backup_path = tmp_path / "orphan-temp-source.cfbackup"
+    backups.create_backup(source_database, source_data, backup_path, retention_count=None)
+    with zipfile.ZipFile(backup_path) as archive:
+        members = set(archive.namelist())
+    assert f"originals/{orphan.name}" not in members
+
+    target_app, target_database, target_data = _ready_generation_app(tmp_path, "orphan-temp-target")
+    del target_app
+    old_generation = (tmp_path / "orphan-temp-target" / "current").resolve()
+    orphan_name = f".{uuid4()}.tmp"
+    target_orphan = target_data / "originals" / orphan_name
+    target_orphan.parent.mkdir(parents=True, mode=0o700)
+    target_orphan.write_bytes(b"synthetic orphan")
+    old_orphan = old_generation / "data" / "originals" / orphan_name
+    restored = backups.restore_backup(
+        backup_path,
+        target_database,
+        target_data,
+        active_database_path=source_database,
+        active_data_dir=source_data,
+    )
+    assert restored.target_database == target_database
+    assert (tmp_path / "orphan-temp-target" / "current").resolve() != old_generation
+    assert not target_orphan.exists()
+    assert old_orphan.exists()
 
 
 @pytest.mark.integration
