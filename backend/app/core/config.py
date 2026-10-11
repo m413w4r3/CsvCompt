@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     app_port: int = Field(default=DEFAULT_BIND_PORT, ge=1, le=65535)
     allow_non_loopback: bool = False
     cors_allowed_origins: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_ORIGINS))
+    frontend_dist_dir: Path | None = Field(default=None, repr=False)
+    enable_api_docs: bool = False
     database_url: str = Field(default="sqlite:///./data/db/comptes.sqlite", repr=False)
     llm_enabled: bool = False
     llm_base_url: str | None = Field(default=None, repr=False)
@@ -77,6 +79,14 @@ class Settings(BaseSettings):
     @field_validator("data_dir", mode="before")
     @classmethod
     def anchor_data_dir(cls, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+    @field_validator("frontend_dist_dir", mode="before")
+    @classmethod
+    def anchor_frontend_dist_dir(cls, value: str | Path | None) -> Path | None:
+        if value is None:
+            return None
         path = Path(value).expanduser()
         return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 

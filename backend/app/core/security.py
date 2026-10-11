@@ -21,6 +21,11 @@ DEFAULT_ALLOWED_ORIGINS = (
 _MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 _CORS_METHODS = frozenset({"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"})
 _CORS_HEADERS = frozenset({"content-type", "idempotency-key"})
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'; object-src 'none'"
+)
 
 
 def normalize_origin(value: str, *, allow_path: bool = False) -> str | None:
@@ -81,7 +86,7 @@ class LocalSecurityMiddleware:
 
     def _host_is_allowed(self, host_header: str | None) -> bool:
         parsed = parse_host_header(host_header)
-        if parsed is None or parsed.host.lower() not in self.allowed_hosts:
+        if parsed is None or parsed.host.strip("[]").lower() not in self.allowed_hosts:
             return False
         return parsed.port is None or parsed.port in {str(port) for port in self.allowed_ports}
 
@@ -121,8 +126,7 @@ class LocalSecurityMiddleware:
                 set_header("X-Content-Type-Options", "nosniff")
                 set_header("Referrer-Policy", "no-referrer")
                 set_header("X-Frame-Options", "DENY")
-                if scope.get("path", "").startswith("/api/"):
-                    set_header("Cache-Control", "no-store")
+                set_header("Cache-Control", "no-store")
                 content_type = next(
                     (
                         value.decode("latin-1").lower()
@@ -132,13 +136,7 @@ class LocalSecurityMiddleware:
                     "",
                 )
                 if content_type.startswith("text/html"):
-                    set_header(
-                        "Content-Security-Policy",
-                        "default-src 'none'; script-src 'self'; style-src 'self'; "
-                        "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
-                        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
-                        "object-src 'none'",
-                    )
+                    set_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
                 if request_origin is not None:
                     set_header("Access-Control-Allow-Origin", request_origin)
                     vary = next(

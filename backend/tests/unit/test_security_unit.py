@@ -62,6 +62,23 @@ def test_SEC_01_server_binds_to_loopback_by_default(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.unit
+def test_SEC_01_non_loopback_opt_in_logs_a_safe_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(app_host="0.0.0.0", allow_non_loopback=True, _env_file=None)
+    warnings: list[str] = []
+    monkeypatch.setattr(backend_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(backend_main.uvicorn, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend_main.logger, "warning", warnings.append)
+
+    backend_main.main()
+
+    assert len(warnings) == 1
+    assert "bind externe n'est pas supporté en v1" in warnings[0]
+    assert "0.0.0.0" not in warnings[0]
+
+
+@pytest.mark.unit
 def test_SEC_02_cors_rejects_wildcard_and_external_origins() -> None:
     for origins in ([], ["*"], ["https://example.invalid"], ["http://127.0.0.1:5173/path"]):
         with pytest.raises(ValidationError):
@@ -137,3 +154,28 @@ def test_SEC_02_missing_mutation_source_is_not_trusted() -> None:
     )
     headers = Headers(raw=[(b"host", b"127.0.0.1:9513")])
     assert middleware._source_origin(headers) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("host", "allowed"),
+    [
+        ("[::1]:9513", True),
+        ("[::1]", True),
+        ("LOCALHOST:9513", True),
+        ("localhost.:9513", False),
+        ("127.0.0.1.evil.com:9513", False),
+        ("user@localhost:9513", False),
+        ("localhost:9999", False),
+    ],
+)
+def test_SEC_01_allowed_host_parser_normalizes_ipv6_and_rejects_host_confusion(
+    host: str, allowed: bool
+) -> None:
+    middleware = LocalSecurityMiddleware(
+        app=lambda _scope, _receive, _send: None,
+        allowed_origins=DEFAULT_ALLOWED_ORIGINS,
+        bind_host="127.0.0.1",
+        bind_port=9513,
+    )
+    assert middleware._host_is_allowed(host) is allowed

@@ -8,12 +8,16 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from sqlalchemy.exc import OperationalError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.accounts import router as accounts_router
+from app.api.v1.analytics import router as analytics_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.health import router as health_router
 from app.api.v1.imports import router as imports_router
+from app.api.v1.review import router as review_router
 from app.api.v1.transactions import router as transactions_router
 from app.core.config import Settings, get_settings
 from app.core.errors import InternalErrorBoundary, install_error_handlers
@@ -108,8 +112,21 @@ def create_app(
                         application.state.db_engine.dispose()
 
     application = FastAPI(
-        title="Comptes familiaux API", version=active_settings.version, lifespan=lifespan
+        title="Comptes familiaux API",
+        version=active_settings.version,
+        lifespan=lifespan,
+        docs_url="/docs" if active_settings.enable_api_docs else None,
+        redoc_url="/redoc" if active_settings.enable_api_docs else None,
+        openapi_url="/openapi.json" if active_settings.enable_api_docs else None,
     )
+
+    @application.middleware("http")
+    async def disable_analytics_caching(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/v1/analytics/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     application.state.settings = active_settings
     application.state.clock = clock or (lambda: datetime.now(UTC))
     application.state.db_engine = create_sqlite_engine(active_settings.database_url)
@@ -136,6 +153,33 @@ def create_app(
     application.include_router(categories_router, prefix="/api/v1")
     application.include_router(accounts_router, prefix="/api/v1")
     application.include_router(transactions_router, prefix="/api/v1")
+    application.include_router(analytics_router, prefix="/api/v1")
+    application.include_router(review_router, prefix="/api/v1")
 
-    # Point d'extension documenté pour servir ultérieurement le build frontend statique.
+    if active_settings.frontend_dist_dir is not None:
+        frontend_root = active_settings.frontend_dist_dir.resolve()
+        index_path = (frontend_root / "index.html").resolve()
+        if not index_path.is_relative_to(frontend_root) or not index_path.is_file():
+            raise ValueError("FRONTEND_DIST_DIR doit contenir index.html")
+
+        def frontend_file(asset_path: str = "") -> FileResponse:
+            # Keep API misses as API 404s and never expose a directory listing.
+            if asset_path == "api" or asset_path.startswith("api/"):
+                raise StarletteHTTPException(status_code=404)
+            if asset_path in {"docs", "redoc", "openapi.json"}:
+                raise StarletteHTTPException(status_code=404)
+            candidate = (frontend_root / asset_path).resolve()
+            if not candidate.is_relative_to(frontend_root):
+                raise StarletteHTTPException(status_code=404)
+            if candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(index_path)
+
+        application.add_api_route(
+            "/", frontend_file, methods=["GET", "HEAD"], include_in_schema=False
+        )
+        application.add_api_route(
+            "/{asset_path:path}", frontend_file, methods=["GET", "HEAD"], include_in_schema=False
+        )
+
     return application

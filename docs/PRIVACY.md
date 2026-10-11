@@ -6,6 +6,19 @@ frontend écoute sur `127.0.0.1:5173`. L'API refuse les en-têtes `Host` inconnu
 les mutations sans origine locale approuvée et les origines CORS qui ne figurent
 pas dans sa configuration. Les réponses de l'API ne sont pas mises en cache.
 
+Le build frontend configuré par `FRONTEND_DIST_DIR` est servi par FastAPI ; sans
+ce réglage, le backend ne sert pas de page frontend. Le serveur Vite de
+développement et `vite preview` reçoivent les mêmes en-têtes de sécurité. Les
+pages HTML reçoivent cette CSP :
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self';
+frame-ancestors 'none'; object-src 'none'`. Les en-têtes
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` et
+`X-Frame-Options: DENY` sont aussi posés. Les réponses HTTP ont
+`Cache-Control: no-store` sur les réponses servies par FastAPI. L'API OpenAPI et ses interfaces `/docs`, `/redoc` et
+`/openapi.json` sont désactivées par défaut ; le réglage explicite
+`ENABLE_API_DOCS=true` les active pour le développement local.
+
 ## Données qui restent sur l'ordinateur
 
 Sans activation volontaire du modèle de langage, aucun relevé, libellé,
@@ -38,6 +51,12 @@ par la configuration (`DATABASE_URL` et `DATA_DIR`) ; vérifiez ces chemins avan
 de supprimer les données. Les opérations, décisions et audits n'expirent pas
 automatiquement. Les fichiers CSV que vous avez téléchargés restent également
 à l'emplacement choisi par votre navigateur ou votre système.
+
+Les enregistrements d'idempotence sont conservés 7 jours glissants dans la base,
+puis purgés au démarrage. Le répertoire d'aperçus est `DATA_DIR/import-previews`
+par défaut et peut être déplacé avec `PREVIEW_DIR` ; ces aperçus expirent après
+30 minutes. Si `PREVIEW_DIR` est défini hors de `DATA_DIR`, il faut le supprimer
+séparément.
 
 `rules.scope_json` contient le motif de règle et sa raison. Ce sont des données
 utilisateur fonctionnelles, de la même classe de confidentialité que les
@@ -85,6 +104,11 @@ les sauvegardes :
 rm -rf data
 ```
 
+Si `DATABASE_URL`, `DATA_DIR` ou `PREVIEW_DIR` pointent ailleurs, supprimez aussi
+la base SQLite correspondante, les répertoires de données et d'aperçus ainsi que
+leurs sauvegardes. Cela efface également les enregistrements d'idempotence,
+stockés dans la base. Vérifiez les valeurs effectives avant la suppression.
+
 Supprimez aussi `.env` si vous souhaitez effacer la clé fournisseur enregistrée
 localement. Effacez séparément toute base, tout dossier de données, export,
 sauvegarde `.cfbackup`, sauvegarde de sécurité de restauration ou CSV que vous
@@ -107,9 +131,16 @@ bancaires dans un message de log.
 
 ## Réseau local
 
-Le bind non loopback est refusé par défaut. `ALLOW_NON_LOOPBACK=true` permet de
-le contourner : ne l'activez que pour un besoin explicite et sur un réseau
-contrôlé, car cela peut rendre l'API joignable depuis d'autres machines.
+Le seul mode d'usage supporté en v1 est loopback. Le bind non loopback est refusé
+par défaut. `ALLOW_NON_LOOPBACK=true` reste un réglage de dernier recours, et le
+démarrage émet un avertissement. Il n'active pas une authentification : CORS et
+le contrôle CSRF par `Origin`/`Referer` ne protègent pas contre un client réseau
+direct. N'utilisez pas ce réglage sans une protection réseau externe adaptée.
 `CORS_ALLOWED_ORIGINS` accepte une liste JSON d'origines HTTP(S) loopback, par
 exemple `["http://127.0.0.1:5173"]` ; les origines wildcard et les domaines
 externes sont refusés.
+
+Pour les mutations, le backend valide `Origin` et utilise `Referer` seulement
+si `Origin` est absent. `Origin: null`, une origine externe ou l'absence des
+deux en-têtes sont refusés. Les clients non navigateurs doivent envoyer un
+`Origin` loopback autorisé ; cette validation n'est pas une authentification.

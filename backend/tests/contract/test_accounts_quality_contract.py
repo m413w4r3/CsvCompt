@@ -15,6 +15,7 @@ def test_accounts_quality_routes_have_typed_read_only_contracts(tmp_path: Path) 
     settings = Settings(
         database_url=f"sqlite:///{database}",
         data_dir=tmp_path / "accounts-contract-data",
+        enable_api_docs=True,
         _env_file=None,
     )
     upgrade_to_head(settings)

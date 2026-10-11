@@ -4,10 +4,11 @@ import errno
 import logging
 import socket
 from ipaddress import ip_address
+from pathlib import Path
 
 import pytest
 from fastapi import Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -64,6 +65,40 @@ def test_SEC_02_hostile_origin_is_rejected_for_mutations(client, method: str) ->
 
 
 @pytest.mark.integration
+def test_SEC_02_origin_null_is_rejected_for_mutations(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/imports/preview",
+        headers={"Origin": "null"},
+        files={"file": ("synthetic.csv", b"synthetic", "text/csv")},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ORIGIN_NOT_ALLOWED"
+
+
+@pytest.mark.integration
+def test_SEC_02_text_plain_post_with_hostile_origin_does_not_change_preview_state(
+    test_settings: Settings,
+) -> None:
+    app = create_app(test_settings)
+    preview_dir = test_settings.effective_preview_dir
+
+    def preview_files() -> set[Path]:
+        return set(preview_dir.iterdir()) if preview_dir.exists() else set()
+
+    with TestClient(app) as client:
+        before = preview_files()
+        response = client.post(
+            "/api/v1/imports/preview",
+            headers={"Origin": "https://attacker.invalid", "Content-Type": "text/plain"},
+            content="synthetic non-simple request",
+        )
+        after = preview_files()
+
+    assert response.status_code == 403
+    assert before == after
+
+
+@pytest.mark.integration
 def test_SEC_02_local_referer_is_used_when_origin_is_absent(client) -> None:
     response = client.post(
         "/api/v1/imports/preview",
@@ -117,6 +152,106 @@ def test_SEC_02_api_security_headers_and_html_csp(test_settings: Settings) -> No
     assert api_response.headers["cache-control"] == "no-store"
     assert "default-src 'none'" in html_response.headers["content-security-policy"]
     assert "connect-src 'self'" in html_response.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in html_response.headers["content-security-policy"]
+
+
+@pytest.mark.integration
+def test_SEC_02_frontend_build_is_served_with_security_headers_and_safe_spa_fallback(
+    test_settings: Settings, tmp_path
+) -> None:
+    dist = tmp_path / "frontend-dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    index = '<!doctype html><html><script type="module" src="/assets/app.js"></script></html>'
+    (dist / "index.html").write_text(index, encoding="utf-8")
+    (assets / "app.js").write_text("console.log('synthetic build')", encoding="utf-8")
+    outside_file = tmp_path / "outside-static-root.txt"
+    outside_file.write_text("synthetic outside content", encoding="utf-8")
+    (assets / "outside.txt").symlink_to(outside_file)
+    settings = test_settings.model_copy(update={"frontend_dist_dir": dist})
+
+    with TestClient(create_app(settings)) as client:
+        root = client.get("/")
+        asset = client.get("/assets/app.js")
+        spa_route = client.get("/review/queue")
+        directory = client.get("/assets")
+        api_miss = client.get("/api/v1/not-a-route")
+        traversal = client.get("/assets/outside.txt")
+        docs_miss = client.get("/docs")
+
+    for response in (root, asset, spa_route, directory):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["cache-control"] == "no-store"
+    assert root.status_code == 200
+    assert root.text == index
+    assert "connect-src 'self'" in root.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in root.headers["content-security-policy"]
+    assert asset.status_code == 200
+    assert asset.text == "console.log('synthetic build')"
+    assert spa_route.text == index
+    assert directory.text == index
+    assert api_miss.status_code == 404
+    assert traversal.status_code == 404
+    assert "synthetic outside content" not in traversal.text
+    assert docs_miss.status_code == 404
+
+
+@pytest.mark.integration
+def test_SEC_02_frontend_index_symlink_cannot_escape_dist(
+    test_settings: Settings, tmp_path
+) -> None:
+    dist = tmp_path / "frontend-dist"
+    dist.mkdir()
+    outside_index = tmp_path / "outside-index.html"
+    outside_index.write_text("synthetic outside content", encoding="utf-8")
+    (dist / "index.html").symlink_to(outside_index)
+    settings = test_settings.model_copy(update={"frontend_dist_dir": dist})
+
+    with pytest.raises(ValueError, match="FRONTEND_DIST_DIR"):
+        create_app(settings)
+
+
+@pytest.mark.integration
+def test_SEC_04_api_docs_are_disabled_by_default_and_opt_in(test_settings: Settings) -> None:
+    with TestClient(create_app(test_settings)) as client:
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+    enabled = test_settings.model_copy(update={"enable_api_docs": True})
+    with TestClient(create_app(enabled)) as client:
+        assert client.get("/docs").status_code == 200
+        assert client.get("/redoc").status_code == 200
+        assert client.get("/openapi.json").status_code == 200
+
+
+@pytest.mark.integration
+def test_SEC_02_no_store_covers_api_errors_and_not_modified_responses(
+    test_settings: Settings,
+) -> None:
+    app = create_app(test_settings)
+
+    @app.get("/api/v1/security-test-not-modified")
+    def not_modified() -> Response:
+        return Response(status_code=304)
+
+    @app.get("/api/v1/security-test-server-error")
+    def server_error() -> Response:
+        return Response(status_code=500)
+
+    with TestClient(app) as client:
+        not_found = client.get("/api/v1/not-a-route")
+        error = client.get("/api/v1/security-test-server-error")
+        not_modified_response = client.get("/api/v1/security-test-not-modified")
+
+    assert not_found.status_code == 404
+    assert error.status_code == 500
+    assert not_modified_response.status_code == 304
+    assert all(
+        response.headers["cache-control"] == "no-store"
+        for response in (not_found, error, not_modified_response)
+    )
 
 
 @pytest.mark.integration
@@ -134,7 +269,7 @@ def test_SEC_04_health_openapi_and_internal_error_do_not_disclose_secrets_or_pat
     )
     assert fake_secret not in repr(settings)
     assert private_path not in repr(settings)
-    app = create_app(settings)
+    app = create_app(settings.model_copy(update={"enable_api_docs": True}))
 
     def raise_synthetic_error(_request: Request):
         raise RuntimeError(f"{fake_secret} {fake_iban} {private_path}")
@@ -195,7 +330,20 @@ def test_SEC_05_llm_disabled_import_and_transaction_reads_make_no_external_calls
         return errno.EACCES
 
     monkeypatch.setattr(socket.socket, "connect", block_external_connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", block_external_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", block_external_connect_ex)
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def block_external_dns(host, *args, **kwargs):
+        if host is None:
+            return original_getaddrinfo(host, *args, **kwargs)
+        _hostname, is_loopback = is_loopback_address(host)
+        if not is_loopback:
+            attempted_external_hosts.append(str(host))
+            raise socket.gaierror(socket.EAI_NONAME, "external DNS disabled in SEC-05 test")
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", block_external_dns)
     transactions = client.get("/api/v1/transactions")
     preview = client.post(
         "/api/v1/imports/preview",
